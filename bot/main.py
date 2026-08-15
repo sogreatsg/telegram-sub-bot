@@ -1,0 +1,130 @@
+import asyncio
+import logging
+import sys
+from datetime import datetime, timezone, timedelta
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
+
+from bot.config import get_settings
+from bot.services.database import init_db, close_db
+from bot.services.scheduler import setup_scheduler
+from bot.handlers import (
+    user_menu_router,
+    payment_router,
+    admin_router,
+    channel_events_router,
+)
+
+BANGKOK_TZ = timezone(timedelta(hours=7))
+
+
+class ThaiTimeFormatter(logging.Formatter):
+    """Custom logging formatter แสดงผลเวลาใน Log เป็นเวลาไทย (UTC+7) เสมอ"""
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=BANGKOK_TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def setup_logging(log_level: str = "INFO") -> None:
+    """กำหนดรูปแบบ Logging ภาษาไทยและเวลาไทย (UTC+7)"""
+    if sys.platform == "win32":
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8")
+            if hasattr(sys.stderr, "reconfigure"):
+                sys.stderr.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = ThaiTimeFormatter(
+        fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+    root_logger.handlers = [handler]
+
+    # Suppress overly chatty library loggers
+    logging.getLogger("aiosqlite").setLevel(logging.WARNING)
+    logging.getLogger("apscheduler").setLevel(logging.INFO)
+
+
+async def main() -> None:
+    """Application entry point."""
+    config = get_settings()
+    setup_logging(config.LOG_LEVEL)
+    logger = logging.getLogger("bot.main")
+
+    logger.info("Starting Telegram Membership Bot (Thai Timezone UTC+7)...")
+
+    # 1. Initialize Database & WAL mode
+    await init_db()
+
+    # 2. Initialize Bot and Dispatcher with HTML parse mode
+    bot = Bot(
+        token=config.BOT_TOKEN,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    dp = Dispatcher(storage=MemoryStorage())
+
+    # 3. Register Handler Routers
+    dp.include_router(user_menu_router)
+    dp.include_router(payment_router)
+    dp.include_router(admin_router)
+    dp.include_router(channel_events_router)
+
+    # 4. Initialize & Start APScheduler
+    scheduler = setup_scheduler(bot)
+    scheduler.start()
+    logger.info("Background Expiry Scheduler started (Thai Timezone UTC+7).")
+
+    # 5. Fetch bot metadata
+    try:
+        bot_user = await bot.get_me()
+        logger.info(f"Connected to Telegram Bot API as @{bot_user.username} (ID: {bot_user.id})")
+        logger.info(f"Target Channel ID: {config.CHANNEL_ID}")
+        logger.info(f"Admin Group ID: {config.ADMIN_GROUP_ID}")
+
+        # Delete any pending webhook if previously configured
+        await bot.delete_webhook(drop_pending_updates=False)
+
+        # 6. Start Polling with required allowed_updates
+        allowed_updates = [
+            "message",
+            "callback_query",
+            "chat_member",
+            "my_chat_member",
+        ]
+        logger.info(f"Starting long polling with allowed_updates: {allowed_updates}")
+
+        await dp.start_polling(
+            bot,
+            allowed_updates=allowed_updates,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot execution interrupted by user or system signal.")
+    except Exception as e:
+        logger.critical(f"Fatal exception in main loop: {e}", exc_info=True)
+    finally:
+        logger.info("Commencing graceful shutdown...")
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+            logger.info("Scheduler shutdown.")
+        await bot.session.close()
+        logger.info("Bot HTTP session closed.")
+        await close_db()
+        logger.info("Database pool closed. Shutdown complete.")
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass

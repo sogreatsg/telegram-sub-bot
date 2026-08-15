@@ -1,0 +1,408 @@
+import logging
+import html
+from datetime import datetime, timezone, timedelta
+from aiogram import Router, F, Bot
+from aiogram.filters import CommandStart, Command
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from sqlalchemy import select
+
+from bot.config import get_settings
+from bot.models.schema import User, Subscription, SubStatus, PlanType
+from bot.services.database import get_session, get_or_create_user
+
+logger = logging.getLogger(__name__)
+config = get_settings()
+router = Router(name="user_menu")
+
+BANGKOK_TZ = timezone(timedelta(hours=7))
+
+
+def format_thai_datetime(dt: datetime) -> str:
+    """แปลงเวลาเป็นเวลาไทย (UTC+7) รูปแบบ วัน/เดือน/ปี ชั่วโมง:นาที:วินาที"""
+    if dt is None:
+        return "-"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    thai_dt = dt.astimezone(BANGKOK_TZ)
+    return thai_dt.strftime("%d/%m/%Y %H:%M:%S")
+
+
+def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup:
+    """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard"""
+    trial_button_text = "⏱️ ทดลองใช้ฟรี 15 นาที" if trial_available else "⏱️ ทดลองฟรี (ใช้สิทธิ์แล้ว)"
+    
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                text=trial_button_text,
+                callback_data="menu:trial",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="💳 สมัครสมาชิก VIP 30 วัน",
+                callback_data="menu:subscribe_30d",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📊 สถานะสมาชิกของฉัน",
+                callback_data="menu:my_status",
+            ),
+            InlineKeyboardButton(
+                text="❓ วิธีใช้งาน & ช่วยเหลือ",
+                callback_data="menu:help",
+            ),
+        ],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def get_back_to_menu_keyboard() -> InlineKeyboardMarkup:
+    """สร้างปุ่มย้อนกลับไปเมนูหลัก"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 กลับสู่เมนูหลัก", callback_data="menu:main")]
+        ]
+    )
+
+
+def format_time_remaining(expires_at: datetime) -> str:
+    """แปลงเวลาคงเหลือให้อ่านง่ายเป็นภาษาไทย"""
+    now = datetime.now(timezone.utc)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+        
+    diff = expires_at - now
+    if diff.total_seconds() <= 0:
+        return "หมดอายุแล้ว"
+    
+    days = diff.days
+    hours, remainder = divmod(diff.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    parts = []
+    if days > 0:
+        parts.append(f"{days} วัน")
+    if hours > 0:
+        parts.append(f"{hours} ชั่วโมง")
+    if minutes > 0 or (days == 0 and hours == 0):
+        parts.append(f"{minutes} นาที")
+    if days == 0 and hours == 0 and minutes < 5:
+        parts.append(f"{seconds} วินาที")
+    
+    return " ".join(parts)
+
+
+@router.message(CommandStart())
+async def handle_start(message: Message):
+    """จัดการคำสั่ง /start ตรวจสอบผู้ใช้และแสดงเมนูหลักภาษาไทย"""
+    if not message.from_user:
+        return
+
+    telegram_user = message.from_user
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=telegram_user.id,
+            username=telegram_user.username,
+            full_name=telegram_user.full_name or telegram_user.first_name,
+        )
+        trial_available = not user.trial_used
+
+    first_name_safe = html.escape(telegram_user.first_name or "")
+    welcome_text = (
+        f"👋 <b>ยินดีต้อนรับสู่ระบบสมาชิก VIP, {first_name_safe}!</b>\n\n"
+        "เข้าถึงเนื้อหาสุดพิเศษใน Channel ส่วนตัว พร้อมการอัปเดตแบบเรียลไทม์\n\n"
+        "🌟 <b>กรุณาเลือกเมนูที่ต้องการด้านล่าง:</b>\n"
+        "• <b>ทดลองใช้ฟรี 15 นาที</b>: ทดลองเข้าชม Channel ฟรี 1 ครั้ง (15 นาที)\n"
+        "• <b>สมัครสมาชิก VIP 30 วัน</b>: เข้าใช้งานเต็มรูปแบบ 30 วันเต็ม"
+    )
+
+    await message.answer(
+        text=welcome_text,
+        reply_markup=get_main_menu_keyboard(trial_available=trial_available),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "menu:main")
+async def handle_menu_main(callback: CallbackQuery):
+    """จัดการการกดปุ่มกลับสู่เมนูหลัก"""
+    if not callback.from_user or not callback.message:
+        return
+
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            full_name=callback.from_user.full_name or callback.from_user.first_name,
+        )
+        trial_available = not user.trial_used
+
+    menu_text = (
+        f"👋 <b>เมนูหลักระบบสมาชิก VIP</b>\n\n"
+        "กรุณาเลือกรายการที่ต้องการ:"
+    )
+
+    try:
+        await callback.message.edit_text(
+            text=menu_text,
+            reply_markup=get_main_menu_keyboard(trial_available=trial_available),
+            parse_mode="HTML",
+        )
+    except Exception:
+        await callback.message.answer(
+            text=menu_text,
+            reply_markup=get_main_menu_keyboard(trial_available=trial_available),
+            parse_mode="HTML",
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:trial")
+async def handle_trial_request(callback: CallbackQuery, bot: Bot):
+    """จัดการคำขอทดลองใช้งานฟรี"""
+    if not callback.from_user:
+        return
+
+    user_id = callback.from_user.id
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=user_id,
+            username=callback.from_user.username,
+            full_name=callback.from_user.full_name or callback.from_user.first_name,
+        )
+
+        # ตรวจสอบว่าเคยใช้สิทธิ์ทดลองไปแล้วหรือยัง (เข้าร่วม channel แล้ว)
+        if user.trial_used:
+            await callback.answer(
+                "❌ คุณได้ใช้สิทธิ์ทดลองใช้งานฟรีไปแล้ว!",
+                show_alert=True,
+            )
+            return
+
+        # ตรวจสอบว่ามีแพ็กเกจที่ยังใช้งานอยู่หรือไม่
+        active_sub_stmt = (
+            select(Subscription)
+            .where(
+                Subscription.user_id == user_id,
+                Subscription.status == SubStatus.ACTIVE.value,
+            )
+            .order_by(Subscription.id.desc())
+        )
+        active_sub = (await session.execute(active_sub_stmt)).scalar_one_or_none()
+        if active_sub:
+            await callback.answer(
+                "ℹ️ คุณมีแพ็กเกจสมาชิกที่กำลังใช้งานอยู่แล้ว!",
+                show_alert=True,
+            )
+            return
+
+        # ตรวจสอบว่ามีรายการ PENDING trial เดิมอยู่หรือไม่
+        pending_sub_stmt = (
+            select(Subscription)
+            .where(
+                Subscription.user_id == user_id,
+                Subscription.plan_type == PlanType.TRIAL_15M.value,
+                Subscription.status == SubStatus.PENDING.value,
+            )
+            .order_by(Subscription.id.desc())
+        )
+        pending_sub = (await session.execute(pending_sub_stmt)).scalar_one_or_none()
+
+        if not pending_sub:
+            pending_sub = Subscription(
+                user_id=user_id,
+                plan_type=PlanType.TRIAL_15M.value,
+                status=SubStatus.PENDING.value,
+            )
+            session.add(pending_sub)
+            await session.flush()
+
+    # สร้างลิงก์เชิญแบบใช้งานได้ 1 ครั้งสำหรับ Channel ส่วนตัว
+    try:
+        invite_link_obj = await bot.create_chat_invite_link(
+            chat_id=config.CHANNEL_ID,
+            member_limit=1,
+            name=f"Trial-{user_id}",
+        )
+        invite_url = invite_link_obj.invite_link
+    except Exception as e:
+        logger.error(f"Failed to generate trial invite link for user {user_id}: {e}", exc_info=True)
+        await callback.answer(
+            "⚠️ ไม่สามารถสร้างลิงก์เชิญได้ กรุณาตรวจสอบว่าบอทเป็น Admin ใน Channel",
+            show_alert=True,
+        )
+        return
+
+    trial_min = config.TRIAL_DURATION_MINUTES
+    trial_message = (
+        f"🎉 <b>ลิงก์ทดลองใช้งานฟรี {trial_min} นาทีของคุณพร้อมแล้ว!</b>\n\n"
+        f"🔗 <b>ลิงก์เชิญส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
+        "⚠️ <b>ข้อควรทราบสำคัญ:</b>\n"
+        "• ลิงก์นี้สามารถใช้งานได้เพียง 1 ครั้งเท่านั้น\n"
+        f"• <b>ระบบจะเริ่มนับถอยหลัง {trial_min} นาทีทันทีที่คุณกดเข้าร่วม Channel</b>\n"
+        f"• เมื่อครบกำหนด {trial_min} นาที ระบบจะนำคุณออกจาก Channel อัตโนมัติ\n\n"
+        "กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ!"
+    )
+
+    join_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 เข้าร่วม Channel ทันที", url=invite_url)],
+            [InlineKeyboardButton(text="🔙 กลับสู่เมนูหลัก", callback_data="menu:main")],
+        ]
+    )
+
+    if callback.message:
+        await callback.message.edit_text(
+            text=trial_message,
+            reply_markup=join_keyboard,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:my_status")
+async def handle_my_status(callback: CallbackQuery):
+    """แสดงสถานะแพ็กเกจสมาชิกของผู้ใช้งาน (เวลาไทย)"""
+    if not callback.from_user or not callback.message:
+        return
+
+    user_id = callback.from_user.id
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=user_id,
+            username=callback.from_user.username,
+            full_name=callback.from_user.full_name or callback.from_user.first_name,
+        )
+
+        stmt = (
+            select(Subscription)
+            .where(Subscription.user_id == user_id)
+            .order_by(Subscription.id.desc())
+        )
+        sub = (await session.execute(stmt)).scalars().first()
+
+    status_text = f"📊 <b>สถานะการเป็นสมาชิกของคุณ</b>\n\n"
+    status_text += f"👤 <b>Telegram ID:</b> <code>{user_id}</code>\n"
+    status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n\n"
+
+    if not sub:
+        status_text += "🔴 <b>สถานะ:</b> ไม่มีแพ็กเกจที่ใช้งานอยู่\n"
+        status_text += "คุณสามารถเริ่มทดลองใช้ฟรี หรือสมัครสมาชิกได้จากเมนูด้านล่างครับ"
+    elif sub.status == SubStatus.ACTIVE.value:
+        status_text += "🟢 <b>สถานะ:</b> กำลังใช้งาน (ACTIVE)\n"
+        plan_label = f"ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที" if sub.plan_type == PlanType.TRIAL_15M.value else "สมาชิก VIP"
+        status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"
+        if sub.joined_at:
+            status_text += f"📅 <b>เริ่มเข้าใช้งาน:</b> <code>{format_thai_datetime(sub.joined_at)} น.</code>\n"
+        if sub.expires_at:
+            status_text += f"⏳ <b>หมดอายุวันที่:</b> <code>{format_thai_datetime(sub.expires_at)} น.</code>\n"
+            status_text += f"⏰ <b>เวลาคงเหลือ:</b> {format_time_remaining(sub.expires_at)}\n"
+    elif sub.status == SubStatus.PENDING.value:
+        status_text += "🟡 <b>สถานะ:</b> รอกดเข้าร่วม Channel\n"
+        plan_label = "ทดลองใช้ฟรี" if sub.plan_type == PlanType.TRIAL_15M.value else "สมาชิก VIP"
+        status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"
+        status_text += "ระบบได้สร้างลิงก์เชิญให้คุณแล้ว เวลาจะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel ครับ"
+    elif sub.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value):
+        status_text += "🔴 <b>สถานะ:</b> หมดอายุแล้ว (EXPIRED)\n"
+        plan_label = "ทดลองใช้ฟรี" if sub.plan_type == PlanType.TRIAL_15M.value else "สมาชิก VIP"
+        status_text += f"📦 <b>แพ็กเกจล่าสุด:</b> {plan_label}\n"
+        if sub.expires_at:
+            status_text += f"📅 <b>หมดอายุเมื่อ:</b> <code>{format_thai_datetime(sub.expires_at)} น.</code>\n"
+        status_text += "\nต้องการเข้าใช้งานต่อ สามารถพิมพ์ /start และกดสมัครแพ็กเกจ 30 วันได้ทันทีครับ"
+    else:
+        status_text += f"⚪ <b>สถานะ:</b> {sub.status}\n"
+
+    await callback.message.edit_text(
+        text=status_text,
+        reply_markup=get_back_to_menu_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:help")
+async def handle_help(callback: CallbackQuery):
+    """แสดงวิธีใช้งานและคำถามที่พบบ่อย (FAQ)"""
+    if not callback.message:
+        return
+
+    help_text = (
+        "❓ <b>วิธีใช้งาน & คำถามที่พบบ่อย (FAQ)</b>\n\n"
+        "• <b>การทดลองใช้ฟรีทำงานอย่างไร?</b>\n"
+        "กดปุ่ม 'ทดลองใช้ฟรี' บอทจะส่งลิงก์เชิญแบบ 1 ครั้งให้คุณ "
+        "โดยเวลานับถอยหลังจะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel\n\n"
+        "• <b>ขั้นตอนการสมัครสมาชิก VIP:</b>\n"
+        "กดปุ่ม 'สมัครสมาชิก VIP 30 วัน' สแกน QR Code พร้อมเพย์ 300 บาท "
+        "แล้วส่งรูปภาพสลิปการโอนเงินเข้ามาในแชทนี้ได้ทันที\n\n"
+        "• <b>จะได้รับลิงก์เข้า Channel เมื่อใด?</b>\n"
+        "เมื่อแอดมินตรวจสอบความถูกต้องของสลิปและกดอนุมัติ "
+        "บอทจะส่งลิงก์เชิญส่วนตัวให้คุณในแชทนี้โดยอัตโนมัติทันทีครับ\n\n"
+        "• <b>คำสั่งที่มีประโยชน์:</b>\n"
+        "/start - เปิดเมนูหลัก\n"
+        "/status - ตรวจสอบสถานะและเวลาสมาชิกคงเหลือ\n"
+        "/cancel - ยกเลิกการส่งสลิปหรือการทำงานปัจจุบัน"
+    )
+
+    await callback.message.edit_text(
+        text=help_text,
+        reply_markup=get_back_to_menu_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(Command("status"))
+async def handle_status_command(message: Message):
+    """จัดการคำสั่ง /status โดยตรง (เวลาไทย)"""
+    if not message.from_user:
+        return
+
+    user_id = message.from_user.id
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=user_id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name or message.from_user.first_name,
+        )
+        stmt = (
+            select(Subscription)
+            .where(Subscription.user_id == user_id)
+            .order_by(Subscription.id.desc())
+        )
+        sub = (await session.execute(stmt)).scalars().first()
+
+    status_text = f"📊 <b>สถานะการเป็นสมาชิกของคุณ</b>\n\n"
+    status_text += f"👤 <b>Telegram ID:</b> <code>{user_id}</code>\n"
+    status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n\n"
+
+    if not sub or sub.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value):
+        status_text += "🔴 <b>สถานะ:</b> ไม่มีแพ็กเกจที่ใช้งานอยู่\n"
+        status_text += "พิมพ์ /start เพื่อทดลองใช้ฟรี หรือสมัครสมาชิก VIP"
+    elif sub.status == SubStatus.ACTIVE.value:
+        status_text += "🟢 <b>สถานะ:</b> กำลังใช้งาน (ACTIVE)\n"
+        plan_label = f"ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที" if sub.plan_type == PlanType.TRIAL_15M.value else "สมาชิก VIP"
+        status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"
+        if sub.expires_at:
+            status_text += f"⏳ <b>หมดอายุวันที่:</b> <code>{format_thai_datetime(sub.expires_at)} น.</code>\n"
+            status_text += f"⏰ <b>เวลาคงเหลือ:</b> {format_time_remaining(sub.expires_at)}\n"
+    elif sub.status == SubStatus.PENDING.value:
+        status_text += "🟡 <b>สถานะ:</b> รอกดเข้าร่วม Channel (รอคุณใช้ลิงก์เชิญ)\n"
+
+    await message.answer(
+        text=status_text,
+        reply_markup=get_main_menu_keyboard(trial_available=not user.trial_used),
+        parse_mode="HTML",
+    )
