@@ -117,7 +117,7 @@ async def handle_start(message: Message):
 
     first_name_safe = html.escape(telegram_user.first_name or "")
     welcome_text = (
-        f"👋 <b>ยินดีต้อนรับสู่ระบบสมาชิก VIP, {first_name_safe}!</b>\n\n"
+        f"👋 <b>ยินดีต้อนรับสู่ระบบสมาชิก BareLive, {first_name_safe}!</b>\n\n"
         "เข้าถึงเนื้อหาสุดพิเศษใน Channel ส่วนตัว พร้อมการอัปเดตแบบเรียลไทม์\n\n"
         "🌟 <b>กรุณาเลือกเมนูที่ต้องการด้านล่าง:</b>\n"
         "• <b>ทดลองใช้ฟรี 15 นาที</b>: ทดลองเข้าชม Channel ฟรี 1 ครั้ง (15 นาที)\n"
@@ -147,7 +147,7 @@ async def handle_menu_main(callback: CallbackQuery):
         trial_available = not user.trial_used
 
     menu_text = (
-        f"👋 <b>เมนูหลักระบบสมาชิก VIP</b>\n\n"
+        f"👋 <b>เมนูหลักระบบสมาชิก BareLive</b>\n\n"
         "กรุณาเลือกรายการที่ต้องการ:"
     )
 
