@@ -763,12 +763,25 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
     full_name_safe = html.escape(user.full_name or "")
     
+    # ประวัติการเข้า Channel ทั้งหมด
+    joined_times = [s.joined_at for s in subs if s.joined_at is not None]
+    if joined_times:
+        earliest_join = min(joined_times)
+        latest_join = max(joined_times)
+        if earliest_join != latest_join:
+            join_str = f"🚪 <b>เข้า Channel ครั้งแรก:</b> <code>{format_thai_datetime(earliest_join)} น.</code>\n🚪 <b>เข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(latest_join)} น.</code>"
+        else:
+            join_str = f"🚪 <b>เวลากดเข้า Channel:</b> <code>{format_thai_datetime(latest_join)} น.</code>"
+    else:
+        join_str = "🚪 <b>เวลากดเข้า Channel:</b> <i>ยังไม่เคยกดเข้าห้อง</i>"
+
     resp = [
         f"👤 <b>ข้อมูลผู้ใช้งาน: {full_name_safe}</b> ({user_handle})",
         f"🔢 <b>Telegram ID:</b> <code>{user.telegram_id}</code>",
         f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
         f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> {channel_status_str}",
         f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
+        join_str,
         "\n━━━━━━━━━━━━━━━━━━━━",
         "📦 <b>ประวัติการขอแพ็กเกจ/สิทธิ์ (Subscriptions):</b>",
     ]
@@ -1066,12 +1079,24 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
     user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
     full_name_safe = html.escape(user.full_name or "")
     
+    joined_times = [s.joined_at for s in subs if s.joined_at is not None]
+    if joined_times:
+        earliest_join = min(joined_times)
+        latest_join = max(joined_times)
+        if earliest_join != latest_join:
+            join_str = f"🚪 <b>เข้า Channel ครั้งแรก:</b> <code>{format_thai_datetime(earliest_join)} น.</code>\n🚪 <b>เข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(latest_join)} น.</code>"
+        else:
+            join_str = f"🚪 <b>เวลากดเข้า Channel:</b> <code>{format_thai_datetime(latest_join)} น.</code>"
+    else:
+        join_str = "🚪 <b>เวลากดเข้า Channel:</b> <i>ยังไม่เคยกดเข้าห้อง</i>"
+
     resp = [
         f"👤 <b>ข้อมูลผู้ใช้งาน: {full_name_safe}</b> ({user_handle})",
         f"🔢 <b>Telegram ID:</b> <code>{user.telegram_id}</code>",
         f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
         f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> {channel_status_str}",
         f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
+        join_str,
         "\n━━━━━━━━━━━━━━━━━━━━",
         f"📦 <b>ประวัติการขอแพ็กเกจ ({len(subs)} รายการ):</b>",
     ]
@@ -1326,10 +1351,31 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
             f"   • 📅 <b>เข้าใช้บอทครั้งแรก:</b> <code>{format_thai_datetime(u.created_at)} น.</code>",
         ]
 
+        # ตรวจสอบประวัติการกดเข้า Channel ทั้งหมด
+        joined_times = [s.joined_at for s in u.subscriptions if s.joined_at is not None]
+        if joined_times:
+            earliest_join = min(joined_times)
+            latest_join = max(joined_times)
+            if earliest_join != latest_join:
+                user_block.append(f"   • 🚪 <b>เข้า Channel ครั้งแรก:</b> <code>{format_thai_datetime(earliest_join)} น.</code>")
+                user_block.append(f"   • 🚪 <b>เข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(latest_join)} น.</code>")
+            else:
+                user_block.append(f"   • 🚪 <b>เวลากดเข้า Channel:</b> <code>{format_thai_datetime(latest_join)} น.</code>")
+        else:
+            user_block.append("   • 🚪 <b>เวลากดเข้า Channel:</b> <i>ยังไม่เคยกดเข้าห้อง</i>")
+
         # Subscription ล่าสุด
         latest_sub = u.subscriptions[0] if u.subscriptions else None
         if latest_sub:
-            plan_label = "ทดลองใช้ 15 นาที" if latest_sub.plan_type == PlanType.TRIAL_15M.value else latest_sub.plan_type
+            if latest_sub.plan_type == PlanType.TRIAL_15M.value:
+                plan_label = "ทดลองใช้ 15 นาที"
+            elif latest_sub.plan_type in PLAN_DETAILS:
+                plan_label = PLAN_DETAILS[latest_sub.plan_type]["badge"]
+            elif latest_sub.plan_type.startswith("MANUAL_VIP_"):
+                plan_label = latest_sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
+            else:
+                plan_label = latest_sub.plan_type
+
             status_badge = {
                 SubStatus.ACTIVE.value: "🟢 ACTIVE",
                 SubStatus.PENDING.value: "🟡 PENDING (ออกลิงก์แล้ว-รอกดเข้า)",
@@ -1339,9 +1385,7 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
             }.get(latest_sub.status, latest_sub.status)
 
             user_block.append(f"   • 📦 <b>สถานะล่าสุด:</b> {plan_label} [{status_badge}]")
-            user_block.append(f"   • 🎟️ <b>เวลาออกลิงก์:</b> <code>{format_thai_datetime(latest_sub.created_at)} น.</code>")
-            if latest_sub.joined_at:
-                user_block.append(f"   • 🚪 <b>เวลากดเข้าห้อง:</b> <code>{format_thai_datetime(latest_sub.joined_at)} น.</code>")
+            user_block.append(f"   • 🎟️ <b>เวลาออกลิงก์ล่าสุด:</b> <code>{format_thai_datetime(latest_sub.created_at)} น.</code>")
             if latest_sub.expires_at:
                 user_block.append(f"   • ⏰ <b>เวลาหมดอายุ:</b> <code>{format_thai_datetime(latest_sub.expires_at)} น.</code>")
         else:
