@@ -53,6 +53,30 @@ def format_time_remaining(expires_at: datetime) -> str:
     return " ".join(parts)
 
 
+@router.message(Command("version"))
+async def handle_admin_version_command(message: Message):
+    """(Admin) เช็คเวอร์ชันปัจจุบันของบอท (Git Hash)"""
+    import subprocess
+    try:
+        result = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=2)
+        commit_hash = result.stdout.strip()
+        
+        result_log = subprocess.run(["git", "log", "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M:%S"], capture_output=True, text=True, timeout=2)
+        commit_date = result_log.stdout.strip()
+        
+        text = (
+            f"🤖 <b>Bot Version Info</b>\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"📌 <b>Commit:</b> <code>{commit_hash}</code>\n"
+            f"📅 <b>Date:</b> {commit_date}\n\n"
+            f"<i>อัปเดตล่าสุด: ฟีเจอร์ Swipe to Reply & เมนู Inline Users</i>"
+        )
+    except Exception as e:
+        text = f"🤖 <b>Bot Version Info</b>\nไม่สามารถอ่าน Git Hash ได้: <code>{str(e)}</code>"
+        
+    await message.answer(text, parse_mode="HTML")
+
+
 @router.callback_query(F.data.startswith("admin:approve:"))
 async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
     """จัดการเมื่อ Admin กดยืนยัน/อนุมัติสลิปสำหรับสมาชิก VIP พร้อมระบบสะสมวัน (Day Stacking)"""
