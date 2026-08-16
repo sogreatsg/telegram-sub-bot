@@ -26,6 +26,10 @@ jobs:
             git reset --hard HEAD
             git pull origin main
             
+            # Export environment variables for Docker Compose
+            export BOT_APP_VERSION=$(git rev-parse --short HEAD)
+            export BOT_APP_DATE=$(git log -1 --format=%cd --date=format:"%Y-%m-%d %H:%M:%S")
+            
             # Rebuild and restart docker containers in background
             docker compose up -d --build
             

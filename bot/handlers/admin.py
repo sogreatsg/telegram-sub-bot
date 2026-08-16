@@ -58,27 +58,8 @@ async def handle_admin_version_command(message: Message):
     """(Admin) เช็คเวอร์ชันปัจจุบันของบอท"""
     import os
     try:
-        # Check multiple possible locations for version.txt
-        possible_paths = [
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "version.txt"),
-            "bot/version.txt",
-            "/app/bot/version.txt"
-        ]
-        
-        version_file = None
-        for p in possible_paths:
-            if os.path.exists(p):
-                version_file = p
-                break
-                
-        if version_file:
-            with open(version_file, "r") as f:
-                lines = f.read().splitlines()
-                commit_hash = lines[0] if len(lines) > 0 else "Unknown"
-                commit_date = lines[1] if len(lines) > 1 else "Unknown"
-        else:
-            commit_hash = "Dev Build (File Not Found)"
-            commit_date = "N/A"
+        commit_hash = os.environ.get("BOT_APP_VERSION", "Unknown")
+        commit_date = os.environ.get("BOT_APP_DATE", "Unknown")
             
         text = (
             f"🤖 <b>Bot Version Info</b>\n"

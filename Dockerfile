@@ -9,6 +9,11 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
+ARG APP_VERSION="Unknown"
+ARG APP_DATE="Unknown"
+ENV BOT_APP_VERSION=$APP_VERSION
+ENV BOT_APP_DATE=$APP_DATE
+
 WORKDIR /app
 
 # Install system dependencies (build-essential/curl if needed, ca-certificates for HTTPS)
