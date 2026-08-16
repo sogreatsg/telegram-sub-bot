@@ -1469,3 +1469,46 @@ async def handle_admin_noop(callback: CallbackQuery):
     await callback.answer()
 
 
+@router.message(Command("revoke_primary", "reset_primary_link", "revoke_channel_link"))
+async def handle_revoke_primary_link(message: Message, bot: Bot):
+    """คำสั่งสั่งเพิกถอนและสร้าง Primary Invite Link ใหม่ของ Channel: /revoke_primary"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    try:
+        new_primary = await bot.export_chat_invite_link(chat_id=config.CHANNEL_ID)
+        resp_text = (
+            "🔄 <b>เพิกถอนลิงก์หลัก (Primary Link) เดิมของ Channel สำเร็จแล้ว!</b>\n\n"
+            "❌ ลิงก์เดิมทั้งหมดถูกทำลายและไม่สามารถใช้งานได้อีกต่อไป\n"
+            f"🔗 <b>ลิงก์หลักชุดใหม่:</b> <code>{new_primary}</code>\n\n"
+            "⚠️ <i>แนะนำ: ห้ามแจกลิงก์หลักนี้ให้สมาชิกทั่วไป ให้ระบบบอทสร้างลิงก์แบบ 1 คน/1 ครั้งและมีวันหมดอายุเท่านั้นครับ</i>"
+        )
+        await message.answer(resp_text, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Failed to revoke primary invite link: {e}", exc_info=True)
+        await message.answer(
+            f"❌ <b>ไม่สามารถเพิกถอนลิงก์ได้:</b> <code>{html.escape(str(e))}</code>\n\n"
+            "👉 <i>กรุณาตรวจสอบว่าบอทมีสิทธิ์ 'Invite Users via Link / เชิญผู้ใช้ผ่านลิงก์' ใน Channel VIP หรือไม่</i>",
+            parse_mode="HTML",
+        )
+
+
+@router.message(Command("revoke_link", "revoke"))
+async def handle_revoke_specific_link(message: Message, bot: Bot):
+    """คำสั่งเพิกถอนลิงก์เฉพาะเจาะจง: /revoke_link <url>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer("⚠️ <b>รูปแบบคำสั่ง:</b> <code>/revoke_link [ลิงก์ที่ต้องการเพิกถอน]</code>", parse_mode="HTML")
+        return
+
+    link_to_revoke = args[1].strip()
+    try:
+        res = await bot.revoke_chat_invite_link(chat_id=config.CHANNEL_ID, invite_link=link_to_revoke)
+        await message.answer(f"✅ <b>เพิกถอนลิงก์สำเร็จแล้ว:</b> <code>{res.invite_link}</code>\n(ลิงก์นี้ใช้งานไม่ได้แล้ว)", parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ <b>เพิกถอนไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
+
