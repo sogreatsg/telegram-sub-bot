@@ -1,5 +1,6 @@
 import logging
 import html
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
 from aiogram import Router, F, Bot
@@ -14,6 +15,7 @@ from bot.models.schema import User, PaymentSlip, Subscription, ChatMessage, Slip
 from bot.services.database import get_session, get_or_create_user
 from bot.services.scheduler import build_active_members_report, sync_pending_members
 from bot.services.chat_logger import log_chat_message
+from bot.handlers.user_menu import get_main_menu_keyboard
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -349,14 +351,20 @@ async def handle_admin_menu_command(message: Message):
         "💬 <b>2. ดูประวัติการคุย & ตอบกลับผู้ใช้:</b>\n"
         "• <code>/chat [User ID หรือ @username] [จำนวน]</code> — ดูประวัติการสนทนาย้อนหลังระหว่าง User กับ Bot\n"
         "• <code>/reply [User ID หรือ @username] [ข้อความ]</code> — ส่งข้อความตอบกลับผู้ใช้ทาง DM ในนามทีมงานแอดมิน\n\n"
-        "🔄 <b>3. ซิงค์และกู้คืนสมาชิกตกหล่น:</b>\n"
+        "📢 <b>3. บรอดแคสต์ & ส่งข้อความหาผู้ใช้:</b>\n"
+        "• <code>/broadcast_count</code> — ตรวจสอบยอดผู้ใช้ทั้งหมดที่สามารถบรอดแคสต์ไปหาได้\n"
+        "• <code>/broadcast_menu</code> — บรอดแคสต์เมนูหลัก /start ล่าสุด (พร้อมปุ่มชวนเพื่อน/โปรโมชั่น) ให้ผู้ใช้ทุกคน\n"
+        "• <code>/broadcast [ข้อความ]</code> (หรือ Reply รูป) — บรอดแคสต์ข้อความข่าวสารหรือโปรโมชั่นให้ทุกคน\n"
+        "• <code>/send_menu [User ID หรือ @username]</code> — ส่ง Template เมนูหลัก /start ล่าสุดให้เฉพาะบุคคล\n\n"
+        "🔄 <b>4. ซิงค์และกู้คืนสมาชิกตกหล่น:</b>\n"
         "• <code>/sync</code> หรือ <code>/sync_channel</code> — ตรวจเช็คผู้ใช้ที่ค้าง PENDING ทั้งหมด หากพบว่าอยู่ใน Channel แล้วจะเปิดใช้งาน ACTIVE และเริ่มนับเวลาให้ทันที (พร้อมเตะคนที่หมดเวลาแล้ว)\n\n"
-        "⚙️ <b>4. ตรวจสอบระบบ & สิทธิ์บอท:</b>\n"
-        "• <code>/audit</code> หรือ <code>/check</code> — ตรวจสอบสิทธิ์ของ Bot ใน Channel VIP (สิทธิ์ Ban Users, สิทธิ์สร้าง Invite Links) และสถานะการเชื่อมต่อ\n\n"
-        "🛠️ <b>5. จัดการสมาชิกใน Channel:</b>\n"
+        "⚙️ <b>5. ตรวจสอบระบบ & สิทธิ์บอท:</b>\n"
+        "• <code>/audit</code> หรือ <code>/check</code> — ตรวจสอบสิทธิ์ของ Bot ใน Channel VIP (สิทธิ์ Ban Users, สิทธิ์สร้าง Invite Links) และสถานะการเชื่อมต่อ\n"
+        "• <code>/revoke_primary</code> — สั่งเพิกถอนและสร้าง Primary Link ใหม่ของ Channel\n\n"
+        "🛠️ <b>6. จัดการสมาชิกใน Channel:</b>\n"
         "• <code>/kick [User ID]</code> — สั่งเตะ (Soft-Kick) ผู้ใช้ออกจาก Channel VIP ทันที พร้อมอัปเดตสถานะในระบบ\n"
-        "• <code>/add_vip [User ID] [จำนวนวัน เช่น 30]</code> — เพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง บอทจะสร้างและส่งลิงก์เชิญให้ผู้ใช้ทาง DM ทันที\n\n"
-        "🗑️ <b>6. รีเซ็ต & ลบประวัติผู้ใช้ (สำหรับทดสอบระบบ):</b>\n"
+        "• <code>/add_vip [User ID] [จำนวนวัน เช่น 30]</code> — เพิ่ม/ต่อเวลาสะสม VIP ให้ผู้ใช้ด้วยตนเอง\n\n"
+        "🗑️ <b>7. รีเซ็ต & ลบประวัติผู้ใช้ (สำหรับทดสอบระบบ):</b>\n"
         "• <code>/reset_user [User ID หรือ @username]</code> — ลบประวัติแชท สลิป สิทธิ์ และบัญชีผู้ใช้ทั้งหมด พร้อมเตะออกจากห้อง VIP เพื่อให้เริ่มใหม่เป็นผู้ใช้ใหม่ 100%\n"
         "• <code>/reset_trial [User ID หรือ @username]</code> — รีเซ็ตเฉพาะสิทธิ์ทดลองใช้ฟรี 15 นาที ให้ผู้ใช้กดรับสิทธิ์ใหม่ได้ทันที\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -367,10 +375,13 @@ async def handle_admin_menu_command(message: Message):
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="📊 สรุปสมาชิก Active", callback_data="admin_menu:summary"),
-                InlineKeyboardButton(text="🔄 ซิงค์สมาชิกค้าง (/sync)", callback_data="admin_menu:sync"),
+                InlineKeyboardButton(text="📢 ยอด Broadcast", callback_data="admin_menu:broadcast_count"),
             ],
             [
+                InlineKeyboardButton(text="🔄 ซิงค์สมาชิกค้าง (/sync)", callback_data="admin_menu:sync"),
                 InlineKeyboardButton(text="🔍 Audit สิทธิ์บอท", callback_data="admin_menu:audit"),
+            ],
+            [
                 InlineKeyboardButton(text="📑 ประวัติผู้ใช้ทั้งหมด (/users)", callback_data="admin:users_page:1"),
             ],
         ]
@@ -426,6 +437,47 @@ async def handle_admin_menu_audit_callback(callback: CallbackQuery, bot: Bot):
     status_lines.append("💡 <i>พิมพ์ <code>/summary</code> เพื่อดูรายชื่อสมาชิก Active\nหรือ <code>/kick [User ID]</code> เพื่อสั่งเตะสมาชิกออกจากห้อง</i>")
 
     await callback.message.answer(text="\n".join(status_lines), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_menu:broadcast_count")
+async def handle_admin_menu_broadcast_count_callback(callback: CallbackQuery):
+    """ปุ่มลัดสำหรับตรวจสอบสถิติ Audience Reach / Broadcast Count"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    now = datetime.now(timezone.utc)
+    async with get_session() as session:
+        total_users = (await session.execute(select(func.count(User.telegram_id)))).scalar() or 0
+        active_users = (await session.execute(
+            select(func.count(Subscription.id)).where(
+                Subscription.status == SubStatus.ACTIVE.value,
+                Subscription.expires_at > now,
+            )
+        )).scalar() or 0
+        trial_used_users = (await session.execute(
+            select(func.count(User.telegram_id)).where(User.trial_used == True)
+        )).scalar() or 0
+        never_trial_users = total_users - trial_used_users
+
+    resp = (
+        "📢 <b>สถิติฐานผู้ใช้งานที่สามารถ Broadcast ได้ (Audience Reach)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 <b>ผู้ใช้ทั้งหมดในระบบ:</b> <b>{total_users} คน</b>\n"
+        f"🟢 <b>สมาชิก VIP Active ปัจจุบัน:</b> {active_users} คน\n"
+        f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรีแล้ว:</b> {trial_used_users} คน\n"
+        f"🎁 <b>ยังไม่เคยใช้สิทธิ์ทดลองฟรี:</b> {never_trial_users} คน\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <b>คำสั่งสำหรับการส่งข้อความ:</b>\n"
+        "• <code>/broadcast_menu</code> — บรอดแคสต์เมนูหลัก /start ล่าสุด (พร้อมปุ่มชวนเพื่อน/โปรโมชั่น) ให้ทุกคน\n"
+        "• <code>/broadcast [ข้อความ]</code> — บรอดแคสต์ข้อความข่าวสารหรือโปรโมชั่นให้ทุกคน\n"
+        "• <code>/send_menu [User ID]</code> — ส่งเมนูหลัก /start ให้เฉพาะบุคคล\n"
+        "• <code>/reply [User ID] [ข้อความ]</code> — ส่งข้อความหาเฉพาะบุคคล"
+    )
+    await callback.message.answer(resp, parse_mode="HTML")
     await callback.answer()
 
 
@@ -1662,5 +1714,286 @@ async def handle_revoke_specific_link(message: Message, bot: Bot):
         await message.answer(f"✅ <b>เพิกถอนลิงก์สำเร็จแล้ว:</b> <code>{res.invite_link}</code>\n(ลิงก์นี้ใช้งานไม่ได้แล้ว)", parse_mode="HTML")
     except Exception as e:
         await message.answer(f"❌ <b>เพิกถอนไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
+
+def get_start_menu_content(trial_available: bool = True) -> tuple[str, InlineKeyboardMarkup]:
+    """สร้างข้อความและปุ่มเมนูหลัก /start สำหรับส่งให้ผู้ใช้"""
+    text = (
+        "👋 <b>ยินดีต้อนรับสู่ระบบสมาชิก BareLive!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✨ <b>สิทธิประโยชน์สำหรับสมาชิก VIP:</b>\n"
+        "• 📺 รับชมการถ่ายทอดสดแบบ Exclusive ใน Channel VIP\n"
+        "• 💬 พูดคุยแลกเปลี่ยนในกลุ่มแชทชุมชนฟรี\n"
+        "• 🎁 <b>ใหม่! ชวนเพื่อนรับ VIP ฟรี +1 วัน/คน ไม่จำกัด!</b>\n"
+        "• ⚡ ระบบอัตโนมัติตลอด 24 ชั่วโมง\n\n"
+        "👇 <b>กรุณาเลือกรายการที่ต้องการด้านล่างได้เลยครับ:</b>"
+    )
+    keyboard = get_main_menu_keyboard(trial_available=trial_available)
+    return text, keyboard
+
+
+@router.message(Command("broadcast_count", "reach", "audience"))
+async def handle_broadcast_count_command(message: Message):
+    """คำสั่งตรวจสอบจำนวนผู้ใช้ทั้งหมดที่สามารถ Broadcast ได้: /broadcast_count"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    now = datetime.now(timezone.utc)
+    async with get_session() as session:
+        total_users = (await session.execute(select(func.count(User.telegram_id)))).scalar() or 0
+        active_users = (await session.execute(
+            select(func.count(Subscription.id)).where(
+                Subscription.status == SubStatus.ACTIVE.value,
+                Subscription.expires_at > now,
+            )
+        )).scalar() or 0
+        trial_used_users = (await session.execute(
+            select(func.count(User.telegram_id)).where(User.trial_used == True)
+        )).scalar() or 0
+        never_trial_users = total_users - trial_used_users
+
+    resp = (
+        "📢 <b>สถิติฐานผู้ใช้งานที่สามารถ Broadcast ได้ (Audience Reach)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 <b>ผู้ใช้ทั้งหมดในระบบ:</b> <b>{total_users} คน</b>\n"
+        f"🟢 <b>สมาชิก VIP Active ปัจจุบัน:</b> {active_users} คน\n"
+        f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรีแล้ว:</b> {trial_used_users} คน\n"
+        f"🎁 <b>ยังไม่เคยใช้สิทธิ์ทดลองฟรี:</b> {never_trial_users} คน\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <b>คำสั่งสำหรับการส่งข้อความ:</b>\n"
+        "• <code>/broadcast_menu</code> — บรอดแคสต์เมนูหลัก /start ล่าสุด (พร้อมปุ่มชวนเพื่อน/โปรโมชั่น) ให้ทุกคน\n"
+        "• <code>/broadcast [ข้อความ]</code> — บรอดแคสต์ข้อความข่าวสารหรือโปรโมชั่นให้ทุกคน\n"
+        "• <code>/send_menu [User ID]</code> — ส่งเมนูหลัก /start ให้เฉพาะบุคคล\n"
+        "• <code>/reply [User ID] [ข้อความ]</code> — ส่งข้อความหาเฉพาะบุคคล"
+    )
+    await message.answer(resp, parse_mode="HTML")
+
+
+@router.message(Command("broadcast_menu", "broadcast_start", "bc_menu"))
+async def handle_broadcast_menu_command(message: Message, bot: Bot):
+    """คำสั่งบรอดแคสต์ส่ง Template เมนูหลัก /start ล่าสุดให้ผู้ใช้ทุกคนในฐานข้อมูล: /broadcast_menu"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    async with get_session() as session:
+        users = (await session.execute(select(User).order_by(User.telegram_id))).scalars().all()
+
+    total_count = len(users)
+    if total_count == 0:
+        await message.answer("❌ ไม่พบผู้ใช้ในระบบสำหรับ Broadcast", parse_mode="HTML")
+        return
+
+    status_msg = await message.answer(
+        f"🚀 <b>กำลังเริ่ม Broadcast เมนูหลัก /start...</b>\n"
+        f"👥 จำนวนเป้าหมาย: <b>{total_count} คน</b>\n"
+        "⏳ กรุณารอสักครู่ ระบบกำลังทยอยส่งตาม Rate Limit...",
+        parse_mode="HTML"
+    )
+
+    success_count = 0
+    fail_count = 0
+
+    for i, u in enumerate(users, 1):
+        menu_text, menu_kb = get_start_menu_content(trial_available=not u.trial_used)
+        try:
+            await bot.send_message(
+                chat_id=u.telegram_id,
+                text=menu_text,
+                reply_markup=menu_kb,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            success_count += 1
+        except Exception as e:
+            fail_count += 1
+            logger.debug(f"Broadcast menu failed for user {u.telegram_id}: {e}")
+
+        # หน่วงเวลา 0.05 วินาที เพื่อป้องกัน Telegram Flood Limits
+        await asyncio.sleep(0.05)
+
+        # อัปเดตความคืบหน้าทุกๆ 50 คน
+        if i % 50 == 0 or i == total_count:
+            try:
+                await status_msg.edit_text(
+                    f"🚀 <b>กำลัง Broadcast เมนูหลัก /start ({i}/{total_count})...</b>\n"
+                    f"✅ สำเร็จ: {success_count} คน\n"
+                    f"❌ ไม่สำเร็จ (บล็อกบอท/ลบบัญชี): {fail_count} คน",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+    final_report = (
+        "🎉 <b>Broadcast เมนูหลัก /start เสร็จสมบูรณ์แล้ว!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 <b>ผู้ใช้ทั้งหมด:</b> {total_count} คน\n"
+        f"✅ <b>ส่งสำเร็จ:</b> <b>{success_count} คน</b>\n"
+        f"❌ <b>ส่งไม่สำเร็จ (บล็อกบอท/ลบบัญชี):</b> {fail_count} คน\n"
+        f"📅 <b>เวลาที่เสร็จสิ้น:</b> <code>{format_thai_datetime(datetime.now(timezone.utc))} น.</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "ℹ️ <i>ผู้ใช้ที่ได้รับข้อความจะเห็นเมนูเวอร์ชันล่าสุดพร้อมปุ่มชวนเพื่อนและเข้ากลุ่มฟรีทันที</i>"
+    )
+    try:
+        await status_msg.edit_text(final_report, parse_mode="HTML")
+    except Exception:
+        await message.answer(final_report, parse_mode="HTML")
+
+
+@router.message(Command("send_menu", "send_start"))
+async def handle_send_menu_to_user_command(message: Message, bot: Bot):
+    """คำสั่งส่ง Template เมนูหลัก /start ให้เฉพาะบุคคล: /send_menu <user_id หรือ @username>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/send_menu [User ID หรือ @username]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/send_menu 5125375696</code>\n"
+            "• <code>/send_menu @username</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+        target_user = (await session.execute(user_stmt)).scalar_one_or_none()
+
+    if not target_user:
+        await message.answer(f"❌ <b>ไม่พบผู้ใช้:</b> <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+        return
+
+    menu_text, menu_kb = get_start_menu_content(trial_available=not target_user.trial_used)
+    try:
+        await bot.send_message(
+            chat_id=target_user.telegram_id,
+            text=menu_text,
+            reply_markup=menu_kb,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        user_handle = f"@{target_user.username}" if target_user.username else target_user.full_name
+        await message.answer(
+            f"✅ <b>ส่งเมนูหลัก /start ให้ผู้ใช้เรียบร้อยแล้ว!</b>\n"
+            f"👤 <b>ผู้รับ:</b> {html.escape(user_handle)} (<code>{target_user.telegram_id}</code>)",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await message.answer(
+            f"❌ <b>ไม่สามารถส่ง DM ให้ผู้ใช้ได้:</b> <code>{html.escape(str(e))}</code>\n"
+            "<i>(ผู้ใช้อาจจะบล็อกบอท หรือยังไม่เคยกดเริ่มคุยกับบอท)</i>",
+            parse_mode="HTML"
+        )
+
+
+@router.message(Command("broadcast", "bc"))
+async def handle_broadcast_custom_command(message: Message, bot: Bot):
+    """คำสั่งบรอดแคสต์ข้อความกำหนดเอง หรือรูปภาพพร้อมแคปชันให้ทุกคน: /broadcast <ข้อความ>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    # ตรวจสอบข้อความที่จะ Broadcast
+    broadcast_text = ""
+    photo_file_id = None
+
+    if message.reply_to_message:
+        if message.reply_to_message.photo:
+            photo_file_id = message.reply_to_message.photo[-1].file_id
+            broadcast_text = message.reply_to_message.caption or ""
+        elif message.reply_to_message.text:
+            broadcast_text = message.reply_to_message.text
+
+    # ถ้ามีข้อความตามหลังคำสั่ง /broadcast ให้ใช้ข้อความนั้น
+    command_text_args = (message.text or "").split(maxsplit=1)
+    if len(command_text_args) > 1:
+        broadcast_text = command_text_args[1].strip()
+
+    if not broadcast_text and not photo_file_id:
+        await message.answer(
+            "❌ <b>วิธีใช้งานคำสั่ง Broadcast:</b>\n\n"
+            "1. <b>ส่งข้อความธรรมดา:</b>\n"
+            "<code>/broadcast [ข้อความที่ต้องการส่งหาทุกคน]</code>\n\n"
+            "2. <b>ส่งรูปภาพพร้อมข้อความ:</b>\n"
+            "ส่งรูปเข้ากลุ่ม Admin แล้ว Reply รูปนั้นด้วยคำสั่ง <code>/broadcast [ข้อความแคปชัน]</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    async with get_session() as session:
+        users = (await session.execute(select(User).order_by(User.telegram_id))).scalars().all()
+
+    total_count = len(users)
+    if total_count == 0:
+        await message.answer("❌ ไม่พบผู้ใช้ในระบบสำหรับ Broadcast", parse_mode="HTML")
+        return
+
+    status_msg = await message.answer(
+        f"🚀 <b>กำลังเริ่ม Broadcast ข้อความไปยังผู้ใช้ {total_count} คน...</b>\n"
+        "⏳ กรุณารอสักครู่...",
+        parse_mode="HTML"
+    )
+
+    open_menu_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📱 เปิดเมนูหลัก VIP", callback_data="menu:main")]
+        ]
+    )
+
+    success_count = 0
+    fail_count = 0
+
+    for i, u in enumerate(users, 1):
+        try:
+            if photo_file_id:
+                await bot.send_photo(
+                    chat_id=u.telegram_id,
+                    photo=photo_file_id,
+                    caption=broadcast_text,
+                    reply_markup=open_menu_kb,
+                    parse_mode="HTML",
+                )
+            else:
+                await bot.send_message(
+                    chat_id=u.telegram_id,
+                    text=broadcast_text,
+                    reply_markup=open_menu_kb,
+                    parse_mode="HTML",
+                    disable_web_page_preview=False,
+                )
+            success_count += 1
+        except Exception as e:
+            fail_count += 1
+            logger.debug(f"Broadcast custom msg failed for user {u.telegram_id}: {e}")
+
+        await asyncio.sleep(0.05)
+
+        if i % 50 == 0 or i == total_count:
+            try:
+                await status_msg.edit_text(
+                    f"🚀 <b>กำลัง Broadcast ({i}/{total_count})...</b>\n"
+                    f"✅ สำเร็จ: {success_count} คน\n"
+                    f"❌ ไม่สำเร็จ (บล็อก/ลบบัญชี): {fail_count} คน",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+    final_report = (
+        "🎉 <b>Broadcast ข้อความเสร็จสมบูรณ์แล้ว!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 <b>ผู้ใช้ทั้งหมด:</b> {total_count} คน\n"
+        f"✅ <b>ส่งสำเร็จ:</b> <b>{success_count} คน</b>\n"
+        f"❌ <b>ส่งไม่สำเร็จ:</b> {fail_count} คน\n"
+        f"📅 <b>เวลาที่เสร็จสิ้น:</b> <code>{format_thai_datetime(datetime.now(timezone.utc))} น.</code>"
+    )
+    try:
+        await status_msg.edit_text(final_report, parse_mode="HTML")
+    except Exception:
+        await message.answer(final_report, parse_mode="HTML")
 
 
