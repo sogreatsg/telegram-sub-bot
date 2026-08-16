@@ -777,10 +777,13 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     else:
         join_str = "🚪 <b>เวลากดเข้า Channel:</b> <i>ยังไม่เคยกดเข้าห้อง</i>"
 
+    ref_by_str = f"<code>{user.referred_by_id}</code>" if user.referred_by_id else "<i>ไม่มี (เข้าเองโดยตรง)</i>"
     resp = [
         f"👤 <b>ข้อมูลผู้ใช้งาน: {full_name_safe}</b> ({user_handle})",
         f"🔢 <b>Telegram ID:</b> <code>{user.telegram_id}</code>",
         f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
+        f"🎁 <b>สถิติ Referral:</b> ชวนสำเร็จ {user.referral_count or 0} คน | โบนัสสะสม {user.referral_bonus_days or 0} วัน",
+        f"🔗 <b>สมัครผ่านผู้แนะนำ (Referred By):</b> {ref_by_str}",
         f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> {channel_status_str}",
         f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
         join_str,

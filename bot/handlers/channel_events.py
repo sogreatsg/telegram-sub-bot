@@ -9,6 +9,7 @@ from sqlalchemy import select
 from bot.config import get_settings
 from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS
 from bot.services.database import get_session
+from bot.services.referral import award_referral_bonus
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -102,6 +103,9 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
             sub.joined_at = now
             sub.status = SubStatus.ACTIVE.value
 
+            referred_by_to_award = None
+            friend_user_snapshot = None
+
             if sub.plan_type == PlanType.TRIAL_15M.value:
                 trial_minutes = config.TRIAL_DURATION_MINUTES
                 sub.expires_at = now + timedelta(minutes=trial_minutes)
@@ -112,6 +116,11 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
                 user_stmt = select(User).where(User.telegram_id == user_id)
                 user_obj = (await session.execute(user_stmt)).scalar_one_or_none()
                 if user_obj:
+                    # ถ้ายังไม่เคยใช้ trial และมีผู้แนะนำ -> เตรียมมอบรางวัลให้ผู้แนะนำ
+                    if not user_obj.trial_used and user_obj.referred_by_id:
+                        referred_by_to_award = user_obj.referred_by_id
+                        friend_user_snapshot = user_obj
+
                     user_obj.trial_used = True
                     session.add(user_obj)
 
@@ -143,6 +152,13 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
                 f"Activated Subscription ID={sub_id} for User ID={user_id}. "
                 f"Plan={sub.plan_type}, Expires={expires_at_thai}"
             )
+
+    # มอบรางวัล Referral Bonus ให้ผู้แนะนำ (ถ้ามี)
+    if referred_by_to_award and friend_user_snapshot:
+        try:
+            await award_referral_bonus(bot=bot, referrer_id=referred_by_to_award, friend_user=friend_user_snapshot)
+        except Exception as e:
+            logger.error(f"Failed to award referral bonus: {e}", exc_info=True)
 
     # ดำเนินการต่อหลังจบ Transaction DB
     if sub:

@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 from bot.config import get_settings
 from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS
 from bot.services.database import get_session
+from bot.services.referral import award_referral_bonus
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -105,10 +106,16 @@ async def sync_pending_members(bot: Bot) -> dict:
                     joined_time = joined_time.replace(tzinfo=timezone.utc)
 
                 sub.joined_at = joined_time
+                referred_by_to_award = None
+                friend_snapshot = None
 
                 if sub.plan_type == PlanType.TRIAL_15M.value:
                     sub.expires_at = joined_time + timedelta(minutes=config.TRIAL_DURATION_MINUTES)
                     if user_obj:
+                        if not user_obj.trial_used and user_obj.referred_by_id:
+                            referred_by_to_award = user_obj.referred_by_id
+                            friend_snapshot = user_obj
+
                         user_obj.trial_used = True
                         session.add(user_obj)
                 elif sub.plan_type in PLAN_DETAILS:
@@ -141,6 +148,12 @@ async def sync_pending_members(bot: Bot) -> dict:
                     logger.info(f"[SYNC] Activated PENDING sub for User {user_id}. Expires at {sub.expires_at}")
 
                 session.add(sub)
+
+                if referred_by_to_award and friend_snapshot:
+                    try:
+                        await award_referral_bonus(bot=bot, referrer_id=referred_by_to_award, friend_user=friend_snapshot)
+                    except Exception as e:
+                        logger.error(f"[SYNC] Failed to award referral bonus: {e}")
 
             else:
                 # ไม่ได้อยู่ใน Channel -> เช็คว่าเกิน 24 ชม. หรือไม่

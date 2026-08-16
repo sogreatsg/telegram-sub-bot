@@ -17,6 +17,7 @@ from bot.config import get_settings
 from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
+from bot.services.referral import get_referral_link, get_share_url
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -36,7 +37,7 @@ def format_thai_datetime(dt: datetime) -> str:
 
 
 def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup:
-    """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard พร้อม 3 แพ็กเกจ"""
+    """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard พร้อม 3 แพ็กเกจ และระบบชวนเพื่อน"""
     trial_button_text = "⏱️ ทดลองใช้ฟรี 15 นาที" if trial_available else "⏱️ ทดลองฟรี (ใช้สิทธิ์แล้ว)"
     
     keyboard = [
@@ -62,6 +63,12 @@ def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup
             InlineKeyboardButton(
                 text="🥇 VIP 30 วัน — 1,000 บาท",
                 callback_data="menu:subscribe:VIP_30D",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🎁 ชวนเพื่อนรับ VIP ฟรี (+1 วัน/คน)",
+                callback_data="menu:referral",
             ),
         ],
         [
@@ -122,7 +129,7 @@ def format_time_remaining(expires_at: datetime) -> str:
 
 @router.message(CommandStart())
 async def handle_start(message: Message, state: FSMContext):
-    """จัดการคำสั่ง /start ตรวจสอบผู้ใช้ ล้างสถานะ FSM และแสดงเมนูหลักภาษาไทย"""
+    """จัดการคำสั่ง /start ตรวจสอบผู้ใช้ ล้างสถานะ FSM รองรับ Deep link แนะนำเพื่อน และแสดงเมนูหลัก"""
     try:
         await state.clear()
     except Exception:
@@ -130,6 +137,16 @@ async def handle_start(message: Message, state: FSMContext):
 
     if not message.from_user:
         return
+
+    # ตรวจสอบ Payload Deep Link เช่น /start ref_123456789
+    referrer_id = None
+    if message.text:
+        parts = message.text.strip().split()
+        if len(parts) > 1 and parts[1].startswith("ref_"):
+            try:
+                referrer_id = int(parts[1].replace("ref_", ""))
+            except ValueError:
+                referrer_id = None
 
     telegram_user = message.from_user
     trial_available = True
@@ -140,6 +157,7 @@ async def handle_start(message: Message, state: FSMContext):
                 telegram_id=telegram_user.id,
                 username=telegram_user.username,
                 full_name=telegram_user.full_name or telegram_user.first_name,
+                referred_by_id=referrer_id,
             )
             trial_available = not user.trial_used
     except Exception as e:
@@ -316,6 +334,81 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
     await callback.answer()
 
 
+@router.callback_query(F.data == "menu:referral")
+async def handle_referral_menu(callback: CallbackQuery, bot: Bot, state: FSMContext):
+    """แสดงหน้าต่างระบบชวนเพื่อน (Referral System) พร้อมลิงก์เฉพาะตัวและสถิติ"""
+    await state.clear()
+    if not callback.from_user or not callback.message:
+        return
+
+    user_id = callback.from_user.id
+    try:
+        bot_info = await bot.get_me()
+        bot_username = bot_info.username or "barelive_sub_bot"
+    except Exception:
+        bot_username = "barelive_sub_bot"
+
+    ref_link = get_referral_link(bot_username, user_id)
+    share_url = get_share_url(bot_username, user_id)
+
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=user_id,
+            username=callback.from_user.username,
+            full_name=callback.from_user.full_name or callback.from_user.first_name,
+        )
+        ref_count = user.referral_count or 0
+        bonus_days = user.referral_bonus_days or 0
+
+    ref_text = (
+        "🎁 <b>ระบบแนะนำเพื่อน — รับสิทธิ์ VIP ฟรี!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "เพียงแชร์ลิงก์ให้เพื่อนเข้ามาทดลองใช้งานฟรีใน Channel "
+        "คุณจะได้รับ <b>VIP ฟรีทันที 1 วัน (+24 ชม.) ต่อเพื่อน 1 คน</b> "
+        "(สะสมวันได้เรื่อยๆ ไม่จำกัดจำนวนคน!)\n\n"
+        "📊 <b>สถิติของคุณในปัจจุบัน:</b>\n"
+        f"• 👥 เพื่อนที่ชวนสำเร็จแล้ว: <b>{ref_count} คน</b>\n"
+        f"• 🏆 โบนัส VIP ที่ได้รับสะสม: <b>{bonus_days} วัน</b>\n\n"
+        "🔗 <b>ลิงก์แนะนำเฉพาะตัวของคุณ:</b>\n"
+        f"<code>{ref_link}</code>\n\n"
+        "💡 <i>แตะที่ข้อความลิงก์ด้านบนเพื่อคัดลอก หรือกดปุ่ม 'แชร์ให้เพื่อน' ด้านล่างได้ทันที</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📤 กดแชร์ให้เพื่อนใน Telegram",
+                    url=share_url,
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 กลับสู่เมนูหลัก",
+                    callback_data="menu:main",
+                ),
+            ],
+        ]
+    )
+
+    try:
+        await callback.message.edit_text(
+            text=ref_text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        await callback.message.answer(
+            text=ref_text,
+            reply_markup=keyboard,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+    await callback.answer()
+
+
 @router.callback_query(F.data == "menu:my_status")
 async def handle_my_status(callback: CallbackQuery, state: FSMContext):
     """แสดงสถานะแพ็กเกจสมาชิกของผู้ใช้งาน (เวลาไทย)"""
@@ -341,7 +434,8 @@ async def handle_my_status(callback: CallbackQuery, state: FSMContext):
 
     status_text = f"📊 <b>สถานะการเป็นสมาชิกของคุณ</b>\n\n"
     status_text += f"👤 <b>Telegram ID:</b> <code>{user_id}</code>\n"
-    status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n\n"
+    status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n"
+    status_text += f"🎁 <b>โบนัสชวนเพื่อน:</b> ชวนสำเร็จ {user.referral_count or 0} คน (รับโบนัสสะสม {user.referral_bonus_days or 0} วัน)\n\n"
 
     if not sub:
         status_text += "🔴 <b>สถานะ:</b> ไม่มีแพ็กเกจที่ใช้งานอยู่\n"
@@ -390,6 +484,9 @@ async def handle_help(callback: CallbackQuery, state: FSMContext):
         "• <b>การทดลองใช้ฟรีทำงานอย่างไร?</b>\n"
         "กดปุ่ม 'ทดลองใช้ฟรี' บอทจะส่งลิงก์เชิญแบบ 1 ครั้งให้คุณ "
         "โดยเวลานับถอยหลังจะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel\n\n"
+        "• <b>ระบบแนะนำเพื่อน (รับ VIP ฟรี 1 วัน):</b>\n"
+        "กดปุ่ม '🎁 ชวนเพื่อนรับ VIP ฟรี' คัดลอกลิงก์ส่งให้เพื่อน "
+        "เมื่อเพื่อนกดเข้าทดลองใช้งาน Channel คุณจะได้รับ VIP ฟรี +1 วันทันที (สะสมวันได้เรื่อยๆ!)\n\n"
         "• <b>ขั้นตอนการสมัครสมาชิก VIP:</b>\n"
         "เลือกแพ็กเกจที่ต้องการ (3 วัน 300฿, 10 วัน 500฿ หรือ 30 วัน 1,000฿) "
         "สแกน QR Code พร้อมเพย์ตามยอดที่ระบุ แล้วส่งรูปภาพสลิปการโอนเงินเข้ามาในแชทนี้ได้ทันที\n\n"
@@ -434,7 +531,8 @@ async def handle_status_command(message: Message, state: FSMContext):
 
     status_text = f"📊 <b>สถานะการเป็นสมาชิกของคุณ</b>\n\n"
     status_text += f"👤 <b>Telegram ID:</b> <code>{user_id}</code>\n"
-    status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n\n"
+    status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n"
+    status_text += f"🎁 <b>โบนัสชวนเพื่อน:</b> ชวนสำเร็จ {user.referral_count or 0} คน (รับโบนัสสะสม {user.referral_bonus_days or 0} วัน)\n\n"
 
     if not sub or sub.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value, SubStatus.KICK_FAILED.value):
         status_text += "🔴 <b>สถานะ:</b> ไม่มีแพ็กเกจที่ใช้งานอยู่\n"

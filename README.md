@@ -23,14 +23,21 @@ Production-ready Telegram Membership Bot built with **Python 3.11+**, **aiogram 
    - Upon admin approval, the bot automatically generates a 1-use invite link and sends it to the user's DM.
    - Countdown begins the moment the user enters the channel.
 
-3. **⚙️ Automated Background Expiry Worker:**
+3. **🎁 Viral Referral System (+1 VIP Day per Friend with Day Stacking):**
+   - User generates personalized deep link (`https://t.me/<bot>?start=ref_<user_id>`) via `[🎁 ชวนเพื่อนรับ VIP ฟรี]`.
+   - One-tap Telegram sharing button.
+   - When a referred friend joins and starts their free trial, the referrer instantly receives **+1 Free VIP Day (+24h)**.
+   - **Continuous Day Stacking:** If the referrer has an active VIP, their `expires_at` is extended by 24h for every friend joined. If they don't have an active sub, a new 1-day VIP invite link is automatically generated and sent via DM.
+   - Real-time audit logs delivered to Admin Group.
+
+4. **⚙️ Automated Background Expiry Worker:**
    - APScheduler runs asynchronously every 60 seconds.
    - Detects all expired subscriptions (`expires_at <= UTC now`).
    - Executes a soft-kick via Telegram Bot API (`ban_chat_member` + `unban_chat_member`).
    - Updates database state to `KICKED` / `EXPIRED`.
    - Sends a friendly renewal DM to the user.
 
-4. **⚡ High-Performance Async SQLite with WAL Mode & Auto-Backup:**
+5. **⚡ High-Performance Async SQLite with WAL Mode & Auto-Backup:**
    - Async session factory using `aiosqlite` and SQLAlchemy 2.0.
    - Configured with `PRAGMA journal_mode=WAL;` and `PRAGMA synchronous=NORMAL;` for high concurrent read/write throughput and zero database lockups.
    - Built-in Online Backup system (`scripts/backup_db.py`) capturing snapshots with zero downtime.

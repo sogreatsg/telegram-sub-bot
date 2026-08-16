@@ -68,6 +68,18 @@ async def init_db() -> None:
                 await conn.execute(text("ALTER TABLE payment_slips ADD COLUMN plan_type VARCHAR(32) DEFAULT 'VIP_30D';"))
             except Exception:
                 pass
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN referred_by_id BIGINT;"))
+            except Exception:
+                pass
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0;"))
+            except Exception:
+                pass
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN referral_bonus_days INTEGER DEFAULT 0;"))
+            except Exception:
+                pass
     logger.info("Database initialized successfully with WAL mode enabled.")
 
 
@@ -83,6 +95,7 @@ async def get_or_create_user(
     telegram_id: int,
     username: Optional[str],
     full_name: str,
+    referred_by_id: Optional[int] = None,
 ) -> Tuple[User, bool]:
     """
     Fetch an existing user or create a new one. Updates username/full_name if changed.
@@ -105,11 +118,17 @@ async def get_or_create_user(
             session.add(user)
         return user, False
 
+    # ตรวจสอบ referred_by_id ต้องไม่ใช่ตัวเอง
+    valid_referrer = referred_by_id if (referred_by_id and referred_by_id != telegram_id) else None
+
     new_user = User(
         telegram_id=telegram_id,
         username=username,
         full_name=full_name,
         trial_used=False,
+        referred_by_id=valid_referrer,
+        referral_count=0,
+        referral_bonus_days=0,
     )
     session.add(new_user)
     await session.flush()

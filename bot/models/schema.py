@@ -29,6 +29,7 @@ class PlanType(str, enum.Enum):
     VIP_3D = "VIP_3D"
     VIP_10D = "VIP_10D"
     VIP_30D = "VIP_30D"
+    REFERRAL_VIP = "REFERRAL_VIP"
     MONTHLY_30D = "MONTHLY_30D"  # Legacy support
 
 
@@ -53,6 +54,13 @@ PLAN_DETAILS = {
         "price": 1000,
         "days": 30,
         "qr_filename": "qr_1000.png",
+    },
+    PlanType.REFERRAL_VIP.value: {
+        "name": "VIP โบนัสชวนเพื่อน",
+        "badge": "🎁 VIP ชวนเพื่อน",
+        "price": 0,
+        "days": 1,
+        "qr_filename": "",
     },
     PlanType.MONTHLY_30D.value: {
         "name": "VIP 30 วัน",
@@ -91,6 +99,11 @@ class User(Base):
     username: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     trial_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    referred_by_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id", ondelete="SET NULL"), nullable=True
+    )
+    referral_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    referral_bonus_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
