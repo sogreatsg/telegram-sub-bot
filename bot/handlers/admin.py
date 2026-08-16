@@ -233,8 +233,8 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
 
 @router.message(Command("admin", "admin_help", "help_admin"))
 async def handle_admin_menu_command(message: Message):
-    """คำสั่งแสดงเมนูคำสั่งแอดมินทั้งหมด: /admin"""
-    if message.chat.id != config.ADMIN_GROUP_ID and (not message.from_user):
+    """คำสั่งแสดงเมนูคำสั่งแอดมินทั้งหมด: /admin (เฉพาะใน Admin Group เท่านั้น)"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
         return
 
     admin_menu_text = (
@@ -273,6 +273,9 @@ async def handle_admin_menu_summary_callback(callback: CallbackQuery, bot: Bot):
     """ปุ่มลัดสำหรับเปิดรายงาน Active Summary"""
     if not callback.from_user or not callback.message:
         return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
     report_text = await build_active_members_report(bot=bot)
     await callback.message.answer(text=report_text, parse_mode="HTML")
     await callback.answer()
@@ -282,6 +285,9 @@ async def handle_admin_menu_summary_callback(callback: CallbackQuery, bot: Bot):
 async def handle_admin_menu_audit_callback(callback: CallbackQuery, bot: Bot):
     """ปุ่มลัดสำหรับตรวจสอบ System Audit"""
     if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
     
     status_lines = ["🔍 <b>ตรวจสอบสถานะและความพร้อมของระบบ (System Audit)</b>\n"]
@@ -314,8 +320,8 @@ async def handle_admin_menu_audit_callback(callback: CallbackQuery, bot: Bot):
 
 @router.message(Command("report", "summary"))
 async def handle_admin_report_command(message: Message, bot: Bot):
-    """คำสั่งดูรายงานสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบ Channel Member จริง"""
-    if message.chat.id != config.ADMIN_GROUP_ID and (not message.from_user):
+    """คำสั่งดูรายงานสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบ Channel Member จริง (เฉพาะใน Admin Group)"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
         return
 
     report_text = await build_active_members_report(bot=bot)
@@ -730,6 +736,9 @@ async def handle_admin_users_command(message: Message):
 async def handle_admin_users_page_callback(callback: CallbackQuery):
     """จัดการการเปลี่ยนหน้าในรายงาน /users ผ่าน Inline Keyboard"""
     if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
 
     page_str = callback.data.split(":")[-1]
