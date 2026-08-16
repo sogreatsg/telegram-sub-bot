@@ -244,11 +244,12 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot):
             session.add(pending_sub)
             await session.flush()
 
-    # สร้างลิงก์เชิญแบบใช้งานได้ 1 ครั้งสำหรับ Channel ส่วนตัว
+    # สร้างลิงก์เชิญแบบใช้งานได้ 1 ครั้งสำหรับ Channel ส่วนตัว (หมดอายุภายใน 48 ชม. หากไม่กดเข้า)
     try:
         invite_link_obj = await bot.create_chat_invite_link(
             chat_id=config.CHANNEL_ID,
             member_limit=1,
+            expire_date=datetime.now(timezone.utc) + timedelta(hours=48),
             name=f"Trial-{user_id}",
         )
         invite_url = invite_link_obj.invite_link

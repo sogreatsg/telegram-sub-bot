@@ -79,11 +79,12 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
         await session.flush()
         target_user_id = slip.user_id
 
-    # 3. สร้างลิงก์เชิญแบบ 1 ครั้งให้ผู้ใช้
+    # 3. สร้างลิงก์เชิญแบบ 1 ครั้งให้ผู้ใช้ (หมดอายุภายใน 7 วันหากไม่กดเข้า)
     try:
         invite_link_obj = await bot.create_chat_invite_link(
             chat_id=config.CHANNEL_ID,
             member_limit=1,
+            expire_date=datetime.now(timezone.utc) + timedelta(days=7),
             name=f"VIP-{target_user_id}",
         )
         invite_url = invite_link_obj.invite_link
@@ -522,12 +523,13 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         await session.flush()
         sub_id = subscription.id
 
-    # สร้าง invite link ให้
+    # สร้าง invite link ให้ (หมดอายุภายใน 7 วันหากไม่กดเข้า)
     invite_url = "-"
     try:
         invite_link_obj = await bot.create_chat_invite_link(
             chat_id=config.CHANNEL_ID,
             member_limit=1,
+            expire_date=datetime.now(timezone.utc) + timedelta(days=7),
             name=f"ManualVIP-{target_uid}",
         )
         invite_url = invite_link_obj.invite_link
