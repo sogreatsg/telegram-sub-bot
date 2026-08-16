@@ -70,7 +70,11 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
         return
 
     async with get_session() as session:
-        # 1. ตรวจสอบว่าผู้ใช้มี ACTIVE subscription ที่ยังไม่หมดอายุอยู่แล้วหรือไม่ (เช่น หลุดแล้วเข้าใหม่)
+        # 1. ตรวจสอบข้อมูล User ในฐานข้อมูล
+        user_stmt = select(User).where(User.telegram_id == user_id)
+        user_obj = (await session.execute(user_stmt)).scalar_one_or_none()
+
+        # 2. ตรวจสอบว่าผู้ใช้มี ACTIVE subscription ที่ยังไม่หมดอายุอยู่แล้วหรือไม่ (เช่น หลุดแล้วเข้าใหม่)
         active_stmt = (
             select(Subscription)
             .where(
@@ -86,7 +90,7 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
             logger.info(f"User {user_id} re-joined channel with already ACTIVE subscription ID={existing_active.id}")
             return
 
-        # 2. ค้นหา Subscription ล่าสุดที่มีสถานะ PENDING ของผู้ใช้คนนี้
+        # 3. ค้นหา Subscription ล่าสุดที่มีสถานะ PENDING ของผู้ใช้คนนี้
         stmt = (
             select(Subscription)
             .where(
@@ -98,8 +102,28 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
         result = await session.execute(stmt)
         sub = result.scalars().first()
 
-        # กรณีมี PENDING Subscription -> เปิดใช้งานตามปกติ
+        # ตรวจสอบความถูกต้องของ PENDING Subscription (ป้องกันการใช้สิทธิ์ซ้ำ หรือลิงก์เก่าค้าง)
+        is_sub_valid = False
         if sub:
+            sub_created = sub.created_at if sub.created_at else now
+            if sub_created.tzinfo is None:
+                sub_created = sub_created.replace(tzinfo=timezone.utc)
+            is_stale = (now - sub_created) > timedelta(hours=48)
+            is_trial_abuse = (sub.plan_type == PlanType.TRIAL_15M.value and user_obj and user_obj.trial_used)
+
+            if is_stale or is_trial_abuse:
+                logger.warning(
+                    f"Rejecting invalid PENDING sub #{sub.id} for User {user_id}: "
+                    f"is_stale={is_stale}, is_trial_abuse={is_trial_abuse}"
+                )
+                sub.status = SubStatus.EXPIRED.value
+                session.add(sub)
+                sub = None  # สั่งให้เข้าเงื่อนไข unauthorized เพื่อ Soft-kick ทันที!
+            else:
+                is_sub_valid = True
+
+        # กรณีมี PENDING Subscription ที่ถูกต้อง -> เปิดใช้งานตามปกติ
+        if sub and is_sub_valid:
             sub.joined_at = now
             sub.status = SubStatus.ACTIVE.value
 
@@ -113,8 +137,6 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
                 duration_str = f"{trial_minutes} นาที"
 
                 # บันทึกว่าผู้ใช้ได้ใช้สิทธิ์ trial แล้ว
-                user_stmt = select(User).where(User.telegram_id == user_id)
-                user_obj = (await session.execute(user_stmt)).scalar_one_or_none()
                 if user_obj:
                     # ถ้ายังไม่เคยใช้ trial และมีผู้แนะนำ -> เตรียมมอบรางวัลให้ผู้แนะนำ
                     if not user_obj.trial_used and user_obj.referred_by_id:
@@ -161,7 +183,7 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
             logger.error(f"Failed to award referral bonus: {e}", exc_info=True)
 
     # ดำเนินการต่อหลังจบ Transaction DB
-    if sub:
+    if sub and is_sub_valid:
         # 1. ส่งข้อความต้อนรับและแจ้งเวลาหมดอายุให้ผู้ใช้ทาง DM
         try:
             welcome_dm = (
@@ -226,6 +248,15 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
             logger.info(f"Successfully soft-kicked unauthorized User ID={user_id} from Channel.")
         except Exception as e:
             logger.error(f"Failed to soft-kick unauthorized User ID={user_id}: {e}")
+            try:
+                alert_perm = (
+                    f"⚠️ <b>[เตือนภัยสิทธิ์แอดมิน] บอทไม่สามารถเตะ User ID <code>{user_id}</code> ได้!</b>\n\n"
+                    f"สาเหตุ: <code>{html.escape(str(e))}</code>\n"
+                    "👉 <b>กรุณาตรวจสอบว่าบอทมีสิทธิ์ 'Ban Users / แบนผู้ใช้' ใน Channel VIP</b>"
+                )
+                await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=alert_perm, parse_mode="HTML")
+            except Exception:
+                pass
 
         # แจ้งเตือนผู้ใช้ทาง DM
         try:

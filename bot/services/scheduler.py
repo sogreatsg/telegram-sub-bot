@@ -109,6 +109,21 @@ async def sync_pending_members(bot: Bot) -> dict:
                 referred_by_to_award = None
                 friend_snapshot = None
 
+                # ตรวจสอบว่าเคยใช้ Trial ไปแล้วหรือไม่
+                if sub.plan_type == PlanType.TRIAL_15M.value and user_obj and user_obj.trial_used:
+                    # ไม่อนุญาตให้ใช้ Trial ซ้ำ -> สั่งเตะออกทันที
+                    try:
+                        await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, revoke_messages=False)
+                        await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, only_if_banned=True)
+                        sub.status = SubStatus.KICKED.value
+                        results["kicked_expired"] += 1
+                        logger.warning(f"[SYNC] User {user_id} attempted trial abuse in channel. Kicked successfully.")
+                    except Exception as e:
+                        sub.status = SubStatus.KICK_FAILED.value
+                        logger.warning(f"[SYNC] Failed to kick trial abuse user {user_id}: {e}")
+                    session.add(sub)
+                    continue
+
                 if sub.plan_type == PlanType.TRIAL_15M.value:
                     sub.expires_at = joined_time + timedelta(minutes=config.TRIAL_DURATION_MINUTES)
                     if user_obj:
