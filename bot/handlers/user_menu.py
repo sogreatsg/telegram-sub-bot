@@ -314,7 +314,7 @@ async def handle_my_status(callback: CallbackQuery):
         plan_label = "ทดลองใช้ฟรี" if sub.plan_type == PlanType.TRIAL_15M.value else "สมาชิก VIP"
         status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"
         status_text += "ระบบได้สร้างลิงก์เชิญให้คุณแล้ว เวลาจะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel ครับ"
-    elif sub.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value):
+    elif sub.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value, SubStatus.KICK_FAILED.value):
         status_text += "🔴 <b>สถานะ:</b> หมดอายุแล้ว (EXPIRED)\n"
         plan_label = "ทดลองใช้ฟรี" if sub.plan_type == PlanType.TRIAL_15M.value else "สมาชิก VIP"
         status_text += f"📦 <b>แพ็กเกจล่าสุด:</b> {plan_label}\n"
@@ -388,7 +388,7 @@ async def handle_status_command(message: Message):
     status_text += f"👤 <b>Telegram ID:</b> <code>{user_id}</code>\n"
     status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n\n"
 
-    if not sub or sub.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value):
+    if not sub or sub.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value, SubStatus.KICK_FAILED.value):
         status_text += "🔴 <b>สถานะ:</b> ไม่มีแพ็กเกจที่ใช้งานอยู่\n"
         status_text += "พิมพ์ /start เพื่อทดลองใช้ฟรี หรือสมัครสมาชิก VIP"
     elif sub.status == SubStatus.ACTIVE.value:

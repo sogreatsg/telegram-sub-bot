@@ -35,6 +35,7 @@ class SubStatus(str, enum.Enum):
     ACTIVE = "ACTIVE"
     EXPIRED = "EXPIRED"
     KICKED = "KICKED"
+    KICK_FAILED = "KICK_FAILED"
 
 
 class SlipStatus(str, enum.Enum):

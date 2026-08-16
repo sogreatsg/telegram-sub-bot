@@ -185,6 +185,18 @@ python3 scripts/backup_db.py
 
 ## 📊 Management & Useful Commands
 
+### 🤖 Telegram Bot Admin Commands (ใช้งานใน Admin Group)
+| คำสั่ง | รายละเอียด |
+|---|---|
+| `/admin` หรือ `/admin_help` | แสดงเมนูและคู่มือคำสั่งทั้งหมดของแอดมิน พร้อมปุ่มกดลัด Quick Actions |
+| `/summary` หรือ `/report` | ดูรายงานสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบยอดสมาชิกใน Channel จริงแบบ Real-time |
+| `/users` หรือ `/all_users` | ดูประวัติผู้ใช้งานย้อนหลังทั้งหมดในระบบ พร้อมระบบแบ่งหน้า (Pagination) และสถิติรวม |
+| `/user <@username หรือ ID>` | ดูประวัติเจาะลึกเฉพาะราย (เวลาออกลิงก์ 15m, เวลากดเข้าห้อง, เวลาหมดอายุ, สลิปโอนเงิน) |
+| `/audit` หรือ `/check` | ตรวจสอบสิทธิ์ของ Bot ใน Channel (Ban Users / Invite Links) และสถานะระบบ |
+| `/kick <user_id>` | สั่งเตะ (Soft-Kick) ผู้ใช้ออกจาก Channel VIP ทันที พร้อมอัปเดตสถานะในระบบ |
+| `/add_vip <user_id> [days]` | เพิ่มสิทธิ์สมาชิก VIP ให้ผู้ใช้ด้วยตนเอง พร้อมสร้างและส่งลิงก์เชิญอัตโนมัติ |
+
+### 🖥️ Server & Docker Management Commands
 | งานที่ต้องการทำ | คำสั่ง |
 |---|---|
 | **ดู Live Logs แบบ Real-time** | `docker compose logs -f` |

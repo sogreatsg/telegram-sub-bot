@@ -4,11 +4,13 @@ from datetime import datetime, timezone, timedelta
 from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.filters import Command
-from sqlalchemy import select
+from aiogram.enums import ChatMemberStatus
+from sqlalchemy import select, func
+from sqlalchemy.orm import selectinload
 
 from bot.config import get_settings
-from bot.models.schema import PaymentSlip, Subscription, SlipStatus, SubStatus, PlanType
-from bot.services.database import get_session
+from bot.models.schema import User, PaymentSlip, Subscription, SlipStatus, SubStatus, PlanType
+from bot.services.database import get_session, get_or_create_user
 from bot.services.scheduler import build_active_members_report
 
 logger = logging.getLogger(__name__)
@@ -229,12 +231,524 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
     await callback.answer("❌ ปฏิเสธสลิปเรียบร้อยแล้ว")
 
 
-@router.message(Command("report", "summary"))
-async def handle_admin_report_command(message: Message):
-    """คำสั่งดูรายงานสรุปสมาชิก Active ปัจจุบัน (สำหรับแอดมิน)"""
-    # ตรวจสอบว่าเป็นคำสั่งจากกลุ่ม Admin หรือแอดมิน
+@router.message(Command("admin", "admin_help", "help_admin"))
+async def handle_admin_menu_command(message: Message):
+    """คำสั่งแสดงเมนูคำสั่งแอดมินทั้งหมด: /admin"""
     if message.chat.id != config.ADMIN_GROUP_ID and (not message.from_user):
         return
 
-    report_text = await build_active_members_report()
+    admin_menu_text = (
+        "👑 <b>เมนูคำสั่งผู้ดูแลระบบ (Admin Panel & Commands)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📊 <b>1. ตรวจสอบสมาชิก & รายงาน:</b>\n"
+        "• <code>/summary</code> หรือ <code>/report</code> — ดูสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบยอดสมาชิกใน Channel จริง\n"
+        "• <code>/users</code> หรือ <code>/users [หน้า]</code> — ดูประวัติผู้ใช้งานย้อนหลังทั้งหมดในระบบ พร้อมปุ่มเลื่อนหน้า\n"
+        "• <code>/user [User ID หรือ @username]</code> — ดูประวัติเจาะลึกเฉพาะราย (เวลาออกลิงก์ 15m, เวลากดเข้าห้อง, เวลาหมดอายุ, สลิปโอนเงิน)\n\n"
+        "⚙️ <b>2. ตรวจสอบระบบ & สิทธิ์บอท:</b>\n"
+        "• <code>/audit</code> หรือ <code>/check</code> — ตรวจสอบสิทธิ์ของ Bot ใน Channel VIP (สิทธิ์ Ban Users, สิทธิ์สร้าง Invite Links) และสถานะการเชื่อมต่อ\n\n"
+        "🛠️ <b>3. จัดการสมาชิกใน Channel:</b>\n"
+        "• <code>/kick [User ID]</code> — สั่งเตะ (Soft-Kick) ผู้ใช้ออกจาก Channel VIP ทันที พร้อมอัปเดตสถานะในระบบ\n"
+        "• <code>/add_vip [User ID] [จำนวนวัน เช่น 30]</code> — เพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง บอทจะสร้างและส่งลิงก์เชิญให้ผู้ใช้ทาง DM ทันที\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>สามารถกดปุ่มลัดด้านล่างเพื่อใช้งานเมนูหลักได้ทันทีครับ</i>"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 สรุปสมาชิก Active", callback_data="admin_menu:summary"),
+                InlineKeyboardButton(text="🔍 Audit สิทธิ์บอท", callback_data="admin_menu:audit"),
+            ],
+            [
+                InlineKeyboardButton(text="📑 ประวัติผู้ใช้ทั้งหมด (/users)", callback_data="admin:users_page:1"),
+            ],
+        ]
+    )
+
+    await message.answer(text=admin_menu_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin_menu:summary")
+async def handle_admin_menu_summary_callback(callback: CallbackQuery, bot: Bot):
+    """ปุ่มลัดสำหรับเปิดรายงาน Active Summary"""
+    if not callback.from_user or not callback.message:
+        return
+    report_text = await build_active_members_report(bot=bot)
+    await callback.message.answer(text=report_text, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_menu:audit")
+async def handle_admin_menu_audit_callback(callback: CallbackQuery, bot: Bot):
+    """ปุ่มลัดสำหรับตรวจสอบ System Audit"""
+    if not callback.from_user or not callback.message:
+        return
+    
+    status_lines = ["🔍 <b>ตรวจสอบสถานะและความพร้อมของระบบ (System Audit)</b>\n"]
+    try:
+        bot_info = await bot.get_me()
+        chat_info = await bot.get_chat(chat_id=config.CHANNEL_ID)
+        member_count = await bot.get_chat_member_count(chat_id=config.CHANNEL_ID)
+        bot_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=bot_info.id)
+
+        status_lines.append(f"📢 <b>Channel:</b> {html.escape(chat_info.title or '')} (<code>{config.CHANNEL_ID}</code>)")
+        status_lines.append(f"👥 <b>จำนวนสมาชิกใน Telegram:</b> {member_count} คน")
+        
+        is_admin = bot_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+        status_lines.append(f"🤖 <b>สถานะบอทใน Channel:</b> {'✅ Administrator' if is_admin else '❌ ไม่ได้เป็น Admin'}")
+
+        if is_admin and hasattr(bot_member, "can_restrict_members"):
+            can_ban = bot_member.can_restrict_members
+            can_invite = bot_member.can_invite_users
+            status_lines.append(f"   • สิทธิ์เตะ/แบน (Ban Users): {'✅ มีสิทธิ์' if can_ban else '❌ ขาดสิทธิ์ (สำคัญมาก!)'}")
+            status_lines.append(f"   • สิทธิ์สร้างลิงก์เชิญ: {'✅ มีสิทธิ์' if can_invite else '❌ ขาดสิทธิ์'}")
+    except Exception as e:
+        status_lines.append(f"⚠️ <b>ตรวจสอบ Channel ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
+
+    status_lines.append("\n━━━━━━━━━━━━━━━━━━━━")
+    status_lines.append("💡 <i>พิมพ์ <code>/summary</code> เพื่อดูรายชื่อสมาชิก Active\nหรือ <code>/kick [User ID]</code> เพื่อสั่งเตะสมาชิกออกจากห้อง</i>")
+
+    await callback.message.answer(text="\n".join(status_lines), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.message(Command("report", "summary"))
+async def handle_admin_report_command(message: Message, bot: Bot):
+    """คำสั่งดูรายงานสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบ Channel Member จริง"""
+    if message.chat.id != config.ADMIN_GROUP_ID and (not message.from_user):
+        return
+
+    report_text = await build_active_members_report(bot=bot)
     await message.answer(text=report_text, parse_mode="HTML")
+
+
+@router.message(Command("audit", "check"))
+async def handle_admin_audit_command(message: Message, bot: Bot):
+    """คำสั่งตรวจสอบสถานะและสิทธิ์ของ Bot ใน Channel VIP และข้อมูลระบบ"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    status_lines = ["🔍 <b>ตรวจสอบสถานะและความพร้อมของระบบ (System Audit)</b>\n"]
+    
+    # 1. ตรวจสอบ Bot ใน Telegram Channel
+    try:
+        bot_info = await bot.get_me()
+        chat_info = await bot.get_chat(chat_id=config.CHANNEL_ID)
+        member_count = await bot.get_chat_member_count(chat_id=config.CHANNEL_ID)
+        bot_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=bot_info.id)
+
+        status_lines.append(f"📢 <b>Channel:</b> {html.escape(chat_info.title or '')} (<code>{config.CHANNEL_ID}</code>)")
+        status_lines.append(f"👥 <b>จำนวนสมาชิกใน Telegram:</b> {member_count} คน")
+        
+        is_admin = bot_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+        status_lines.append(f"🤖 <b>สถานะบอทใน Channel:</b> {'✅ Administrator' if is_admin else '❌ ไม่ได้เป็น Admin'}")
+
+        if is_admin and hasattr(bot_member, "can_restrict_members"):
+            can_ban = bot_member.can_restrict_members
+            can_invite = bot_member.can_invite_users
+            status_lines.append(f"   • สิทธิ์เตะ/แบน (Ban Users): {'✅ มีสิทธิ์' if can_ban else '❌ ขาดสิทธิ์ (สำคัญมาก!)'}")
+            status_lines.append(f"   • สิทธิ์สร้างลิงก์เชิญ: {'✅ มีสิทธิ์' if can_invite else '❌ ขาดสิทธิ์'}")
+    except Exception as e:
+        status_lines.append(f"⚠️ <b>ตรวจสอบ Channel ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
+
+    status_lines.append("\n━━━━━━━━━━━━━━━━━━━━")
+    status_lines.append("💡 <i>พิมพ์ <code>/summary</code> เพื่อดูรายชื่อสมาชิก Active\nหรือ <code>/kick [User ID]</code> เพื่อสั่งเตะสมาชิกออกจากห้อง</i>")
+
+    await message.answer(text="\n".join(status_lines), parse_mode="HTML")
+
+
+@router.message(Command("kick"))
+async def handle_admin_kick_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับบังคับเตะผู้ใช้ออกจาก Channel: /kick <user_id>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer("❌ <b>วิธีใช้งาน:</b> <code>/kick [User ID]</code>\nตัวอย่าง: <code>/kick 5125375696</code>", parse_mode="HTML")
+        return
+
+    try:
+        target_uid = int(args[1])
+    except ValueError:
+        await message.answer("❌ User ID ต้องเป็นตัวเลขเท่านั้น", parse_mode="HTML")
+        return
+
+    # ดำเนินการ Soft-kick
+    kicked = False
+    err_msg = ""
+    try:
+        await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, revoke_messages=False)
+        await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, only_if_banned=True)
+        kicked = True
+    except Exception as e:
+        err_msg = str(e)
+        logger.error(f"Manual kick failed for User {target_uid}: {e}")
+
+    # อัปเดตสถานะใน DB
+    async with get_session() as session:
+        stmt = (
+            select(Subscription)
+            .where(
+                Subscription.user_id == target_uid,
+                Subscription.status.in_([SubStatus.ACTIVE.value, SubStatus.PENDING.value, SubStatus.KICK_FAILED.value]),
+            )
+        )
+        subs = (await session.execute(stmt)).scalars().all()
+        for s in subs:
+            s.status = SubStatus.KICKED.value
+            session.add(s)
+
+    if kicked:
+        await message.answer(f"✅ <b>ดำเนินการ Soft-Kick สำเร็จ!</b>\nนำ User ID <code>{target_uid}</code> ออกจาก Channel เรียบร้อยแล้ว", parse_mode="HTML")
+    else:
+        await message.answer(f"⚠️ <b>เตะไม่สำเร็จ:</b> <code>{html.escape(err_msg)}</code>\n(แต่ได้อัปเดตสถานะในฐานข้อมูลเป็น KICKED แล้ว)", parse_mode="HTML")
+
+
+@router.message(Command("add_vip"))
+async def handle_admin_add_vip_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับเพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง: /add_vip <user_id> [จำนวนวัน]"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer("❌ <b>วิธีใช้งาน:</b> <code>/add_vip [User ID] [จำนวนวัน เช่น 30]</code>\nตัวอย่าง: <code>/add_vip 5125375696 30</code>", parse_mode="HTML")
+        return
+
+    try:
+        target_uid = int(args[1])
+        days = int(args[2]) if len(args) >= 3 else 30
+    except ValueError:
+        await message.answer("❌ User ID และจำนวนวันต้องเป็นตัวเลขเท่านั้น", parse_mode="HTML")
+        return
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(days=days)
+
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=target_uid,
+            username=None,
+            full_name=f"User {target_uid}",
+        )
+        
+        subscription = Subscription(
+            user_id=target_uid,
+            plan_type=f"MANUAL_VIP_{days}D",
+            joined_at=now,
+            expires_at=expires_at,
+            status=SubStatus.ACTIVE.value,
+        )
+        session.add(subscription)
+        await session.flush()
+        sub_id = subscription.id
+
+    # สร้าง invite link ให้
+    invite_url = "-"
+    try:
+        invite_link_obj = await bot.create_chat_invite_link(
+            chat_id=config.CHANNEL_ID,
+            member_limit=1,
+            name=f"ManualVIP-{target_uid}",
+        )
+        invite_url = invite_link_obj.invite_link
+    except Exception as e:
+        logger.warning(f"Could not generate invite link: {e}")
+
+    # ลองส่ง DM หาผู้ใช้
+    try:
+        await bot.send_message(
+            chat_id=target_uid,
+            text=(
+                f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({days} วัน) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
+                f"⏳ <b>หมดอายุวันที่:</b> <code>{format_thai_datetime(expires_at)} น.</code>\n\n"
+                f"🔗 <b>ลิงก์เข้าร่วม Channel:</b>\n{invite_url}"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    exp_thai = format_thai_datetime(expires_at)
+    resp = (
+        f"✅ <b>เพิ่มสิทธิ์ VIP เรียบร้อยแล้ว!</b>\n\n"
+        f"👤 <b>User ID:</b> <code>{target_uid}</code>\n"
+        f"📅 <b>ระยะเวลา:</b> {days} วัน (หมดอายุ: <code>{exp_thai} น.</code>)\n"
+        f"🆔 <b>Sub ID:</b> <code>#{sub_id}</code>\n"
+        f"🔗 <b>Invite Link:</b> <code>{invite_url}</code>"
+    )
+    await message.answer(resp, parse_mode="HTML")
+
+
+@router.message(Command("user", "check_user", "info"))
+async def handle_admin_user_info_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินดูประวัติของผู้ใช้: /user <@username หรือ User ID>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/user [User ID หรือ @username]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/user 5125375696</code>\n"
+            "• <code>/user @some_user</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    
+    async with get_session() as session:
+        # ค้นหาด้วย User ID (ถ้าเป็นตัวเลข) หรือ username
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+            
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+        
+        if not user:
+            await message.answer(f"❌ <b>ไม่พบข้อมูลผู้ใช้:</b> <code>{html.escape(query)}</code> ในระบบฐานข้อมูล", parse_mode="HTML")
+            return
+
+        # ดึงประวัติ Subscriptions ทั้งหมดของผู้ใช้นี้
+        subs_stmt = (
+            select(Subscription)
+            .where(Subscription.user_id == user.telegram_id)
+            .order_by(Subscription.id.desc())
+        )
+        subs = (await session.execute(subs_stmt)).scalars().all()
+        
+        # ดึงประวัติ PaymentSlips
+        slips_stmt = (
+            select(PaymentSlip)
+            .where(PaymentSlip.user_id == user.telegram_id)
+            .order_by(PaymentSlip.id.desc())
+        )
+        slips = (await session.execute(slips_stmt)).scalars().all()
+
+    # ตรวจสอบสถานะใน Channel จริง
+    channel_status_str = "ไม่ทราบสถานะ"
+    try:
+        chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user.telegram_id)
+        status_map = {
+            ChatMemberStatus.CREATOR: "👑 เจ้าของห้อง (Creator)",
+            ChatMemberStatus.ADMINISTRATOR: "🛡️ ผู้ดูแล (Admin)",
+            ChatMemberStatus.MEMBER: "🟢 อยู่ใน Channel (Member)",
+            ChatMemberStatus.LEFT: "⚪ ออกจากห้องไปแล้ว (Left)",
+            ChatMemberStatus.KICKED: "🔴 ถูกแบน/เตะออก (Kicked/Banned)",
+            ChatMemberStatus.RESTRICTED: "🟡 ถูกจำกัดสิทธิ์ (Restricted)",
+        }
+        channel_status_str = status_map.get(chat_member.status, chat_member.status)
+    except Exception as e:
+        channel_status_str = f"ไม่อยู่ใน Channel / ตรวจสอบไม่ได้ ({e})"
+
+    # จัดรูปแบบข้อความ
+    user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
+    full_name_safe = html.escape(user.full_name or "")
+    
+    resp = [
+        f"👤 <b>ข้อมูลผู้ใช้งาน: {full_name_safe}</b> ({user_handle})",
+        f"🔢 <b>Telegram ID:</b> <code>{user.telegram_id}</code>",
+        f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
+        f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> {channel_status_str}",
+        f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
+        "\n━━━━━━━━━━━━━━━━━━━━",
+        "📦 <b>ประวัติการขอแพ็กเกจ/สิทธิ์ (Subscriptions):</b>",
+    ]
+
+    if not subs:
+        resp.append("<i>ไม่มีประวัติการขอแพ็กเกจ</i>")
+    else:
+        for i, s in enumerate(subs, 1):
+            created_thai = format_thai_datetime(s.created_at)
+            joined_thai = format_thai_datetime(s.joined_at)
+            expired_thai = format_thai_datetime(s.expires_at)
+            
+            plan_label = f"ทดลองใช้ 15 นาที" if s.plan_type == PlanType.TRIAL_15M.value else s.plan_type
+            status_badge = {
+                SubStatus.ACTIVE.value: "🟢 ACTIVE (กำลังใช้งาน)",
+                SubStatus.PENDING.value: "🟡 PENDING (ออกลิงก์แล้ว-รอกดเข้า)",
+                SubStatus.EXPIRED.value: "⚪ EXPIRED (หมดอายุ)",
+                SubStatus.KICKED.value: "🔴 KICKED (เตะออกจากห้องแล้ว)",
+                SubStatus.KICK_FAILED.value: "⚠️ KICK_FAILED (เตะไม่สำเร็จ)",
+            }.get(s.status, s.status)
+
+            sub_info = (
+                f"\n<b>{i}. [#{s.id}] {plan_label}</b> — {status_badge}\n"
+                f"   • 🎟️ <b>เวลาออกลิงก์/สร้าง:</b> <code>{created_thai} น.</code>\n"
+                f"   • 🚪 <b>เวลากดเข้า Channel:</b> <code>{joined_thai} น.</code>\n"
+                f"   • ⏰ <b>เวลาหมดอายุ:</b> <code>{expired_thai} น.</code>"
+            )
+            resp.append(sub_info)
+
+    if slips:
+        resp.append("\n━━━━━━━━━━━━━━━━━━━━")
+        resp.append(f"💳 <b>ประวัติส่งสลิปโอนเงิน ({len(slips)} รายการ):</b>")
+        for sl in slips:
+            sl_created = format_thai_datetime(sl.created_at)
+            resp.append(f"• สลิป #{sl.id} | สถานะ: <b>{sl.status}</b> | เวลาส่ง: <code>{sl_created} น.</code>")
+
+    await message.answer("\n".join(resp), parse_mode="HTML")
+
+
+USERS_PER_PAGE = 5
+
+
+async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+    """สร้างรายงานสรุปรายชื่อและประวัติผู้ใช้งานทั้งหมดในระบบ พร้อมระบบแบ่งหน้า (Pagination)"""
+    now = datetime.now(timezone.utc)
+    
+    async with get_session() as session:
+        # 1. ดึงสถิติจำนวนรวม
+        total_users = (await session.execute(select(func.count(User.telegram_id)))).scalar() or 0
+        total_active = (await session.execute(
+            select(func.count(Subscription.id)).where(
+                Subscription.status == SubStatus.ACTIVE.value,
+                Subscription.expires_at > now,
+            )
+        )).scalar() or 0
+        total_trial_used = (await session.execute(
+            select(func.count(User.telegram_id)).where(User.trial_used == True)
+        )).scalar() or 0
+        total_kick_failed = (await session.execute(
+            select(func.count(Subscription.id)).where(Subscription.status == SubStatus.KICK_FAILED.value)
+        )).scalar() or 0
+
+        if total_users == 0:
+            return "ℹ️ <i>ขณะนี้ยังไม่มีข้อมูลผู้ใช้งานในระบบฐานข้อมูล</i>", None
+
+        total_pages = max(1, (total_users + USERS_PER_PAGE - 1) // USERS_PER_PAGE)
+        page = max(1, min(page, total_pages))
+
+        # 2. ดึงข้อมูล User ประจำหน้านี้ พร้อม Subscriptions และ Slips
+        stmt = (
+            select(User)
+            .options(
+                selectinload(User.subscriptions),
+                selectinload(User.payment_slips),
+            )
+            .order_by(User.created_at.desc())
+            .offset((page - 1) * USERS_PER_PAGE)
+            .limit(USERS_PER_PAGE)
+        )
+        users = (await session.execute(stmt)).scalars().all()
+
+    now_thai = format_thai_datetime(now)
+    lines = [
+        "📑 <b>รายงานประวัติผู้ใช้งานทั้งหมดในระบบ (Users History Audit)</b>",
+        f"📅 <b>ข้อมูล ณ วันที่:</b> <code>{now_thai} น.</code>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"👥 <b>ผู้ใช้ทั้งหมด:</b> <b>{total_users} คน</b> | 🟢 <b>Active:</b> <b>{total_active} คน</b>",
+        f"⏱️ <b>ใช้สิทธิ์ฟรี 15m แล้ว:</b> {total_trial_used} คน",
+    ]
+    if total_kick_failed > 0:
+        lines.append(f"⚠️ <b>สมาชิกเตะไม่สำเร็จ (Kick Failed):</b> {total_kick_failed} คน")
+    lines.append("━━━━━━━━━━━━━━━━━━━━\n")
+
+    start_index = (page - 1) * USERS_PER_PAGE + 1
+    for i, u in enumerate(users, start=start_index):
+        user_handle = f"@{u.username}" if u.username else "ไม่มี Username"
+        full_name_safe = html.escape(u.full_name or "ไม่ระบุชื่อ")
+        trial_str = "เคยใช้แล้ว ✅" if u.trial_used else "ยังไม่เคยใช้ ⏱️"
+        
+        user_block = [
+            f"<b>{i}. {full_name_safe}</b> ({user_handle})",
+            f"   • 🔢 <b>User ID:</b> <code>{u.telegram_id}</code> | สิทธิ์ฟรี: {trial_str}",
+            f"   • 📅 <b>เข้าใช้บอทครั้งแรก:</b> <code>{format_thai_datetime(u.created_at)} น.</code>",
+        ]
+
+        # Subscription ล่าสุด
+        latest_sub = u.subscriptions[0] if u.subscriptions else None
+        if latest_sub:
+            plan_label = "ทดลองใช้ 15 นาที" if latest_sub.plan_type == PlanType.TRIAL_15M.value else latest_sub.plan_type
+            status_badge = {
+                SubStatus.ACTIVE.value: "🟢 ACTIVE",
+                SubStatus.PENDING.value: "🟡 PENDING (ออกลิงก์แล้ว-รอกดเข้า)",
+                SubStatus.EXPIRED.value: "⚪ EXPIRED",
+                SubStatus.KICKED.value: "🔴 KICKED",
+                SubStatus.KICK_FAILED.value: "⚠️ KICK_FAILED",
+            }.get(latest_sub.status, latest_sub.status)
+
+            user_block.append(f"   • 📦 <b>สถานะล่าสุด:</b> {plan_label} [{status_badge}]")
+            user_block.append(f"   • 🎟️ <b>เวลาออกลิงก์:</b> <code>{format_thai_datetime(latest_sub.created_at)} น.</code>")
+            if latest_sub.joined_at:
+                user_block.append(f"   • 🚪 <b>เวลากดเข้าห้อง:</b> <code>{format_thai_datetime(latest_sub.joined_at)} น.</code>")
+            if latest_sub.expires_at:
+                user_block.append(f"   • ⏰ <b>เวลาหมดอายุ:</b> <code>{format_thai_datetime(latest_sub.expires_at)} น.</code>")
+        else:
+            user_block.append("   • 📦 <i>ยังไม่มีประวัติการขอแพ็กเกจ</i>")
+
+        if u.payment_slips:
+            user_block.append(f"   • 💳 สลิปชำระเงิน: {len(u.payment_slips)} รายการ (ล่าสุด: <b>{u.payment_slips[0].status}</b>)")
+
+        user_block.append("")
+        lines.extend(user_block)
+
+    lines.append(f"📄 <b>หน้า {page}/{total_pages}</b> (แสดงครั้งละ {USERS_PER_PAGE} คน)")
+    lines.append("💡 <i>พิมพ์ <code>/user [User ID]</code> เพื่อดูประวัติเจาะลึกเฉพาะราย</i>")
+
+    # ปุ่มเปลี่ยนหน้าแบบ Interactive
+    buttons = []
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="◀️ หน้าก่อน", callback_data=f"admin:users_page:{page-1}"))
+    nav_row.append(InlineKeyboardButton(text=f"📄 {page}/{total_pages}", callback_data="admin:noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="หน้าถัดไป ▶️", callback_data=f"admin:users_page:{page+1}"))
+    
+    if nav_row:
+        buttons.append(nav_row)
+    
+    buttons.append([
+        InlineKeyboardButton(text="🔄 รีเฟรช", callback_data=f"admin:users_page:{page}")
+    ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    return "\n".join(lines), keyboard
+
+
+@router.message(Command("users", "all_users", "user_list"))
+async def handle_admin_users_command(message: Message):
+    """คำสั่งดูประวัติผู้ใช้งานทั้งหมดในระบบ: /users [หน้าที่ต้องการดู]"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split()
+    page = 1
+    if len(args) >= 2 and args[1].isdigit():
+        page = int(args[1])
+
+    text, markup = await build_users_list_view(page=page)
+    await message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("admin:users_page:"))
+async def handle_admin_users_page_callback(callback: CallbackQuery):
+    """จัดการการเปลี่ยนหน้าในรายงาน /users ผ่าน Inline Keyboard"""
+    if not callback.from_user or not callback.message:
+        return
+
+    page_str = callback.data.split(":")[-1]
+    try:
+        page = int(page_str)
+    except ValueError:
+        page = 1
+
+    text, markup = await build_users_list_view(page=page)
+    try:
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:noop")
+async def handle_admin_noop(callback: CallbackQuery):
+    """Callback เปล่าสำหรับปุ่มแสดงเลขหน้า"""
+    await callback.answer()
+
+
