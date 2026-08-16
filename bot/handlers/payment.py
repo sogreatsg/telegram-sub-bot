@@ -290,10 +290,42 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
 
 
 @router.message(PaymentStates.waiting_for_slip)
-async def handle_invalid_slip_input(message: Message):
-    """แจ้งเตือนหากผู้ใช้ส่งข้อความที่ไม่ใช่รูปภาพเข้ามา"""
+async def handle_invalid_slip_input(message: Message, bot: Bot):
+    """แจ้งเตือนหากผู้ใช้ส่งข้อความที่ไม่ใช่รูปภาพเข้ามา และส่งต่อให้แอดมินรับทราบ"""
+    if not message.from_user:
+        return
+
+    telegram_user = message.from_user
+    user_id = telegram_user.id
+    msg_text = message.text or (f"[{message.content_type}]" if message.content_type else "[ข้อความ/ไฟล์]")
+
+    # 1. บันทึกข้อความของผู้ใช้
+    await log_chat_message(user_id=user_id, sender_role="USER", message_text=msg_text)
+
+    # 2. ส่งต่อเข้ากลุ่มแอดมิน
+    user_name = html.escape(telegram_user.full_name or telegram_user.first_name)
+    user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
+    time_now = format_thai_datetime(datetime.now(timezone.utc))
+
+    admin_alert = (
+        "💬 <b>มีข้อความจากผู้ใช้ (ระหว่างรอสลิปโอนเงิน)!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
+        f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+        f"📝 <b>ข้อความ:</b>\n<i>{html.escape(msg_text)}</i>\n"
+        f"📅 <b>เวลา:</b> <code>{time_now} น.</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 <i>พิมพ์ <code>/reply {user_id} [ข้อความ]</code> เพื่อตอบกลับ</i>"
+    )
+    try:
+        await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_alert, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Failed to forward slip question to Admin Group: {e}")
+
+    # 3. ตอบกลับผู้ใช้
     await message.answer(
         "⚠️ กรุณาส่งรูปภาพหรือสกรีนช็อตของสลิปการโอนเงินครับ\n"
         "หากต้องการยกเลิก ให้พิมพ์คำสั่ง /cancel",
         parse_mode="HTML",
     )
+    await log_chat_message(user_id=user_id, sender_role="BOT", message_text="⚠️ กรุณาส่งรูปภาพหรือสกรีนช็อตของสลิปการโอนเงินครับ")

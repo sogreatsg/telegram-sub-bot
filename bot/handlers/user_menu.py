@@ -412,22 +412,49 @@ async def handle_status_command(message: Message):
 
 
 @router.message(F.chat.type == "private")
-async def handle_user_dm_message(message: Message):
-    """บันทึกข้อความที่ผู้ใช้พิมพ์คุยกับบอทในแชทส่วนตัว (DM) เพื่อให้แอดมินดูย้อนหลังและตอบกลับได้"""
+async def handle_user_dm_message(message: Message, bot: Bot):
+    """บันทึกข้อความที่ผู้ใช้พิมพ์คุยกับบอทในแชทส่วนตัว (DM) และส่งต่อเข้า Admin Group แบบ Real-time"""
     if not message.from_user:
         return
 
-    user_id = message.from_user.id
+    telegram_user = message.from_user
+    user_id = telegram_user.id
     msg_text = message.text or (f"[{message.content_type}]" if message.content_type else "[ข้อความ/ไฟล์]")
     
-    # บันทึกข้อความของผู้ใช้ลงในฐานข้อมูล
+    # 1. บันทึกข้อความของผู้ใช้ลงในฐานข้อมูล
     await log_chat_message(user_id=user_id, sender_role="USER", message_text=msg_text)
 
-    # ส่งข้อความแนะนำเบื้องต้น
+    # 2. ส่งต่อข้อความไปยังกลุ่ม Admin Group แบบ Real-time
+    user_name = html.escape(telegram_user.full_name or telegram_user.first_name)
+    user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
+    time_now = format_thai_datetime(datetime.now(timezone.utc))
+
+    admin_alert = (
+        "💬 <b>มีข้อความใหม่จากผู้ใช้ (Direct Message)!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
+        f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+        f"📝 <b>ข้อความ:</b>\n<i>{html.escape(msg_text)}</i>\n"
+        f"📅 <b>เวลา:</b> <code>{time_now} น.</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 <i>พิมพ์ <code>/reply {user_id} [ข้อความ]</code> เพื่อตอบกลับทันที\n"
+        f"หรือ <code>/chat {user_id}</code> เพื่อดูประวัติการคุย</i>"
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=config.ADMIN_GROUP_ID,
+            text=admin_alert,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"Failed to forward user DM to Admin Group {config.ADMIN_GROUP_ID}: {e}")
+
+    # 3. ส่งข้อความตอบกลับยืนยันให้ผู้ใช้ใน DM
     reply_text = (
         "🤖 <b>ระบบได้รับข้อความของคุณเรียบร้อยแล้วครับ</b>\n\n"
-        "หากต้องการเปิดเมนูทำรายการ กรุณาพิมพ์คำสั่ง <b>/start</b>\n"
-        "หรือรอทีมงานแอดมินตอบกลับในแชทนี้ครับ"
+        "ข้อความของคุณถูกส่งไปยังทีมงานผู้ดูแลระบบเรียบร้อยแล้ว กรุณารอสักครู่นะครับ\n"
+        "หรือพิมพ์ <b>/start</b> หากต้องการเปิดเมนูทำรายการครับ"
     )
     await message.answer(text=reply_text, parse_mode="HTML")
     await log_chat_message(user_id=user_id, sender_role="BOT", message_text=reply_text)
