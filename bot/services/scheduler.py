@@ -339,11 +339,14 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
     now = datetime.now(timezone.utc)
     now_thai = format_thai_datetime(now)
 
-    # 1. ดึงจำนวนสมาชิกจริงจาก Telegram Channel
+    # 1. ดึงจำนวนสมาชิกจริงจาก Telegram Channel (ไม่นับ Admin และ Bot)
     channel_member_count = None
     if bot:
         try:
-            channel_member_count = await bot.get_chat_member_count(chat_id=config.CHANNEL_ID)
+            total_count = await bot.get_chat_member_count(chat_id=config.CHANNEL_ID)
+            admins = await bot.get_chat_administrators(chat_id=config.CHANNEL_ID)
+            # ใน Telegram Channel บอทและแอดมินจะรวมอยู่ในรายชื่อ administrators
+            channel_member_count = total_count - len(admins)
         except Exception as e:
             logger.warning(f"Could not fetch chat member count for channel {config.CHANNEL_ID}: {e}")
 
@@ -448,6 +451,21 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
 
         report += "━━━━━━━━━━━━━━━━━━━━\n"
         report += "🤖 <i>ระบบจัดการสมาชิก BareLive Membership Bot</i>"
+
+        if channel_member_count is not None and bot:
+            expected_count = total_active + total_failed
+            if channel_member_count != expected_count:
+                alert_msg = (
+                    "🚨 <b>แจ้งเตือนความผิดปกติของจำนวนสมาชิก!</b>\n\n"
+                    f"👥 จำนวนคนใน Channel จริง (ไม่รวม Admin/Bot): <b>{channel_member_count} คน</b>\n"
+                    f"📝 จำนวนคนที่ควรจะมี (Active + เตะไม่สำเร็จ): <b>{expected_count} คน</b>\n\n"
+                    "⚠️ <i>จำนวนคนไม่ตรงกับในระบบ! อาจมีคนแอบอยู่ในห้องโดยไม่มีแพ็กเกจ หรือมีคนถูกดึงเข้าห้องโดยไม่ผ่านบอท กรุณาตรวจสอบด่วนครับ!</i>"
+                )
+                try:
+                    await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=alert_msg, parse_mode="HTML")
+                except Exception as e:
+                    logger.error(f"Failed to send discrepancy alert: {e}")
+
         return report
 
 
