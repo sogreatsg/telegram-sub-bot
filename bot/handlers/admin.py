@@ -55,15 +55,19 @@ def format_time_remaining(expires_at: datetime) -> str:
 
 @router.message(Command("version"))
 async def handle_admin_version_command(message: Message):
-    """(Admin) เช็คเวอร์ชันปัจจุบันของบอท (Git Hash)"""
-    import subprocess
+    """(Admin) เช็คเวอร์ชันปัจจุบันของบอท"""
+    import os
     try:
-        result = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=2)
-        commit_hash = result.stdout.strip()
-        
-        result_log = subprocess.run(["git", "log", "-1", "--format=%cd", "--date=format:%Y-%m-%d %H:%M:%S"], capture_output=True, text=True, timeout=2)
-        commit_date = result_log.stdout.strip()
-        
+        version_file = os.path.join(os.path.dirname(__file__), "..", "version.txt")
+        if os.path.exists(version_file):
+            with open(version_file, "r") as f:
+                lines = f.read().splitlines()
+                commit_hash = lines[0] if len(lines) > 0 else "Unknown"
+                commit_date = lines[1] if len(lines) > 1 else "Unknown"
+        else:
+            commit_hash = "Dev Build"
+            commit_date = "N/A"
+            
         text = (
             f"🤖 <b>Bot Version Info</b>\n"
             f"━━━━━━━━━━━━━━\n"
@@ -72,7 +76,7 @@ async def handle_admin_version_command(message: Message):
             f"<i>อัปเดตล่าสุด: ฟีเจอร์ Swipe to Reply & เมนู Inline Users</i>"
         )
     except Exception as e:
-        text = f"🤖 <b>Bot Version Info</b>\nไม่สามารถอ่าน Git Hash ได้: <code>{str(e)}</code>"
+        text = f"🤖 <b>Bot Version Info</b>\nไม่สามารถอ่านเวอร์ชันได้: <code>{str(e)}</code>"
         
     await message.answer(text, parse_mode="HTML")
 
