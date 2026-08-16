@@ -60,6 +60,17 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
     user_id = user.id
     now = datetime.now(timezone.utc)
 
+    # ทำลายลิงก์เชิญ (Revoke) ทันทีที่ถูกใช้งาน (ป้องกันการนำกลับมาใช้ซ้ำ 100%)
+    if event.invite_link and not event.invite_link.is_primary:
+        try:
+            await bot.revoke_chat_invite_link(
+                chat_id=config.CHANNEL_ID, 
+                invite_link=event.invite_link.invite_link
+            )
+            logger.info(f"Revoked invite link {event.invite_link.invite_link} after use by {user_id}")
+        except Exception as e:
+            logger.warning(f"Could not revoke invite link: {e}")
+
     # ตรวจสอบว่าเป็น Administrator หรือ Owner หรือไม่ (ถ้าใช่ ให้ข้าม ไม่ต้องเตะ)
     if new_status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
         logger.info(f"User {user_id} joined/promoted as Administrator/Creator. Skipping subscription check.")
