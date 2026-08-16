@@ -46,7 +46,7 @@ class Settings(BaseSettings):
         description="Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL",
     )
     FREE_CHAT_GROUP_URL: str = Field(
-        default="https://web.telegram.org/a/#-1004339590299",
+        default="https://t.me/barelivechat",
         description="Free community chat group URL",
     )
 
