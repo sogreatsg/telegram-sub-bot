@@ -1,6 +1,7 @@
 import logging
 import html
 from datetime import datetime, timezone, timedelta
+from typing import Optional, Tuple
 from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.filters import Command
