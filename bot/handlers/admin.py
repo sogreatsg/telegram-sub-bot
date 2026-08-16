@@ -457,7 +457,18 @@ async def handle_admin_kick_command(message: Message, bot: Bot):
             session.add(s)
 
     if kicked:
-        await message.answer(f"✅ <b>ดำเนินการ Soft-Kick สำเร็จ!</b>\nนำ User ID <code>{target_uid}</code> ออกจาก Channel เรียบร้อยแล้ว", parse_mode="HTML")
+        # ส่งข้อความแจ้งเตือนทาง DM ให้ผู้ใช้
+        try:
+            kick_dm = (
+                "⚠️ <b>คุณถูกนำออกจาก Channel VIP โดยผู้ดูแลระบบ</b>\n\n"
+                "สถานะสมาชิกของคุณถูกยกเลิกแล้วครับ\n"
+                "หากต้องการสมัครสมาชิกใหม่หรือมีข้อสงสัย สามารถพิมพ์ <b>/start</b> เพื่อดูเมนูหรือติดต่อผู้ดูแลระบบได้ครับ"
+            )
+            await bot.send_message(chat_id=target_uid, text=kick_dm, parse_mode="HTML")
+        except Exception as e:
+            logger.debug(f"Could not send kick DM to user {target_uid}: {e}")
+
+        await message.answer(f"✅ <b>ดำเนินการ Soft-Kick สำเร็จ!</b>\nนำ User ID <code>{target_uid}</code> ออกจาก Channel เรียบร้อยแล้ว (ส่งแจ้งเตือน DM แล้ว)", parse_mode="HTML")
     else:
         await message.answer(f"⚠️ <b>เตะไม่สำเร็จ:</b> <code>{html.escape(err_msg)}</code>\n(แต่ได้อัปเดตสถานะในฐานข้อมูลเป็น KICKED แล้ว)", parse_mode="HTML")
 
