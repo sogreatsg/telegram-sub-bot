@@ -66,6 +66,12 @@ def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup
         ],
         [
             InlineKeyboardButton(
+                text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)",
+                url=config.FREE_CHAT_GROUP_URL,
+            ),
+        ],
+        [
+            InlineKeyboardButton(
                 text="📊 สถานะสมาชิกของฉัน",
                 callback_data="menu:my_status",
             ),
@@ -139,7 +145,9 @@ async def handle_start(message: Message, state: FSMContext):
         "• <b>⏱️ ทดลองใช้ฟรี 15 นาที</b>: ทดลองเข้าชม Channel ฟรี 1 ครั้ง\n"
         "• <b>🥉 VIP 3 วัน</b>: ราคา 300 บาท\n"
         "• <b>🥈 VIP 10 วัน</b>: ราคา 500 บาท\n"
-        "• <b>🥇 VIP 30 วัน</b>: ราคา 1,000 บาท"
+        "• <b>🥇 VIP 30 วัน</b>: ราคา 1,000 บาท\n\n"
+        "💬 <b>ห้องพูดคุยสาธารณะ (เข้าฟรี):</b>\n"
+        "สามารถกดปุ่ม <b>'💬 เข้ากลุ่มแชทพูดคุย (ฟรี)'</b> ด้านล่าง เพื่อเข้าร่วมพูดคุยกับเพื่อนๆ ได้ทันทีครับ!"
     )
 
     await message.answer(

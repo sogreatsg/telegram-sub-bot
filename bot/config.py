@@ -45,6 +45,10 @@ class Settings(BaseSettings):
         default="INFO",
         description="Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL",
     )
+    FREE_CHAT_GROUP_URL: str = Field(
+        default="https://web.telegram.org/a/#-1004339590299",
+        description="Free community chat group URL",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
