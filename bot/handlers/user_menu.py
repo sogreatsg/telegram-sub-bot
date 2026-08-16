@@ -23,18 +23,7 @@ logger = logging.getLogger(__name__)
 config = get_settings()
 router = Router(name="user_menu")
 
-BANGKOK_TZ = timezone(timedelta(hours=7))
-
-
-def format_thai_datetime(dt: datetime) -> str:
-    """แปลงเวลาเป็นเวลาไทย (UTC+7) รูปแบบ วัน/เดือน/ปี ชั่วโมง:นาที:วินาที"""
-    if dt is None:
-        return "-"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    thai_dt = dt.astimezone(BANGKOK_TZ)
-    return thai_dt.strftime("%d/%m/%Y %H:%M:%S")
-
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
 
 def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup:
     """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard พร้อม 3 แพ็กเกจ และระบบชวนเพื่อน"""
@@ -611,3 +600,13 @@ async def handle_user_dm_message(message: Message, bot: Bot):
         )
     except Exception as e:
         logger.error(f"Failed to forward user DM to Admin Group {config.ADMIN_GROUP_ID}: {e}")
+
+
+@router.message(F.chat.type == "private", F.text.startswith("/"))
+async def handle_unknown_command(message: Message):
+    """Fallback สำหรับคำสั่งที่ไม่มีในระบบ (เพื่อไม่ให้บอทเมินเงียบๆ)"""
+    await message.answer(
+        "❌ <b>ไม่รู้จักคำสั่งนี้ครับ</b>\n"
+        "กรุณาตรวจสอบความถูกต้อง หรือพิมพ์ /start เพื่อกลับสู่เมนูหลักครับ",
+        parse_mode="HTML"
+    )

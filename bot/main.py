@@ -16,8 +16,7 @@ from bot.handlers import (
     admin_router,
     channel_events_router,
 )
-
-BANGKOK_TZ = timezone(timedelta(hours=7))
+from bot.utils.time_utils import BANGKOK_TZ
 
 
 class ThaiTimeFormatter(logging.Formatter):
@@ -75,10 +74,10 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
 
     # 3. Register Handler Routers
-    dp.include_router(user_menu_router)
     dp.include_router(payment_router)
     dp.include_router(admin_router)
     dp.include_router(channel_events_router)
+    dp.include_router(user_menu_router)
 
     # 4. Initialize & Start APScheduler
     scheduler = setup_scheduler(bot)

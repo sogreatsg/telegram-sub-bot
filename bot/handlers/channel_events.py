@@ -15,8 +15,7 @@ logger = logging.getLogger(__name__)
 config = get_settings()
 router = Router(name="channel_events")
 
-BANGKOK_TZ = timezone(timedelta(hours=7))
-
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
 
 def ensure_utc(dt):
     if dt is None:
@@ -24,17 +23,6 @@ def ensure_utc(dt):
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
-
-
-def format_thai_datetime(dt: datetime) -> str:
-    """แปลงเวลาเป็นเวลาไทย (UTC+7) รูปแบบ วัน/เดือน/ปี ชั่วโมง:นาที:วินาที"""
-    if dt is None:
-        return "-"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    thai_dt = dt.astimezone(BANGKOK_TZ)
-    return thai_dt.strftime("%d/%m/%Y %H:%M:%S")
-
 
 @router.chat_member()
 async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):

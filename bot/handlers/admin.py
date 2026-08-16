@@ -1,6 +1,7 @@
 import logging
 import html
 import asyncio
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
 from aiogram import Router, F, Bot
@@ -17,31 +18,12 @@ from bot.services.database import get_session, get_or_create_user
 from bot.services.scheduler import build_active_members_report, sync_pending_members
 from bot.services.chat_logger import log_chat_message
 from bot.handlers.user_menu import get_main_menu_keyboard
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc
 
 logger = logging.getLogger(__name__)
 config = get_settings()
 router = Router(name="admin")
 
-BANGKOK_TZ = timezone(timedelta(hours=7))
-
-
-def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
-    """แปลงเวลาให้เป็น UTC ที่มี timezone เสมอ (ป้องกัน TypeError ระหว่าง naive และ aware datetimes)"""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def format_thai_datetime(dt: Optional[datetime]) -> str:
-    """แปลงเวลาเป็นเวลาไทย (UTC+7) รูปแบบ วัน/เดือน/ปี ชั่วโมง:นาที:วินาที"""
-    if dt is None:
-        return "-"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    thai_dt = dt.astimezone(BANGKOK_TZ)
-    return thai_dt.strftime("%d/%m/%Y %H:%M:%S")
 
 
 def format_time_remaining(expires_at: datetime) -> str:
@@ -1070,16 +1052,19 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
             resp.append(f"• สลิป #{sl.id} | สถานะ: <b>{sl.status}</b> | เวลาส่ง: <code>{sl_created} น.</code>")
 
     resp.append("\n━━━━━━━━━━━━━━━━━━━━")
-    resp.append(f"📋 <b>แตะเพื่อคัดลอกคำสั่งตอบกลับ:</b>\n<code>/reply {user.telegram_id} </code>")
+    resp.append(f"📋 <b>คำสั่งด่วน (แตะเพื่อคัดลอก):</b>")
+    resp.append(f"💬 ตอบกลับข้อความ: <code>/reply {user.telegram_id} </code>")
+    resp.append(f"➕ เพิ่ม VIP (30 วัน): <code>/add_vip {user.telegram_id} 30</code>")
+    resp.append(f"👢 เตะออกจากห้อง: <code>/kick {user.telegram_id}</code>")
 
     user_action_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{user.telegram_id}"),
-                InlineKeyboardButton(text="🔄 รีเซ็ต Trial", callback_data=f"admin:reset_trial:{user.telegram_id}"),
             ],
             [
-                InlineKeyboardButton(text="🗑️ ลบประวัติ/User ทั้งหมด", callback_data=f"admin:confirm_reset_user:{user.telegram_id}"),
+                InlineKeyboardButton(text="🔄 รีเซ็ต Trial", callback_data=f"admin:reset_trial:{user.telegram_id}"),
+                InlineKeyboardButton(text="🗑️ ลบประวัติทั้งหมด", callback_data=f"admin:confirm_reset_user:{user.telegram_id}"),
             ],
         ]
     )
@@ -1218,6 +1203,47 @@ async def handle_admin_reply_command(message: Message, bot: Bot):
         )
     except Exception as e:
         await message.answer(f"❌ <b>ส่งข้อความไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>\n(ผู้ใช้อาจบล็อกบอทหรือยังไม่เคยกด /start)", parse_mode="HTML")
+
+
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, F.reply_to_message)
+async def handle_admin_swipe_reply(message: Message, bot: Bot):
+    """จัดการเมื่อแอดมินปัดขวาตอบกลับ (Reply) ข้อความที่บอทส่งมาเพื่อตอบผู้ใช้อัตโนมัติ โดยไม่ต้องพิมพ์ /reply"""
+    if not message.text:
+        return
+
+    # Check if the replied message is from the bot
+    bot_user = await bot.get_me()
+    if message.reply_to_message.from_user.id != bot_user.id:
+        return
+
+    # Look for User ID in the replied message caption or text
+    text_to_search = message.reply_to_message.caption or message.reply_to_message.text or ""
+    
+    # regex matches: "User ID: </code>123456" or "User ID: 123456" etc.
+    match = re.search(r"User ID:(?:</b>)?\s*(?:<code>)?(\d+)", text_to_search)
+    if not match:
+        return
+        
+    target_uid = int(match.group(1))
+    reply_text = message.text
+
+    dm_msg = (
+        "💬 <b>ข้อความจากทีมงานผู้ดูแลระบบ:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"{html.escape(reply_text)}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>คุณสามารถพิมพ์ข้อความตอบกลับในแชทนี้ได้ตลอดเวลาครับ</i>"
+    )
+
+    try:
+        await bot.send_message(chat_id=target_uid, text=dm_msg, parse_mode="HTML")
+        await log_chat_message(user_id=target_uid, sender_role="ADMIN", message_text=reply_text)
+        await message.reply(
+            f"✅ <b>ตอบกลับข้อความไปยังผู้ใช้ (<code>{target_uid}</code>) สำเร็จ!</b>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await message.reply(f"❌ <b>ส่งข้อความไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>\n(ผู้ใช้อาจบล็อกบอทหรือยังไม่เคยกด /start)", parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("admin:view_chat:"))
@@ -1360,16 +1386,20 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
         resp.append(f"\n💳 <b>สลิปล่าสุด:</b> #{slips[0].id} ({slips[0].status})")
 
     resp.append("\n━━━━━━━━━━━━━━━━━━━━")
-    resp.append(f"📋 <b>แตะเพื่อคัดลอกคำสั่งตอบกลับ:</b>\n<code>/reply {user_id} </code>")
+    resp.append("\n━━━━━━━━━━━━━━━━━━━━")
+    resp.append(f"📋 <b>คำสั่งด่วน (แตะเพื่อคัดลอก):</b>")
+    resp.append(f"💬 ตอบกลับข้อความ: <code>/reply {user_id} </code>")
+    resp.append(f"➕ เพิ่ม VIP (30 วัน): <code>/add_vip {user_id} 30</code>")
+    resp.append(f"👢 เตะออกจากห้อง: <code>/kick {user_id}</code>")
 
     user_action_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{user_id}"),
-                InlineKeyboardButton(text="🔄 รีเซ็ต Trial", callback_data=f"admin:reset_trial:{user_id}"),
             ],
             [
-                InlineKeyboardButton(text="🗑️ ลบประวัติ/User ทั้งหมด", callback_data=f"admin:confirm_reset_user:{user_id}"),
+                InlineKeyboardButton(text="🔄 รีเซ็ต Trial", callback_data=f"admin:reset_trial:{user_id}"),
+                InlineKeyboardButton(text="🗑️ ลบประวัติทั้งหมด", callback_data=f"admin:confirm_reset_user:{user_id}"),
             ],
         ]
     )
@@ -1586,6 +1616,8 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
     lines.append("━━━━━━━━━━━━━━━━━━━━\n")
 
     start_index = (page - 1) * USERS_PER_PAGE + 1
+    buttons = []
+    
     for i, u in enumerate(users, start=start_index):
         user_handle = f"@{u.username}" if u.username else "ไม่มี Username"
         full_name_safe = html.escape(u.full_name or "ไม่ระบุชื่อ")
@@ -1642,12 +1674,14 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
 
         user_block.append("")
         lines.extend(user_block)
+        
+        # เพิ่มปุ่มจัดการผู้ใช้รายบุคคล (UX improvement)
+        buttons.append([InlineKeyboardButton(text=f"👤 {i}. จัดการ {full_name_safe}", callback_data=f"admin:view_user:{u.telegram_id}")])
 
     lines.append(f"📄 <b>หน้า {page}/{total_pages}</b> (แสดงครั้งละ {USERS_PER_PAGE} คน)")
-    lines.append("💡 <i>พิมพ์ <code>/user [User ID]</code> เพื่อดูประวัติเจาะลึกเฉพาะราย</i>")
+    lines.append("💡 <i>คลิกที่ปุ่มด้านล่างเพื่อจัดการผู้ใช้งานรายบุคคล</i>")
 
     # ปุ่มเปลี่ยนหน้าแบบ Interactive
-    buttons = []
     nav_row = []
     if page > 1:
         nav_row.append(InlineKeyboardButton(text="◀️ หน้าก่อน", callback_data=f"admin:users_page:{page-1}"))

@@ -18,18 +18,7 @@ from bot.services.referral import award_referral_bonus
 logger = logging.getLogger(__name__)
 config = get_settings()
 
-BANGKOK_TZ = timezone(timedelta(hours=7))
-
-
-def format_thai_datetime(dt: Optional[datetime]) -> str:
-    """แปลงเวลาเป็นเวลาไทย (UTC+7) รูปแบบ วัน/เดือน/ปี ชั่วโมง:นาที:วินาที"""
-    if dt is None:
-        return "-"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    thai_dt = dt.astimezone(BANGKOK_TZ)
-    return thai_dt.strftime("%d/%m/%Y %H:%M:%S")
-
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
 
 def format_remaining_time(expires_at: Optional[datetime]) -> str:
     """แปลงเวลาคงเหลือให้อ่านง่ายเป็นภาษาไทย"""

@@ -23,18 +23,7 @@ logger = logging.getLogger(__name__)
 config = get_settings()
 router = Router(name="payment")
 
-BANGKOK_TZ = timezone(timedelta(hours=7))
-
-
-def format_thai_datetime(dt: datetime) -> str:
-    """แปลงเวลาเป็นเวลาไทย (UTC+7) รูปแบบ วัน/เดือน/ปี ชั่วโมง:นาที:วินาที"""
-    if dt is None:
-        return "-"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    thai_dt = dt.astimezone(BANGKOK_TZ)
-    return thai_dt.strftime("%d/%m/%Y %H:%M:%S")
-
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
 
 class PaymentStates(StatesGroup):
     """FSM states สำหรับกระบวนการส่งสลิปโอนเงิน"""
@@ -50,7 +39,7 @@ def get_payment_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def get_admin_slip_keyboard(slip_id: int) -> InlineKeyboardMarkup:
+def get_admin_slip_keyboard(slip_id: int, user_id: int) -> InlineKeyboardMarkup:
     """สร้างปุ่มอนุมัติและปฏิเสธสำหรับแอดมินในกลุ่ม Admin"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -62,6 +51,16 @@ def get_admin_slip_keyboard(slip_id: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="❌ ปฏิเสธ",
                     callback_data=f"admin:reject:{slip_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="👤 ดูข้อมูลสมาชิก",
+                    callback_data=f"admin:view_user:{user_id}",
+                ),
+                InlineKeyboardButton(
+                    text="📜 ดูประวัติการคุย",
+                    callback_data=f"admin:view_chat:{user_id}",
                 ),
             ]
         ]
@@ -232,7 +231,7 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
             chat_id=config.ADMIN_GROUP_ID,
             photo=file_id,
             caption=admin_caption,
-            reply_markup=get_admin_slip_keyboard(slip_id),
+            reply_markup=get_admin_slip_keyboard(slip_id, telegram_user.id),
             parse_mode="HTML",
         )
         logger.info(f"Payment slip #{slip_id} from user {telegram_user.id} forwarded to Admin Group {config.ADMIN_GROUP_ID}")
@@ -313,7 +312,7 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
             chat_id=config.ADMIN_GROUP_ID,
             document=file_id,
             caption=admin_caption,
-            reply_markup=get_admin_slip_keyboard(slip_id),
+            reply_markup=get_admin_slip_keyboard(slip_id, telegram_user.id),
             parse_mode="HTML",
         )
     except Exception as e:
