@@ -7,6 +7,7 @@ from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.filters import Command
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError, TelegramBadRequest
 from sqlalchemy import select, func, delete
 from sqlalchemy.orm import selectinload
 
@@ -64,7 +65,11 @@ def format_time_remaining(expires_at: datetime) -> str:
 @router.callback_query(F.data.startswith("admin:approve:"))
 async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
     """จัดการเมื่อ Admin กดยืนยัน/อนุมัติสลิปสำหรับสมาชิก VIP พร้อมระบบสะสมวัน (Day Stacking)"""
-    if not callback.from_user:
+    if not callback.from_user or not callback.message:
+        return
+
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คุณไม่มีสิทธิ์ดำเนินการนี้ (เฉพาะแอดมินเท่านั้น)", show_alert=True)
         return
 
     admin_user = callback.from_user
@@ -257,7 +262,11 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
 @router.callback_query(F.data.startswith("admin:reject:"))
 async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
     """จัดการเมื่อ Admin กดปฏิเสธสลิป (เวลาไทย)"""
-    if not callback.from_user:
+    if not callback.from_user or not callback.message:
+        return
+
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คุณไม่มีสิทธิ์ดำเนินการนี้ (เฉพาะแอดมินเท่านั้น)", show_alert=True)
         return
 
     admin_user = callback.from_user
@@ -268,6 +277,8 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
     except ValueError:
         await callback.answer("❌ รหัสสลิปไม่ถูกต้อง", show_alert=True)
         return
+
+    requested_plan = PlanType.VIP_30D.value
 
     async with get_session() as session:
         stmt = select(PaymentSlip).where(PaymentSlip.id == slip_id)
@@ -289,6 +300,10 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
         slip.admin_id = admin_user.id
         session.add(slip)
         target_user_id = slip.user_id
+        requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
+
+    plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
+    plan_price_str = f"{plan_info['price']:,} บาท"
 
     # 1. ส่งข้อความแจ้งผู้ใช้ทาง DM
     try:
@@ -296,7 +311,7 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
             "❌ <b>แจ้งเตือนผลการตรวจสอบสลิปโอนเงิน</b>\n\n"
             "ทีมงานไม่สามารถยืนยันสลิปการโอนเงินสำหรับสมาชิก VIP ของคุณได้ครับ\n\n"
             "สาเหตุที่เป็นไปได้:\n"
-            "• ยอดเงินที่โอนไม่ตรงกับค่าบริการ (300 บาท)\n"
+            f"• ยอดเงินที่โอนไม่ตรงกับค่าบริการ ({plan_price_str})\n"
             "• รูปภาพสลิปไม่ชัดเจนหรือไม่สามารถอ่านข้อมูลได้\n"
             "• วันที่หรือเวลาในสลิปไม่ถูกต้อง\n\n"
             "👉 กรุณาพิมพ์ /start เพื่อส่งสลิปใหม่อีกครั้ง หรือติดต่อแอดมินหากมีข้อสงสัยครับ"
@@ -1487,6 +1502,9 @@ async def handle_admin_cancel_reset_callback(callback: CallbackQuery):
     """Callback ยกเลิกการลบผู้ใช้"""
     if not callback.from_user or not callback.message:
         return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
     try:
         await callback.message.delete()
     except Exception:
@@ -1795,18 +1813,28 @@ async def handle_broadcast_menu_command(message: Message, bot: Bot):
 
     for i, u in enumerate(users, 1):
         menu_text, menu_kb = get_start_menu_content(trial_available=not u.trial_used)
-        try:
-            await bot.send_message(
-                chat_id=u.telegram_id,
-                text=menu_text,
-                reply_markup=menu_kb,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            success_count += 1
-        except Exception as e:
+        sent = False
+        for attempt in range(3):
+            try:
+                await bot.send_message(
+                    chat_id=u.telegram_id,
+                    text=menu_text,
+                    reply_markup=menu_kb,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                success_count += 1
+                sent = True
+                break
+            except TelegramRetryAfter as e:
+                logger.warning(f"Flood limit in broadcast_menu. Sleeping for {e.retry_after}s (attempt {attempt+1}/3)...")
+                await asyncio.sleep(e.retry_after + 1)
+            except Exception as e:
+                logger.debug(f"Broadcast menu failed for user {u.telegram_id}: {e}")
+                break
+
+        if not sent:
             fail_count += 1
-            logger.debug(f"Broadcast menu failed for user {u.telegram_id}: {e}")
 
         # หน่วงเวลา 0.05 วินาที เพื่อป้องกัน Telegram Flood Limits
         await asyncio.sleep(0.05)
@@ -1948,27 +1976,37 @@ async def handle_broadcast_custom_command(message: Message, bot: Bot):
     fail_count = 0
 
     for i, u in enumerate(users, 1):
-        try:
-            if photo_file_id:
-                await bot.send_photo(
-                    chat_id=u.telegram_id,
-                    photo=photo_file_id,
-                    caption=broadcast_text,
-                    reply_markup=open_menu_kb,
-                    parse_mode="HTML",
-                )
-            else:
-                await bot.send_message(
-                    chat_id=u.telegram_id,
-                    text=broadcast_text,
-                    reply_markup=open_menu_kb,
-                    parse_mode="HTML",
-                    disable_web_page_preview=False,
-                )
-            success_count += 1
-        except Exception as e:
+        sent = False
+        for attempt in range(3):
+            try:
+                if photo_file_id:
+                    await bot.send_photo(
+                        chat_id=u.telegram_id,
+                        photo=photo_file_id,
+                        caption=broadcast_text,
+                        reply_markup=open_menu_kb,
+                        parse_mode="HTML",
+                    )
+                else:
+                    await bot.send_message(
+                        chat_id=u.telegram_id,
+                        text=broadcast_text,
+                        reply_markup=open_menu_kb,
+                        parse_mode="HTML",
+                        disable_web_page_preview=False,
+                    )
+                success_count += 1
+                sent = True
+                break
+            except TelegramRetryAfter as e:
+                logger.warning(f"Flood limit in broadcast_custom. Sleeping for {e.retry_after}s (attempt {attempt+1}/3)...")
+                await asyncio.sleep(e.retry_after + 1)
+            except Exception as e:
+                logger.debug(f"Broadcast custom msg failed for user {u.telegram_id}: {e}")
+                break
+
+        if not sent:
             fail_count += 1
-            logger.debug(f"Broadcast custom msg failed for user {u.telegram_id}: {e}")
 
         await asyncio.sleep(0.05)
 

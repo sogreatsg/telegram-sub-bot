@@ -165,6 +165,12 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
                     user_obj.trial_used = True
                     session.add(user_obj)
 
+            elif sub.plan_type == PlanType.REFERRAL_VIP.value:
+                bonus_days = user_obj.referral_bonus_days if (user_obj and user_obj.referral_bonus_days > 0) else 1
+                sub.expires_at = now + timedelta(days=bonus_days)
+                plan_title = f"สมาชิก 🎁 VIP โบนัสชวนเพื่อน ({bonus_days} วัน)"
+                duration_str = f"{bonus_days} วัน"
+
             elif sub.plan_type in PLAN_DETAILS:
                 p_info = PLAN_DETAILS[sub.plan_type]
                 sub.expires_at = now + timedelta(days=p_info["days"])

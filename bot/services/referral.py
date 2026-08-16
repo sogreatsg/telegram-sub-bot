@@ -118,8 +118,8 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
                 session.add(new_sub)
                 new_sub_created = True
 
-    # 4. หากสร้าง Subscription ใหม่ -> สร้าง Invite Link ส่งให้ผู้แนะนำ
-    if new_sub_created:
+    # 4. หากไม่มี Active Sub -> สร้าง Invite Link ส่งให้ผู้แนะนำ
+    if not sub_extended:
         try:
             invite_obj = await bot.create_chat_invite_link(
                 chat_id=config.CHANNEL_ID,
@@ -147,15 +147,16 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
                 "💡 <i>ระบบสะสมและขยายเวลาให้โดยอัตโนมัติ ชวนเพื่อนเพิ่มเพื่อรับวันใช้งานฟรีต่อเนื่องได้เลยครับ!</i>"
             )
         else:
-            link_info = f"\n🔗 <b>ลิงก์เข้า Channel VIP ของคุณ:</b>\n{invite_url}\n\n⏱️ <i>เวลานับถอยหลัง 1 วัน จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</i>" if invite_url else ""
+            bonus_total_days = referrer.referral_bonus_days or 1
+            link_info = f"\n🔗 <b>ลิงก์เข้า Channel VIP ของคุณ:</b>\n{invite_url}\n\n⏱️ <i>เวลานับถอยหลัง {bonus_total_days} วัน จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</i>" if invite_url else ""
             dm_text = (
                 "🎉 <b>ยินดีด้วย! เพื่อนที่คุณแนะนำได้เข้าร่วมทดลองใช้งานแล้ว</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 f"👤 <b>เพื่อน:</b> {friend_name} ({friend_handle})\n"
-                "🎁 คุณได้รับสิทธิ์ <b>VIP ฟรี 1 วัน</b> เรียบร้อยแล้ว!\n"
+                f"🎁 คุณได้รับสิทธิ์ <b>VIP โบนัสสะสมรวม {bonus_total_days} วัน</b> เรียบร้อยแล้ว!\n"
                 f"{link_info}\n"
                 f"👥 <b>ชวนเพื่อนสำเร็จสะสม:</b> <b>{referrer.referral_count} คน</b>\n"
-                f"🏆 <b>โบนัสสะสมทั้งหมด:</b> <b>{referrer.referral_bonus_days} วัน</b>\n"
+                f"🏆 <b>โบนัสสะสมทั้งหมด:</b> <b>{bonus_total_days} วัน</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "💡 <i>ชวนเพื่อนเพิ่มเพื่อสะสมวันใช้งานฟรีได้เรื่อยๆ ครับ!</i>"
             )

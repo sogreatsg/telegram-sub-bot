@@ -133,6 +133,9 @@ async def sync_pending_members(bot: Bot) -> dict:
 
                         user_obj.trial_used = True
                         session.add(user_obj)
+                elif sub.plan_type == PlanType.REFERRAL_VIP.value:
+                    bonus_days = user_obj.referral_bonus_days if (user_obj and user_obj.referral_bonus_days > 0) else 1
+                    sub.expires_at = joined_time + timedelta(days=bonus_days)
                 elif sub.plan_type in PLAN_DETAILS:
                     p_info = PLAN_DETAILS[sub.plan_type]
                     sub.expires_at = joined_time + timedelta(days=p_info["days"])
@@ -226,6 +229,7 @@ async def check_expired_subscriptions(bot: Bot) -> None:
             user_id = sub.user_id
             plan = sub.plan_type
             sub_id = sub.id
+            was_already_failed = (sub.status == SubStatus.KICK_FAILED.value)
             user_obj = sub.user
             user_handle = f"@{user_obj.username}" if (user_obj and user_obj.username) else ""
             user_name = html.escape(user_obj.full_name) if (user_obj and user_obj.full_name) else f"User {user_id}"
@@ -319,25 +323,26 @@ async def check_expired_subscriptions(bot: Bot) -> None:
                 sub.status = SubStatus.KICK_FAILED.value
                 session.add(sub)
 
-                # แจ้งเตือนเข้า Admin Group เพื่อให้ทีมงานรับทราบและตรวจสอบสิทธิ์
-                try:
-                    alert_admin_msg = (
-                        "⚠️ <b>[แจ้งเตือน] บอทไม่สามารถเตะสมาชิกที่หมดอายุได้!</b>\n\n"
-                        f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
-                        f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
-                        f"📦 <b>แพ็กเกจ:</b> {plan}\n"
-                        f"❌ <b>สาเหตุ:</b> <code>{html.escape(fail_reason or 'Unknown error')}</code>\n\n"
-                        "👉 <b>แนวทางแก้ไข:</b>\n"
-                        "1. ตรวจสอบสิทธิ์ของบอทใน Channel ว่าเปิด <b>'Ban Users'</b> หรือไม่\n"
-                        f"2. หรือใช้คำสั่ง <code>/kick {user_id}</code> เพื่อบังคับเตะ"
-                    )
-                    await bot.send_message(
-                        chat_id=config.ADMIN_GROUP_ID,
-                        text=alert_admin_msg,
-                        parse_mode="HTML",
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send kick failure notification to Admin Group: {e}")
+                # แจ้งเตือนเข้า Admin Group เฉพาะครั้งแรกที่เตะไม่สำเร็จ (ป้องกัน spam ทุก 60 วินาที)
+                if not was_already_failed:
+                    try:
+                        alert_admin_msg = (
+                            "⚠️ <b>[แจ้งเตือน] บอทไม่สามารถเตะสมาชิกที่หมดอายุได้!</b>\n\n"
+                            f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
+                            f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+                            f"📦 <b>แพ็กเกจ:</b> {plan}\n"
+                            f"❌ <b>สาเหตุ:</b> <code>{html.escape(fail_reason or 'Unknown error')}</code>\n\n"
+                            "👉 <b>แนวทางแก้ไข:</b>\n"
+                            "1. ตรวจสอบสิทธิ์ของบอทใน Channel ว่าเปิด <b>'Ban Users'</b> หรือไม่\n"
+                            f"2. หรือใช้คำสั่ง <code>/kick {user_id}</code> เพื่อบังคับเตะ"
+                        )
+                        await bot.send_message(
+                            chat_id=config.ADMIN_GROUP_ID,
+                            text=alert_admin_msg,
+                            parse_mode="HTML",
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send kick failure notification to Admin Group: {e}")
 
 
 async def build_active_members_report(bot: Optional[Bot] = None) -> str:

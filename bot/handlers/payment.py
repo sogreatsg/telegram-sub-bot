@@ -15,7 +15,6 @@ from aiogram.types import (
 from aiogram.filters import Command
 
 from bot.config import get_settings
-from bot.config import get_settings
 from bot.models.schema import PaymentSlip, SlipStatus, PlanType, PLAN_DETAILS
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
@@ -166,7 +165,7 @@ async def handle_cancel_command(message: Message, state: FSMContext):
     await message.answer("❌ ยกเลิกการทำรายการเรียบร้อยแล้ว พิมพ์ /start เพื่อเปิดเมนูหลัก", parse_mode="HTML")
 
 
-@router.message(F.chat.type == "private", F.photo)
+@router.message(PaymentStates.waiting_for_slip, F.photo)
 async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bot):
     """จัดการรูปภาพสลิปที่ผู้ใช้ส่งมา และส่งต่อไปยังกลุ่ม Admin เพื่อตรวจสอบ (เวลาไทย)"""
     if not message.from_user or not message.photo:
@@ -244,7 +243,7 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
         )
 
 
-@router.message(F.chat.type == "private", F.document)
+@router.message(PaymentStates.waiting_for_slip, F.document)
 async def handle_payment_slip_document(message: Message, state: FSMContext, bot: Bot):
     """จัดการกรณีผู้ใช้ส่งสลิปเป็นไฟล์รูปภาพ (Document) (เวลาไทย)"""
     if not message.from_user or not message.document:
@@ -319,6 +318,75 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
         )
     except Exception as e:
         logger.error(f"Failed to forward document slip #{slip_id} to Admin Group: {e}", exc_info=True)
+
+
+@router.message(F.chat.type == "private", F.photo | F.document)
+async def handle_general_user_media(message: Message, bot: Bot):
+    """จัดการรูปภาพหรือไฟล์ที่ผู้ใช้ส่งมานอกขั้นตอนการชำระเงิน (ส่งต่อเป็นข้อความ Support ให้แอดมิน)"""
+    if not message.from_user:
+        return
+
+    telegram_user = message.from_user
+    user_id = telegram_user.id
+    user_name = html.escape(telegram_user.full_name or telegram_user.first_name)
+    user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
+    time_now = format_thai_datetime(datetime.now(timezone.utc))
+    caption = message.caption or ""
+
+    media_type = "รูปภาพ" if message.photo else "ไฟล์เอกสาร"
+    await log_chat_message(user_id=user_id, sender_role="USER", message_text=f"[{media_type}] {caption}")
+
+    admin_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{user_id}"),
+                InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{user_id}"),
+            ],
+        ]
+    )
+
+    admin_alert = (
+        f"📷 <b>มีผู้ใช้ส่ง{media_type} (Direct Message)!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
+        f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+    )
+    if caption:
+        admin_alert += f"📝 <b>คำบรรยาย:</b> <i>{html.escape(caption)}</i>\n"
+    admin_alert += (
+        f"📅 <b>เวลา:</b> <code>{time_now} น.</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📋 <b>แตะข้อความด้านล่างเพื่อคัดลอกคำสั่งตอบกลับ:</b>\n"
+        f"<code>/reply {user_id} </code>"
+    )
+
+    try:
+        if message.photo:
+            await bot.send_photo(
+                chat_id=config.ADMIN_GROUP_ID,
+                photo=message.photo[-1].file_id,
+                caption=admin_alert,
+                reply_markup=admin_keyboard,
+                parse_mode="HTML",
+            )
+        elif message.document:
+            await bot.send_document(
+                chat_id=config.ADMIN_GROUP_ID,
+                document=message.document.file_id,
+                caption=admin_alert,
+                reply_markup=admin_keyboard,
+                parse_mode="HTML",
+            )
+    except Exception as e:
+        logger.error(f"Failed to forward user media to Admin Group: {e}")
+
+    await message.answer(
+        f"💬 <b>ระบบได้รับ{media_type}ของคุณเรียบร้อยแล้วครับ</b>\n\n"
+        "ทีมงานแอดมินได้รับข้อมูลเรียบร้อยแล้วและจะติดต่อกลับโดยเร็วที่สุดครับ\n"
+        "💡 <i>หากคุณต้องการส่งสลิปสมัครสมาชิก VIP กรุณาพิมพ์ /start แล้วกดเลือกแพ็กเกจก่อนส่งสลิปครับ</i>",
+        parse_mode="HTML",
+    )
+    await log_chat_message(user_id=user_id, sender_role="BOT", message_text=f"💬 ระบบได้รับ{media_type}ของคุณเรียบร้อยแล้วครับ")
 
 
 @router.message(PaymentStates.waiting_for_slip, ~F.text.startswith("/"))
