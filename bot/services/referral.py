@@ -35,8 +35,8 @@ def get_share_url(bot_username: str, user_id: int) -> str:
     """สร้าง URL สำหรับแชร์ต่อให้เพื่อนใน Telegram"""
     ref_link = get_referral_link(bot_username, user_id)
     share_text = (
-        "🔥 เข้าชม Channel VIP BareLive ฟรี 15 นาที!\n"
-        f"กดรับสิทธิ์ผ่านลิงก์นี้ได้เลย: {ref_link}"
+        "กลุ่มใหม่ ดูห้องล้อคแบไลฟ์ ไม่ต้องเสียคอยเยอะ ดูห้องล้อคจุกๆๆ เข้าเลย กดลิ้งนี้\n"
+        f"{ref_link}"
     )
     encoded_text = urllib.parse.quote(share_text)
     return f"https://t.me/share/url?url={urllib.parse.quote(ref_link)}&text={encoded_text}"
