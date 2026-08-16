@@ -166,7 +166,7 @@ async def handle_cancel_command(message: Message, state: FSMContext):
     await message.answer("❌ ยกเลิกการทำรายการเรียบร้อยแล้ว พิมพ์ /start เพื่อเปิดเมนูหลัก", parse_mode="HTML")
 
 
-@router.message(PaymentStates.waiting_for_slip, F.photo)
+@router.message(F.chat.type == "private", F.photo)
 async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bot):
     """จัดการรูปภาพสลิปที่ผู้ใช้ส่งมา และส่งต่อไปยังกลุ่ม Admin เพื่อตรวจสอบ (เวลาไทย)"""
     if not message.from_user or not message.photo:
@@ -244,7 +244,7 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
         )
 
 
-@router.message(PaymentStates.waiting_for_slip, F.document)
+@router.message(F.chat.type == "private", F.document)
 async def handle_payment_slip_document(message: Message, state: FSMContext, bot: Bot):
     """จัดการกรณีผู้ใช้ส่งสลิปเป็นไฟล์รูปภาพ (Document) (เวลาไทย)"""
     if not message.from_user or not message.document:

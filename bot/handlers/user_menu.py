@@ -2,7 +2,8 @@ import logging
 import html
 from datetime import datetime, timezone, timedelta
 from aiogram import Router, F, Bot
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, StateFilter
+from aiogram.fsm.state import default_state
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -433,7 +434,7 @@ async def handle_status_command(message: Message):
     await log_chat_message(user_id=user_id, sender_role="USER", message_text="/status")
 
 
-@router.message(F.chat.type == "private")
+@router.message(F.chat.type == "private", StateFilter(default_state), F.text)
 async def handle_user_dm_message(message: Message, bot: Bot):
     """บันทึกข้อความที่ผู้ใช้พิมพ์คุยกับบอทในแชทส่วนตัว (DM) และส่งต่อเข้า Admin Group แบบ Real-time"""
     if not message.from_user:
