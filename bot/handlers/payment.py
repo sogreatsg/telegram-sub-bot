@@ -321,7 +321,7 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
         logger.error(f"Failed to forward document slip #{slip_id} to Admin Group: {e}", exc_info=True)
 
 
-@router.message(PaymentStates.waiting_for_slip)
+@router.message(PaymentStates.waiting_for_slip, ~F.text.startswith("/"))
 async def handle_invalid_slip_input(message: Message, bot: Bot):
     """แจ้งเตือนหากผู้ใช้ส่งข้อความที่ไม่ใช่รูปภาพเข้ามา และส่งต่อให้แอดมินรับทราบ"""
     if not message.from_user:

@@ -3,6 +3,7 @@ import html
 from datetime import datetime, timezone, timedelta
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command, StateFilter
+from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
 from aiogram.types import (
     Message,
@@ -114,8 +115,9 @@ def format_time_remaining(expires_at: datetime) -> str:
 
 
 @router.message(CommandStart())
-async def handle_start(message: Message):
-    """จัดการคำสั่ง /start ตรวจสอบผู้ใช้และแสดงเมนูหลักภาษาไทย"""
+async def handle_start(message: Message, state: FSMContext):
+    """จัดการคำสั่ง /start ตรวจสอบผู้ใช้ ล้างสถานะ FSM และแสดงเมนูหลักภาษาไทย"""
+    await state.clear()
     if not message.from_user:
         return
 
@@ -149,8 +151,9 @@ async def handle_start(message: Message):
 
 
 @router.callback_query(F.data == "menu:main")
-async def handle_menu_main(callback: CallbackQuery):
+async def handle_menu_main(callback: CallbackQuery, state: FSMContext):
     """จัดการการกดปุ่มกลับสู่เมนูหลัก"""
+    await state.clear()
     if not callback.from_user or not callback.message:
         return
 
@@ -184,8 +187,9 @@ async def handle_menu_main(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "menu:trial")
-async def handle_trial_request(callback: CallbackQuery, bot: Bot):
+async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMContext):
     """จัดการคำขอทดลองใช้งานฟรี"""
+    await state.clear()
     if not callback.from_user:
         return
 
@@ -290,8 +294,9 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot):
 
 
 @router.callback_query(F.data == "menu:my_status")
-async def handle_my_status(callback: CallbackQuery):
+async def handle_my_status(callback: CallbackQuery, state: FSMContext):
     """แสดงสถานะแพ็กเกจสมาชิกของผู้ใช้งาน (เวลาไทย)"""
+    await state.clear()
     if not callback.from_user or not callback.message:
         return
 
@@ -351,8 +356,9 @@ async def handle_my_status(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "menu:help")
-async def handle_help(callback: CallbackQuery):
+async def handle_help(callback: CallbackQuery, state: FSMContext):
     """แสดงวิธีใช้งานและคำถามที่พบบ่อย (FAQ)"""
+    await state.clear()
     if not callback.message:
         return
 
@@ -382,8 +388,9 @@ async def handle_help(callback: CallbackQuery):
 
 
 @router.message(Command("status"))
-async def handle_status_command(message: Message):
+async def handle_status_command(message: Message, state: FSMContext):
     """จัดการคำสั่ง /status โดยตรง (เวลาไทย)"""
+    await state.clear()
     if not message.from_user:
         return
 
