@@ -25,7 +25,16 @@ router = Router(name="admin")
 BANGKOK_TZ = timezone(timedelta(hours=7))
 
 
-def format_thai_datetime(dt: datetime) -> str:
+def ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """แปลงเวลาให้เป็น UTC ที่มี timezone เสมอ (ป้องกัน TypeError ระหว่าง naive และ aware datetimes)"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def format_thai_datetime(dt: Optional[datetime]) -> str:
     """แปลงเวลาเป็นเวลาไทย (UTC+7) รูปแบบ วัน/เดือน/ปี ชั่วโมง:นาที:วินาที"""
     if dt is None:
         return "-"
@@ -81,182 +90,187 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
         await callback.answer("❌ รหัสสลิปไม่ถูกต้อง", show_alert=True)
         return
 
-    now = datetime.now(timezone.utc)
-    is_stack_extension = False
-    new_expires_at = None
-    target_user_id = None
-    requested_plan = PlanType.VIP_30D.value
+    try:
+        now = datetime.now(timezone.utc)
+        is_stack_extension = False
+        new_expires_at = None
+        target_user_id = None
+        requested_plan = PlanType.VIP_30D.value
 
-    async with get_session() as session:
-        stmt = select(PaymentSlip).where(PaymentSlip.id == slip_id)
-        result = await session.execute(stmt)
-        slip = result.scalar_one_or_none()
+        async with get_session() as session:
+            stmt = select(PaymentSlip).where(PaymentSlip.id == slip_id)
+            result = await session.execute(stmt)
+            slip = result.scalar_one_or_none()
 
-        if not slip:
-            await callback.answer("❌ ไม่พบข้อมูลสลิปในระบบ", show_alert=True)
-            return
+            if not slip:
+                await callback.answer("❌ ไม่พบข้อมูลสลิปในระบบ", show_alert=True)
+                return
 
-        if slip.status != SlipStatus.PENDING.value:
-            await callback.answer(
-                f"⚠️ สลิปนี้ได้รับการดำเนินการไปแล้ว ({slip.status})!",
-                show_alert=True,
+            if slip.status != SlipStatus.PENDING.value:
+                await callback.answer(
+                    f"⚠️ สลิปนี้ได้รับการดำเนินการไปแล้ว ({slip.status})!",
+                    show_alert=True,
+                )
+                return
+
+            # 1. อัปเดตสถานะสลิปเป็น APPROVED และบันทึก ID แอดมิน
+            slip.status = SlipStatus.APPROVED.value
+            slip.admin_id = admin_user.id
+            session.add(slip)
+            target_user_id = slip.user_id
+            requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
+
+            plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
+            additional_days = plan_info["days"]
+
+            # 2. ตรวจสอบว่าผู้ใช้อยู่ใน Channel และมี ACTIVE Subscription หรือไม่
+            active_stmt = (
+                select(Subscription)
+                .where(
+                    Subscription.user_id == target_user_id,
+                    Subscription.status == SubStatus.ACTIVE.value,
+                    Subscription.expires_at > now,
+                )
+                .order_by(Subscription.id.desc())
             )
-            return
+            active_sub = (await session.execute(active_stmt)).scalar_one_or_none()
 
-        # 1. อัปเดตสถานะสลิปเป็น APPROVED และบันทึก ID แอดมิน
-        slip.status = SlipStatus.APPROVED.value
-        slip.admin_id = admin_user.id
-        session.add(slip)
-        target_user_id = slip.user_id
-        requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
+            # ตรวจสอบสถานะจริงใน Channel
+            is_in_channel = False
+            try:
+                chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_user_id)
+                is_in_channel = chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+            except Exception:
+                is_in_channel = False
+
+            if active_sub and is_in_channel:
+                # === กรณีต่อเวลาสะสม (Day Stacking) ===
+                current_exp = ensure_utc(active_sub.expires_at)
+                base_time = max(current_exp, now) if current_exp else now
+                new_expires_at = base_time + timedelta(days=additional_days)
+                active_sub.expires_at = new_expires_at
+                active_sub.plan_type = requested_plan
+                session.add(active_sub)
+                is_stack_extension = True
+                logger.info(
+                    f"Approve slip #{slip_id}: Extended active sub #{active_sub.id} for User {target_user_id} by +{additional_days} days. "
+                    f"New expires_at: {new_expires_at}"
+                )
+            else:
+                # === กรณีต้องส่งลิงก์เชิญใหม่ ===
+                subscription = Subscription(
+                    user_id=target_user_id,
+                    plan_type=requested_plan,
+                    status=SubStatus.PENDING.value,
+                )
+                session.add(subscription)
+                await session.flush()
 
         plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
-        additional_days = plan_info["days"]
+        plan_badge = plan_info["badge"]
+        plan_desc = f"{plan_info['days']} วัน"
+        user_dm_sent = False
 
-        # 2. ตรวจสอบว่าผู้ใช้อยู่ใน Channel และมี ACTIVE Subscription หรือไม่
-        active_stmt = (
-            select(Subscription)
-            .where(
-                Subscription.user_id == target_user_id,
-                Subscription.status == SubStatus.ACTIVE.value,
-                Subscription.expires_at > now,
+        if is_stack_extension and new_expires_at:
+            # ส่ง DM แจ้งการต่อเวลาสะสม
+            exp_thai = format_thai_datetime(new_expires_at)
+            time_rem = format_time_remaining(new_expires_at)
+            user_message = (
+                "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"📦 <b>แพ็กเกจที่ซื้อเพิ่ม:</b> {plan_badge} (+{plan_desc})\n"
+                "⏳ <b>ระบบได้ต่อเวลาสะสมให้คุณเรียบร้อยแล้ว!</b>\n"
+                f"📅 <b>วันหมดอายุใหม่ของคุณ:</b> <code>{exp_thai} น.</code>\n"
+                f"⏰ <b>เวลาคงเหลือรวม:</b> {time_rem}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 <i>คุณสามารถรับชมเนื้อหาใน Channel VIP ได้ต่อเนื่องทันทีโดยไม่ต้องกดเข้าห้องใหม่ครับ! 🚀</i>"
             )
-            .order_by(Subscription.id.desc())
-        )
-        active_sub = (await session.execute(active_stmt)).scalar_one_or_none()
+            try:
+                await bot.send_message(
+                    chat_id=target_user_id,
+                    text=user_message,
+                    parse_mode="HTML",
+                )
+                user_dm_sent = True
+            except Exception as e:
+                logger.warning(f"Could not send stacked extension DM to User ID={target_user_id}: {e}")
 
-        # ตรวจสอบสถานะจริงใน Channel
-        is_in_channel = False
-        try:
-            chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_user_id)
-            is_in_channel = chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
-        except Exception:
-            is_in_channel = False
-
-        if active_sub and is_in_channel:
-            # === กรณีต่อเวลาสะสม (Day Stacking) ===
-            base_time = max(active_sub.expires_at, now)
-            new_expires_at = base_time + timedelta(days=additional_days)
-            active_sub.expires_at = new_expires_at
-            active_sub.plan_type = requested_plan
-            session.add(active_sub)
-            is_stack_extension = True
-            logger.info(
-                f"Approve slip #{slip_id}: Extended active sub #{active_sub.id} for User {target_user_id} by +{additional_days} days. "
-                f"New expires_at: {new_expires_at}"
-            )
         else:
-            # === กรณีต้องส่งลิงก์เชิญใหม่ ===
-            subscription = Subscription(
-                user_id=target_user_id,
-                plan_type=requested_plan,
-                status=SubStatus.PENDING.value,
+            # สร้างลิงก์เชิญแบบ 1 ครั้งให้ผู้ใช้
+            try:
+                invite_link_obj = await bot.create_chat_invite_link(
+                    chat_id=config.CHANNEL_ID,
+                    member_limit=1,
+                    expire_date=now + timedelta(days=7),
+                    name=f"VIP-{target_user_id}",
+                )
+                invite_url = invite_link_obj.invite_link
+            except Exception as e:
+                logger.error(f"Failed to generate invite link for approved user {target_user_id}: {e}", exc_info=True)
+                await callback.answer(
+                    "⚠️ ไม่สามารถสร้างลิงก์เชิญได้! กรุณาตรวจสอบว่าบอทมีสิทธิ์สร้างลิงก์ใน Channel",
+                    show_alert=True,
+                )
+                return
+
+            user_message = (
+                "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"📦 <b>แพ็กเกจ:</b> <b>{plan_badge} ({plan_desc})</b> พร้อมใช้งานแล้วครับ\n\n"
+                f"🔗 <b>ลิงก์เชิญเข้า Channel ส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
+                "📌 <b>ข้อควรทราบ:</b>\n"
+                "• ลิงก์นี้สามารถใช้งานได้เพียง 1 ครั้งเท่านั้น\n"
+                f"• <b>ระยะเวลาสมาชิก {plan_desc} จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ! 🚀"
             )
-            session.add(subscription)
-            await session.flush()
+            join_keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🚀 เข้าร่วม Channel VIP ตอนนี้", url=invite_url)]
+                ]
+            )
+            try:
+                await bot.send_message(
+                    chat_id=target_user_id,
+                    text=user_message,
+                    reply_markup=join_keyboard,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+                user_dm_sent = True
+            except Exception as e:
+                logger.warning(f"Could not send approval DM to User ID={target_user_id}: {e}")
 
-    plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
-    plan_badge = plan_info["badge"]
-    plan_desc = f"{plan_info['days']} วัน"
-    user_dm_sent = False
+        # อัปเดตข้อความในกลุ่ม Admin
+        admin_name = f"@{admin_user.username}" if admin_user.username else html.escape(admin_user.full_name)
+        timestamp_thai = format_thai_datetime(now)
+        current_caption = callback.message.caption or "" if callback.message else ""
 
-    if is_stack_extension and new_expires_at:
-        # ส่ง DM แจ้งการต่อเวลาสะสม
-        exp_thai = format_thai_datetime(new_expires_at)
-        time_rem = format_time_remaining(new_expires_at)
-        user_message = (
-            "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📦 <b>แพ็กเกจที่ซื้อเพิ่ม:</b> {plan_badge} (+{plan_desc})\n"
-            "⏳ <b>ระบบได้ต่อเวลาสะสมให้คุณเรียบร้อยแล้ว!</b>\n"
-            f"📅 <b>วันหมดอายุใหม่ของคุณ:</b> <code>{exp_thai} น.</code>\n"
-            f"⏰ <b>เวลาคงเหลือรวม:</b> {time_rem}\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "💡 <i>คุณสามารถรับชมเนื้อหาใน Channel VIP ได้ต่อเนื่องทันทีโดยไม่ต้องกดเข้าห้องใหม่ครับ! 🚀</i>"
+        action_label = f"✅ <b>อนุมัติแล้ว (ต่อเวลาสะสม +{plan_desc})</b>" if is_stack_extension else f"✅ <b>อนุมัติแล้ว (ออกลิงก์เชิญใหม่)</b>"
+        expiry_note = f"\n⏳ หมดอายุใหม่: <code>{format_thai_datetime(new_expires_at)} น.</code>" if is_stack_extension and new_expires_at else ""
+
+        updated_caption = (
+            f"{current_caption}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"{action_label} โดย {admin_name} (<code>{admin_user.id}</code>){expiry_note}\n"
+            f"📅 <code>{timestamp_thai} น.</code>\n"
+            f"📨 ส่ง DM: {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}"
         )
+
         try:
-            await bot.send_message(
-                chat_id=target_user_id,
-                text=user_message,
-                parse_mode="HTML",
-            )
-            user_dm_sent = True
+            if callback.message:
+                await callback.message.edit_caption(
+                    caption=updated_caption,
+                    reply_markup=None,
+                    parse_mode="HTML",
+                )
         except Exception as e:
-            logger.warning(f"Could not send stacked extension DM to User ID={target_user_id}: {e}")
+            logger.error(f"Failed to update admin message caption: {e}")
 
-    else:
-        # สร้างลิงก์เชิญแบบ 1 ครั้งให้ผู้ใช้
-        try:
-            invite_link_obj = await bot.create_chat_invite_link(
-                chat_id=config.CHANNEL_ID,
-                member_limit=1,
-                expire_date=now + timedelta(days=7),
-                name=f"VIP-{target_user_id}",
-            )
-            invite_url = invite_link_obj.invite_link
-        except Exception as e:
-            logger.error(f"Failed to generate invite link for approved user {target_user_id}: {e}", exc_info=True)
-            await callback.answer(
-                "⚠️ ไม่สามารถสร้างลิงก์เชิญได้! กรุณาตรวจสอบว่าบอทมีสิทธิ์สร้างลิงก์ใน Channel",
-                show_alert=True,
-            )
-            return
-
-        user_message = (
-            "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📦 <b>แพ็กเกจ:</b> <b>{plan_badge} ({plan_desc})</b> พร้อมใช้งานแล้วครับ\n\n"
-            f"🔗 <b>ลิงก์เชิญเข้า Channel ส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
-            "📌 <b>ข้อควรทราบ:</b>\n"
-            "• ลิงก์นี้สามารถใช้งานได้เพียง 1 ครั้งเท่านั้น\n"
-            f"• <b>ระยะเวลาสมาชิก {plan_desc} จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ! 🚀"
-        )
-        join_keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🚀 เข้าร่วม Channel VIP ตอนนี้", url=invite_url)]
-            ]
-        )
-        try:
-            await bot.send_message(
-                chat_id=target_user_id,
-                text=user_message,
-                reply_markup=join_keyboard,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-            )
-            user_dm_sent = True
-        except Exception as e:
-            logger.warning(f"Could not send approval DM to User ID={target_user_id}: {e}")
-
-    # อัปเดตข้อความในกลุ่ม Admin
-    admin_name = f"@{admin_user.username}" if admin_user.username else html.escape(admin_user.full_name)
-    timestamp_thai = format_thai_datetime(now)
-    current_caption = callback.message.caption or "" if callback.message else ""
-
-    action_label = f"✅ <b>อนุมัติแล้ว (ต่อเวลาสะสม +{plan_desc})</b>" if is_stack_extension else f"✅ <b>อนุมัติแล้ว (ออกลิงก์เชิญใหม่)</b>"
-    expiry_note = f"\n⏳ หมดอายุใหม่: <code>{format_thai_datetime(new_expires_at)} น.</code>" if is_stack_extension and new_expires_at else ""
-
-    updated_caption = (
-        f"{current_caption}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"{action_label} โดย {admin_name} (<code>{admin_user.id}</code>){expiry_note}\n"
-        f"📅 <code>{timestamp_thai} น.</code>\n"
-        f"📨 ส่ง DM: {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}"
-    )
-
-    try:
-        if callback.message:
-            await callback.message.edit_caption(
-                caption=updated_caption,
-                reply_markup=None,
-                parse_mode="HTML",
-            )
+        await callback.answer(f"✅ อนุมัติสลิปเรียบร้อย ({'ต่อเวลาสะสม' if is_stack_extension else 'ส่งลิงก์เชิญ'})")
     except Exception as e:
-        logger.error(f"Failed to update admin message caption: {e}")
-
-    await callback.answer(f"✅ อนุมัติสลิปเรียบร้อย ({'ต่อเวลาสะสม' if is_stack_extension else 'ส่งลิงก์เชิญ'})")
+        logger.error(f"Failed to approve slip #{slip_id}: {e}", exc_info=True)
+        await callback.answer(f"❌ เกิดข้อผิดพลาด: {e}", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admin:reject:"))
@@ -278,76 +292,80 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
         await callback.answer("❌ รหัสสลิปไม่ถูกต้อง", show_alert=True)
         return
 
-    requested_plan = PlanType.VIP_30D.value
+    try:
+        requested_plan = PlanType.VIP_30D.value
 
-    async with get_session() as session:
-        stmt = select(PaymentSlip).where(PaymentSlip.id == slip_id)
-        result = await session.execute(stmt)
-        slip = result.scalar_one_or_none()
+        async with get_session() as session:
+            stmt = select(PaymentSlip).where(PaymentSlip.id == slip_id)
+            result = await session.execute(stmt)
+            slip = result.scalar_one_or_none()
 
-        if not slip:
-            await callback.answer("❌ ไม่พบข้อมูลสลิปในระบบ", show_alert=True)
-            return
+            if not slip:
+                await callback.answer("❌ ไม่พบข้อมูลสลิปในระบบ", show_alert=True)
+                return
 
-        if slip.status != SlipStatus.PENDING.value:
-            await callback.answer(
-                f"⚠️ สลิปนี้ได้รับการดำเนินการไปแล้ว ({slip.status})!",
-                show_alert=True,
+            if slip.status != SlipStatus.PENDING.value:
+                await callback.answer(
+                    f"⚠️ สลิปนี้ได้รับการดำเนินการไปแล้ว ({slip.status})!",
+                    show_alert=True,
+                )
+                return
+
+            slip.status = SlipStatus.REJECTED.value
+            slip.admin_id = admin_user.id
+            session.add(slip)
+            target_user_id = slip.user_id
+            requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
+
+        plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
+        plan_price_str = f"{plan_info['price']:,} บาท"
+
+        # 1. ส่งข้อความแจ้งผู้ใช้ทาง DM
+        try:
+            rejection_message = (
+                "❌ <b>แจ้งเตือนผลการตรวจสอบสลิปโอนเงิน</b>\n\n"
+                "ทีมงานไม่สามารถยืนยันสลิปการโอนเงินสำหรับสมาชิก VIP ของคุณได้ครับ\n\n"
+                "สาเหตุที่เป็นไปได้:\n"
+                f"• ยอดเงินที่โอนไม่ตรงกับค่าบริการ ({plan_price_str})\n"
+                "• รูปภาพสลิปไม่ชัดเจนหรือไม่สามารถอ่านข้อมูลได้\n"
+                "• วันที่หรือเวลาในสลิปไม่ถูกต้อง\n\n"
+                "👉 กรุณาพิมพ์ /start เพื่อส่งสลิปใหม่อีกครั้ง หรือติดต่อแอดมินหากมีข้อสงสัยครับ"
             )
-            return
-
-        slip.status = SlipStatus.REJECTED.value
-        slip.admin_id = admin_user.id
-        session.add(slip)
-        target_user_id = slip.user_id
-        requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
-
-    plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
-    plan_price_str = f"{plan_info['price']:,} บาท"
-
-    # 1. ส่งข้อความแจ้งผู้ใช้ทาง DM
-    try:
-        rejection_message = (
-            "❌ <b>แจ้งเตือนผลการตรวจสอบสลิปโอนเงิน</b>\n\n"
-            "ทีมงานไม่สามารถยืนยันสลิปการโอนเงินสำหรับสมาชิก VIP ของคุณได้ครับ\n\n"
-            "สาเหตุที่เป็นไปได้:\n"
-            f"• ยอดเงินที่โอนไม่ตรงกับค่าบริการ ({plan_price_str})\n"
-            "• รูปภาพสลิปไม่ชัดเจนหรือไม่สามารถอ่านข้อมูลได้\n"
-            "• วันที่หรือเวลาในสลิปไม่ถูกต้อง\n\n"
-            "👉 กรุณาพิมพ์ /start เพื่อส่งสลิปใหม่อีกครั้ง หรือติดต่อแอดมินหากมีข้อสงสัยครับ"
-        )
-        await bot.send_message(
-            chat_id=target_user_id,
-            text=rejection_message,
-            parse_mode="HTML",
-        )
-        logger.info(f"Sent rejection DM to User ID={target_user_id}")
-    except Exception as e:
-        logger.warning(f"Could not send rejection DM to User ID={target_user_id}: {e}")
-
-    # 2. แก้ไขข้อความในกลุ่ม Admin (เวลาไทย)
-    admin_name = f"@{admin_user.username}" if admin_user.username else html.escape(admin_user.full_name)
-    timestamp_thai = format_thai_datetime(datetime.now(timezone.utc))
-
-    current_caption = callback.message.caption or "" if callback.message else ""
-    updated_caption = (
-        f"{current_caption}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"❌ <b>ปฏิเสธแล้ว</b> โดย {admin_name} (<code>{admin_user.id}</code>)\n"
-        f"📅 <code>{timestamp_thai} น.</code>"
-    )
-
-    try:
-        if callback.message:
-            await callback.message.edit_caption(
-                caption=updated_caption,
-                reply_markup=None,
+            await bot.send_message(
+                chat_id=target_user_id,
+                text=rejection_message,
                 parse_mode="HTML",
             )
-    except Exception as e:
-        logger.error(f"Failed to update admin message caption: {e}")
+            logger.info(f"Sent rejection DM to User ID={target_user_id}")
+        except Exception as e:
+            logger.warning(f"Could not send rejection DM to User ID={target_user_id}: {e}")
 
-    await callback.answer("❌ ปฏิเสธสลิปเรียบร้อยแล้ว")
+        # 2. แก้ไขข้อความในกลุ่ม Admin (เวลาไทย)
+        admin_name = f"@{admin_user.username}" if admin_user.username else html.escape(admin_user.full_name)
+        timestamp_thai = format_thai_datetime(datetime.now(timezone.utc))
+
+        current_caption = callback.message.caption or "" if callback.message else ""
+        updated_caption = (
+            f"{current_caption}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"❌ <b>ปฏิเสธแล้ว</b> โดย {admin_name} (<code>{admin_user.id}</code>)\n"
+            f"📅 <code>{timestamp_thai} น.</code>"
+        )
+
+        try:
+            if callback.message:
+                await callback.message.edit_caption(
+                    caption=updated_caption,
+                    reply_markup=None,
+                    parse_mode="HTML",
+                )
+        except Exception as e:
+            logger.error(f"Failed to update admin message caption: {e}")
+
+        await callback.answer("❌ ปฏิเสธสลิปเรียบร้อยแล้ว")
+    except Exception as e:
+        logger.error(f"Failed to reject slip #{slip_id}: {e}", exc_info=True)
+        await callback.answer(f"❌ เกิดข้อผิดพลาด: {e}", show_alert=True)
 
 
 @router.message(Command("admin", "admin_help", "help_admin"))
@@ -698,7 +716,8 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         active_sub = (await session.execute(active_stmt)).scalar_one_or_none()
 
         if active_sub and is_in_channel:
-            base_time = max(active_sub.expires_at, now)
+            current_exp = ensure_utc(active_sub.expires_at)
+            base_time = max(current_exp, now) if current_exp else now
             new_expires_at = base_time + timedelta(days=days)
             active_sub.expires_at = new_expires_at
             session.add(active_sub)

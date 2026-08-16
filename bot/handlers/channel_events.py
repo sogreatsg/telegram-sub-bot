@@ -18,6 +18,14 @@ router = Router(name="channel_events")
 BANGKOK_TZ = timezone(timedelta(hours=7))
 
 
+def ensure_utc(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def format_thai_datetime(dt: datetime) -> str:
     """แปลงเวลาเป็นเวลาไทย (UTC+7) รูปแบบ วัน/เดือน/ปี ชั่วโมง:นาที:วินาที"""
     if dt is None:
@@ -99,7 +107,7 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
             pending_to_stack = (await session.execute(pending_stmt)).scalars().first()
             if pending_to_stack and pending_to_stack.plan_type in PLAN_DETAILS:
                 add_days = PLAN_DETAILS[pending_to_stack.plan_type]["days"]
-                existing_active.expires_at = max(existing_active.expires_at, now) + timedelta(days=add_days)
+                existing_active.expires_at = max(ensure_utc(existing_active.expires_at), now) + timedelta(days=add_days)
                 existing_active.plan_type = pending_to_stack.plan_type
                 pending_to_stack.status = SubStatus.ACTIVE.value
                 session.add(existing_active)
