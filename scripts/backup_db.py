@@ -8,7 +8,7 @@ import os
 import sys
 import sqlite3
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 # Paths
@@ -17,6 +17,7 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "bot.db"
 BACKUP_DIR = BASE_DIR / "backups"
 MAX_BACKUPS_TO_KEEP = 14  # Keep last 14 backup snapshots
+BANGKOK_TZ = timezone(timedelta(hours=7))
 
 
 def backup_database() -> Path:
@@ -26,7 +27,7 @@ def backup_database() -> Path:
         sys.exit(1)
 
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(BANGKOK_TZ).strftime("%Y%m%d_%H%M%S")
     backup_file = BACKUP_DIR / f"bot_backup_{timestamp}.db"
 
     print(f"[INFO] Starting SQLite online backup from {DB_PATH} to {backup_file}...")
