@@ -459,12 +459,3 @@ async def handle_user_dm_message(message: Message, bot: Bot):
         )
     except Exception as e:
         logger.error(f"Failed to forward user DM to Admin Group {config.ADMIN_GROUP_ID}: {e}")
-
-    # 3. ส่งข้อความตอบกลับยืนยันให้ผู้ใช้ใน DM
-    reply_text = (
-        "🤖 <b>ระบบได้รับข้อความของคุณเรียบร้อยแล้วครับ</b>\n\n"
-        "ข้อความของคุณถูกส่งไปยังทีมงานผู้ดูแลระบบเรียบร้อยแล้ว กรุณารอสักครู่นะครับ\n"
-        "หรือพิมพ์ <b>/start</b> หากต้องการเปิดเมนูทำรายการครับ"
-    )
-    await message.answer(text=reply_text, parse_mode="HTML")
-    await log_chat_message(user_id=user_id, sender_role="BOT", message_text=reply_text)
