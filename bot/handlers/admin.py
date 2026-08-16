@@ -2109,3 +2109,92 @@ async def handle_broadcast_custom_command(message: Message, bot: Bot):
         await message.answer(final_report, parse_mode="HTML")
 
 
+@router.message(Command("deep_scan"))
+async def handle_admin_deep_scan_command(message: Message, bot: Bot):
+    """
+    คำสั่ง /deep_scan
+    เช็ค User ทุกคนใน Database ว่าถ้าไม่มีแพ็กเกจ ACTIVE หรือ PENDING
+    แต่ตัวยังอยู่ใน Channel จะทำการเตะออกทันที
+    """
+    if not message.from_user or message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    await message.answer("🔄 <b>กำลังเริ่มกระบวนการ Deep Scan...</b>\nระบบจะกวาดล้างผู้ใช้ที่หมดอายุแต่ยังค้างอยู่ในห้อง (อาจใช้เวลาหลายนาที กรุณารอจนกว่าจะเสร็จสิ้น)", parse_mode="HTML")
+
+    kicked_count = 0
+    error_count = 0
+    admin_skip = 0
+    scanned_count = 0
+
+    now = datetime.now(timezone.utc)
+
+    try:
+        async with get_session() as session:
+            # ดึง User ID ทั้งหมดที่เคยใช้งานบอท
+            stmt = select(User.telegram_id)
+            users = (await session.execute(stmt)).scalars().all()
+
+            for user_id in users:
+                scanned_count += 1
+                # 1. เช็คว่ามี ACTIVE หรือ PENDING อยู่ไหม
+                active_stmt = (
+                    select(Subscription)
+                    .where(
+                        Subscription.user_id == user_id,
+                        Subscription.status.in_([SubStatus.ACTIVE.value, SubStatus.PENDING.value]),
+                    )
+                )
+                has_active = (await session.execute(active_stmt)).scalar_one_or_none()
+
+                if has_active:
+                    continue
+
+                # 2. ถ้าไม่มี ACTIVE/PENDING ให้ลองดึงสถานะจาก Telegram
+                try:
+                    chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id)
+                except TelegramBadRequest as e:
+                    continue
+                except TelegramRetryAfter as e:
+                    from asyncio import sleep as asyncio_sleep
+                    await asyncio_sleep(e.retry_after)
+                    continue
+                except Exception:
+                    continue
+
+                # 3. ถ้าอยู่ในห้อง แต่ไม่ใช่ Admin ให้เตะ!
+                if chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
+                    try:
+                        await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, revoke_messages=False)
+                        await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, only_if_banned=True)
+                        kicked_count += 1
+                        
+                        # อัปเดต Sub ล่าสุดให้เป็น KICKED
+                        sub_stmt = select(Subscription).where(Subscription.user_id == user_id).order_by(Subscription.id.desc())
+                        latest_sub = (await session.execute(sub_stmt)).scalars().first()
+                        if latest_sub:
+                            latest_sub.status = SubStatus.KICKED.value
+                            session.add(latest_sub)
+                            await session.commit()
+                            
+                    except Exception as e:
+                        error_count += 1
+                elif chat_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+                    admin_skip += 1
+                
+                # หน่วงเวลาเล็กน้อยป้องกัน Rate Limit จาก Telegram
+                from asyncio import sleep as asyncio_sleep
+                await asyncio_sleep(0.1)
+
+        report_msg = (
+            "✅ <b>Deep Scan เสร็จสิ้น!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔍 ตรวจสอบทั้งหมด: <b>{scanned_count}</b> บัญชี\n"
+            f"👢 เตะคนที่ค้างสำเร็จ: <b>{kicked_count}</b> คน\n"
+            f"⚠️ เตะไม่สำเร็จ (Error): <b>{error_count}</b> คน\n"
+            f"🛡️ ข้ามแอดมิน: <b>{admin_skip}</b> คน\n"
+            "━━━━━━━━━━━━━━━━━━━━"
+        )
+        await message.answer(report_msg, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error in deep_scan: {e}", exc_info=True)
+        await message.answer("❌ เกิดข้อผิดพลาดระหว่างทำ Deep Scan กรุณาลองใหม่อีกครั้ง")
