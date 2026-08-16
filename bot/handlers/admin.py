@@ -32,9 +32,36 @@ def format_thai_datetime(dt: datetime) -> str:
     return thai_dt.strftime("%d/%m/%Y %H:%M:%S")
 
 
+def format_time_remaining(expires_at: datetime) -> str:
+    """แปลงเวลาคงเหลือให้อ่านง่ายเป็นภาษาไทย"""
+    now = datetime.now(timezone.utc)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+        
+    diff = expires_at - now
+    if diff.total_seconds() <= 0:
+        return "หมดอายุแล้ว"
+    
+    days = diff.days
+    hours, remainder = divmod(diff.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    parts = []
+    if days > 0:
+        parts.append(f"{days} วัน")
+    if hours > 0:
+        parts.append(f"{hours} ชั่วโมง")
+    if minutes > 0 or (days == 0 and hours == 0):
+        parts.append(f"{minutes} นาที")
+    if days == 0 and hours == 0 and minutes < 5:
+        parts.append(f"{seconds} วินาที")
+    
+    return " ".join(parts)
+
+
 @router.callback_query(F.data.startswith("admin:approve:"))
 async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
-    """จัดการเมื่อ Admin กดยืนยัน/อนุมัติสลิปสำหรับสมาชิก VIP (เวลาไทย)"""
+    """จัดการเมื่อ Admin กดยืนยัน/อนุมัติสลิปสำหรับสมาชิก VIP พร้อมระบบสะสมวัน (Day Stacking)"""
     if not callback.from_user:
         return
 
@@ -46,6 +73,12 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
     except ValueError:
         await callback.answer("❌ รหัสสลิปไม่ถูกต้อง", show_alert=True)
         return
+
+    now = datetime.now(timezone.utc)
+    is_stack_extension = False
+    new_expires_at = None
+    target_user_id = None
+    requested_plan = PlanType.VIP_30D.value
 
     async with get_session() as session:
         stmt = select(PaymentSlip).where(PaymentSlip.id == slip_id)
@@ -67,49 +100,110 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
         slip.status = SlipStatus.APPROVED.value
         slip.admin_id = admin_user.id
         session.add(slip)
-
-        # 2. สร้างรายการ Subscription ใหม่แบบ PENDING ตามแพ็กเกจที่ผู้ใช้เลือก
-        requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
-        subscription = Subscription(
-            user_id=slip.user_id,
-            plan_type=requested_plan,
-            status=SubStatus.PENDING.value,
-        )
-        session.add(subscription)
-        await session.flush()
         target_user_id = slip.user_id
+        requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
 
-    # 3. สร้างลิงก์เชิญแบบ 1 ครั้งให้ผู้ใช้ (หมดอายุภายใน 7 วันหากไม่กดเข้า)
-    try:
-        invite_link_obj = await bot.create_chat_invite_link(
-            chat_id=config.CHANNEL_ID,
-            member_limit=1,
-            expire_date=datetime.now(timezone.utc) + timedelta(days=7),
-            name=f"VIP-{target_user_id}",
-        )
-        invite_url = invite_link_obj.invite_link
-    except Exception as e:
-        logger.error(f"Failed to generate invite link for approved user {target_user_id}: {e}", exc_info=True)
-        await callback.answer(
-            "⚠️ ไม่สามารถสร้างลิงก์เชิญได้! กรุณาตรวจสอบว่าบอทมีสิทธิ์สร้างลิงก์ใน Channel",
-            show_alert=True,
-        )
-        return
+        plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
+        additional_days = plan_info["days"]
 
-    # 4. ส่งลิงก์เชิญพร้อมปุ่มกดเข้าร่วมให้ผู้ใช้ทาง DM
+        # 2. ตรวจสอบว่าผู้ใช้อยู่ใน Channel และมี ACTIVE Subscription หรือไม่
+        active_stmt = (
+            select(Subscription)
+            .where(
+                Subscription.user_id == target_user_id,
+                Subscription.status == SubStatus.ACTIVE.value,
+                Subscription.expires_at > now,
+            )
+            .order_by(Subscription.id.desc())
+        )
+        active_sub = (await session.execute(active_stmt)).scalar_one_or_none()
+
+        # ตรวจสอบสถานะจริงใน Channel
+        is_in_channel = False
+        try:
+            chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_user_id)
+            is_in_channel = chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+        except Exception:
+            is_in_channel = False
+
+        if active_sub and is_in_channel:
+            # === กรณีต่อเวลาสะสม (Day Stacking) ===
+            base_time = max(active_sub.expires_at, now)
+            new_expires_at = base_time + timedelta(days=additional_days)
+            active_sub.expires_at = new_expires_at
+            active_sub.plan_type = requested_plan
+            session.add(active_sub)
+            is_stack_extension = True
+            logger.info(
+                f"Approve slip #{slip_id}: Extended active sub #{active_sub.id} for User {target_user_id} by +{additional_days} days. "
+                f"New expires_at: {new_expires_at}"
+            )
+        else:
+            # === กรณีต้องส่งลิงก์เชิญใหม่ ===
+            subscription = Subscription(
+                user_id=target_user_id,
+                plan_type=requested_plan,
+                status=SubStatus.PENDING.value,
+            )
+            session.add(subscription)
+            await session.flush()
+
     plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
     plan_badge = plan_info["badge"]
     plan_desc = f"{plan_info['days']} วัน"
-
     user_dm_sent = False
-    try:
+
+    if is_stack_extension and new_expires_at:
+        # ส่ง DM แจ้งการต่อเวลาสะสม
+        exp_thai = format_thai_datetime(new_expires_at)
+        time_rem = format_time_remaining(new_expires_at)
         user_message = (
-            "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n\n"
-            f"แพ็กเกจ <b>สมาชิก {plan_badge} ({plan_desc})</b> ของคุณพร้อมใช้งานแล้วครับ\n\n"
+            "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 <b>แพ็กเกจที่ซื้อเพิ่ม:</b> {plan_badge} (+{plan_desc})\n"
+            "⏳ <b>ระบบได้ต่อเวลาสะสมให้คุณเรียบร้อยแล้ว!</b>\n"
+            f"📅 <b>วันหมดอายุใหม่ของคุณ:</b> <code>{exp_thai} น.</code>\n"
+            f"⏰ <b>เวลาคงเหลือรวม:</b> {time_rem}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "💡 <i>คุณสามารถรับชมเนื้อหาใน Channel VIP ได้ต่อเนื่องทันทีโดยไม่ต้องกดเข้าห้องใหม่ครับ! 🚀</i>"
+        )
+        try:
+            await bot.send_message(
+                chat_id=target_user_id,
+                text=user_message,
+                parse_mode="HTML",
+            )
+            user_dm_sent = True
+        except Exception as e:
+            logger.warning(f"Could not send stacked extension DM to User ID={target_user_id}: {e}")
+
+    else:
+        # สร้างลิงก์เชิญแบบ 1 ครั้งให้ผู้ใช้
+        try:
+            invite_link_obj = await bot.create_chat_invite_link(
+                chat_id=config.CHANNEL_ID,
+                member_limit=1,
+                expire_date=now + timedelta(days=7),
+                name=f"VIP-{target_user_id}",
+            )
+            invite_url = invite_link_obj.invite_link
+        except Exception as e:
+            logger.error(f"Failed to generate invite link for approved user {target_user_id}: {e}", exc_info=True)
+            await callback.answer(
+                "⚠️ ไม่สามารถสร้างลิงก์เชิญได้! กรุณาตรวจสอบว่าบอทมีสิทธิ์สร้างลิงก์ใน Channel",
+                show_alert=True,
+            )
+            return
+
+        user_message = (
+            "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 <b>แพ็กเกจ:</b> <b>{plan_badge} ({plan_desc})</b> พร้อมใช้งานแล้วครับ\n\n"
             f"🔗 <b>ลิงก์เชิญเข้า Channel ส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
             "📌 <b>ข้อควรทราบ:</b>\n"
             "• ลิงก์นี้สามารถใช้งานได้เพียง 1 ครั้งเท่านั้น\n"
-            f"• <b>ระยะเวลาสมาชิก {plan_desc} จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</b>\n\n"
+            f"• <b>ระยะเวลาสมาชิก {plan_desc} จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
             "กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ! 🚀"
         )
         join_keyboard = InlineKeyboardMarkup(
@@ -117,27 +211,30 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 [InlineKeyboardButton(text="🚀 เข้าร่วม Channel VIP ตอนนี้", url=invite_url)]
             ]
         )
-        await bot.send_message(
-            chat_id=target_user_id,
-            text=user_message,
-            reply_markup=join_keyboard,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
-        user_dm_sent = True
-        logger.info(f"Sent approval DM with invite link and button to User ID={target_user_id}")
-    except Exception as e:
-        logger.warning(f"Could not send approval DM to User ID={target_user_id}: {e}")
+        try:
+            await bot.send_message(
+                chat_id=target_user_id,
+                text=user_message,
+                reply_markup=join_keyboard,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            user_dm_sent = True
+        except Exception as e:
+            logger.warning(f"Could not send approval DM to User ID={target_user_id}: {e}")
 
-    # 5. แก้ไขข้อความในกลุ่ม Admin (เวลาไทย)
+    # อัปเดตข้อความในกลุ่ม Admin
     admin_name = f"@{admin_user.username}" if admin_user.username else html.escape(admin_user.full_name)
-    timestamp_thai = format_thai_datetime(datetime.now(timezone.utc))
-    
+    timestamp_thai = format_thai_datetime(now)
     current_caption = callback.message.caption or "" if callback.message else ""
+
+    action_label = f"✅ <b>อนุมัติแล้ว (ต่อเวลาสะสม +{plan_desc})</b>" if is_stack_extension else f"✅ <b>อนุมัติแล้ว (ออกลิงก์เชิญใหม่)</b>"
+    expiry_note = f"\n⏳ หมดอายุใหม่: <code>{format_thai_datetime(new_expires_at)} น.</code>" if is_stack_extension and new_expires_at else ""
+
     updated_caption = (
         f"{current_caption}\n\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"✅ <b>อนุมัติแล้ว</b> โดย {admin_name} (<code>{admin_user.id}</code>)\n"
+        f"{action_label} โดย {admin_name} (<code>{admin_user.id}</code>){expiry_note}\n"
         f"📅 <code>{timestamp_thai} น.</code>\n"
         f"📨 ส่ง DM: {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}"
     )
@@ -152,7 +249,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
     except Exception as e:
         logger.error(f"Failed to update admin message caption: {e}")
 
-    await callback.answer("✅ อนุมัติสลิปและส่งลิงก์เชิญให้ผู้ใช้เรียบร้อยแล้ว")
+    await callback.answer(f"✅ อนุมัติสลิปเรียบร้อย ({'ต่อเวลาสะสม' if is_stack_extension else 'ส่งลิงก์เชิญ'})")
 
 
 @router.callback_query(F.data.startswith("admin:reject:"))
@@ -485,7 +582,7 @@ async def handle_admin_kick_command(message: Message, bot: Bot):
 
 @router.message(Command("add_vip"))
 async def handle_admin_add_vip_command(message: Message, bot: Bot):
-    """คำสั่งแอดมินสำหรับเพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง: /add_vip <user_id> [จำนวนวัน]"""
+    """คำสั่งแอดมินสำหรับเพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง (รองรับสะสมวัน): /add_vip <user_id> [จำนวนวัน]"""
     if message.chat.id != config.ADMIN_GROUP_ID:
         return
 
@@ -502,7 +599,17 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         return
 
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(days=days)
+    is_stack_extension = False
+    new_expires_at = None
+    sub_id = None
+
+    # ตรวจสอบสถานะจริงใน Channel
+    is_in_channel = False
+    try:
+        chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid)
+        is_in_channel = chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+    except Exception:
+        is_in_channel = False
 
     async with get_session() as session:
         user, _ = await get_or_create_user(
@@ -511,53 +618,98 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
             username=None,
             full_name=f"User {target_uid}",
         )
-        
-        subscription = Subscription(
-            user_id=target_uid,
-            plan_type=f"MANUAL_VIP_{days}D",
-            joined_at=now,
-            expires_at=expires_at,
-            status=SubStatus.ACTIVE.value,
-        )
-        session.add(subscription)
-        await session.flush()
-        sub_id = subscription.id
 
-    # สร้าง invite link ให้ (หมดอายุภายใน 7 วันหากไม่กดเข้า)
+        active_stmt = (
+            select(Subscription)
+            .where(
+                Subscription.user_id == target_uid,
+                Subscription.status == SubStatus.ACTIVE.value,
+                Subscription.expires_at > now,
+            )
+            .order_by(Subscription.id.desc())
+        )
+        active_sub = (await session.execute(active_stmt)).scalar_one_or_none()
+
+        if active_sub and is_in_channel:
+            base_time = max(active_sub.expires_at, now)
+            new_expires_at = base_time + timedelta(days=days)
+            active_sub.expires_at = new_expires_at
+            session.add(active_sub)
+            sub_id = active_sub.id
+            is_stack_extension = True
+            logger.info(f"Admin add_vip: Extended active sub #{sub_id} for User {target_uid} by +{days} days. New expires_at: {new_expires_at}")
+        else:
+            new_expires_at = now + timedelta(days=days)
+            subscription = Subscription(
+                user_id=target_uid,
+                plan_type=f"MANUAL_VIP_{days}D",
+                joined_at=now if is_in_channel else None,
+                expires_at=new_expires_at if is_in_channel else None,
+                status=SubStatus.ACTIVE.value if is_in_channel else SubStatus.PENDING.value,
+            )
+            session.add(subscription)
+            await session.flush()
+            sub_id = subscription.id
+
     invite_url = "-"
-    try:
-        invite_link_obj = await bot.create_chat_invite_link(
-            chat_id=config.CHANNEL_ID,
-            member_limit=1,
-            expire_date=datetime.now(timezone.utc) + timedelta(days=7),
-            name=f"ManualVIP-{target_uid}",
-        )
-        invite_url = invite_link_obj.invite_link
-    except Exception as e:
-        logger.warning(f"Could not generate invite link: {e}")
+    if not (is_stack_extension and is_in_channel):
+        # สร้าง invite link ให้
+        try:
+            invite_link_obj = await bot.create_chat_invite_link(
+                chat_id=config.CHANNEL_ID,
+                member_limit=1,
+                expire_date=now + timedelta(days=7),
+                name=f"ManualVIP-{target_uid}",
+            )
+            invite_url = invite_link_obj.invite_link
+        except Exception as e:
+            logger.warning(f"Could not generate invite link: {e}")
 
-    # ลองส่ง DM หาผู้ใช้
+    # ส่ง DM หาผู้ใช้
+    exp_thai = format_thai_datetime(new_expires_at) if new_expires_at else "-"
+    time_rem = format_time_remaining(new_expires_at) if new_expires_at else f"{days} วัน"
+
     try:
+        if is_stack_extension:
+            dm_text = (
+                f"🎉 <b>คุณได้รับการต่อเวลาสมาชิก VIP (+{days} วัน) จากทีมงานเรียบร้อยแล้ว!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"⏳ <b>วันหมดอายุใหม่ของคุณ:</b> <code>{exp_thai} น.</code>\n"
+                f"⏰ <b>เวลาคงเหลือรวม:</b> {time_rem}\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 <i>สามารถรับชมเนื้อหาใน Channel VIP ได้ต่อเนื่องทันทีครับ! 🚀</i>"
+            )
+        else:
+            dm_text = (
+                f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({days} วัน) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
+                f"⏳ <b>หมดอายุวันที่:</b> <code>{exp_thai} น.</code>\n\n"
+                f"🔗 <b>ลิงก์เข้าร่วม Channel:</b>\n{invite_url}"
+            )
         await bot.send_message(
             chat_id=target_uid,
-            text=(
-                f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({days} วัน) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
-                f"⏳ <b>หมดอายุวันที่:</b> <code>{format_thai_datetime(expires_at)} น.</code>\n\n"
-                f"🔗 <b>ลิงก์เข้าร่วม Channel:</b>\n{invite_url}"
-            ),
+            text=dm_text,
             parse_mode="HTML",
         )
     except Exception:
         pass
 
-    exp_thai = format_thai_datetime(expires_at)
-    resp = (
-        f"✅ <b>เพิ่มสิทธิ์ VIP เรียบร้อยแล้ว!</b>\n\n"
-        f"👤 <b>User ID:</b> <code>{target_uid}</code>\n"
-        f"📅 <b>ระยะเวลา:</b> {days} วัน (หมดอายุ: <code>{exp_thai} น.</code>)\n"
-        f"🆔 <b>Sub ID:</b> <code>#{sub_id}</code>\n"
-        f"🔗 <b>Invite Link:</b> <code>{invite_url}</code>"
-    )
+    if is_stack_extension:
+        resp = (
+            "✅ <b>ต่อเวลาสะสม VIP สำเร็จ!</b>\n\n"
+            f"👤 <b>User ID:</b> <code>{target_uid}</code>\n"
+            f"➕ <b>เพิ่มเวลา:</b> +{days} วัน\n"
+            f"⏳ <b>วันหมดอายุใหม่:</b> <code>{exp_thai} น.</code> (คงเหลือ {time_rem})\n"
+            f"🆔 <b>Sub ID:</b> <code>#{sub_id}</code>\n"
+            "ℹ️ <i>ผู้ใช้อยู่ในห้องอยู่แล้ว ระบบต่อเวลาให้โดยไม่ต้องกดเข้าใหม่</i>"
+        )
+    else:
+        resp = (
+            "✅ <b>เพิ่มสิทธิ์ VIP เรียบร้อยแล้ว!</b>\n\n"
+            f"👤 <b>User ID:</b> <code>{target_uid}</code>\n"
+            f"📅 <b>ระยะเวลา:</b> {days} วัน (หมดอายุ: <code>{exp_thai} น.</code>)\n"
+            f"🆔 <b>Sub ID:</b> <code>#{sub_id}</code>\n"
+            f"🔗 <b>Invite Link:</b> <code>{invite_url}</code>"
+        )
     await message.answer(resp, parse_mode="HTML")
 
 

@@ -87,7 +87,26 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
         existing_active = (await session.execute(active_stmt)).scalar_one_or_none()
 
         if existing_active:
-            logger.info(f"User {user_id} re-joined channel with already ACTIVE subscription ID={existing_active.id}")
+            # ตรวจสอบว่ามีรายการ PENDING แพ็กเกจที่รอต่อเวลาอยู่ด้วยหรือไม่
+            pending_stmt = (
+                select(Subscription)
+                .where(
+                    Subscription.user_id == user_id,
+                    Subscription.status == SubStatus.PENDING.value,
+                )
+                .order_by(Subscription.id.desc())
+            )
+            pending_to_stack = (await session.execute(pending_stmt)).scalars().first()
+            if pending_to_stack and pending_to_stack.plan_type in PLAN_DETAILS:
+                add_days = PLAN_DETAILS[pending_to_stack.plan_type]["days"]
+                existing_active.expires_at = max(existing_active.expires_at, now) + timedelta(days=add_days)
+                existing_active.plan_type = pending_to_stack.plan_type
+                pending_to_stack.status = SubStatus.ACTIVE.value
+                session.add(existing_active)
+                session.add(pending_to_stack)
+                logger.info(f"User {user_id} re-joined with pending sub #{pending_to_stack.id}. Stacked +{add_days} days to existing active sub #{existing_active.id}")
+            else:
+                logger.info(f"User {user_id} re-joined channel with already ACTIVE subscription ID={existing_active.id}")
             return
 
         # 3. ค้นหา Subscription ล่าสุดที่มีสถานะ PENDING ของผู้ใช้คนนี้
