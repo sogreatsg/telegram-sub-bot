@@ -75,9 +75,9 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
 
     # 3. Register Handler Routers
-    dp.include_router(admin_router)
-    dp.include_router(payment_router)
     dp.include_router(user_menu_router)
+    dp.include_router(payment_router)
+    dp.include_router(admin_router)
     dp.include_router(channel_events_router)
 
     # 4. Initialize & Start APScheduler

@@ -123,19 +123,27 @@ def format_time_remaining(expires_at: datetime) -> str:
 @router.message(CommandStart())
 async def handle_start(message: Message, state: FSMContext):
     """จัดการคำสั่ง /start ตรวจสอบผู้ใช้ ล้างสถานะ FSM และแสดงเมนูหลักภาษาไทย"""
-    await state.clear()
+    try:
+        await state.clear()
+    except Exception:
+        pass
+
     if not message.from_user:
         return
 
     telegram_user = message.from_user
-    async with get_session() as session:
-        user, _ = await get_or_create_user(
-            session=session,
-            telegram_id=telegram_user.id,
-            username=telegram_user.username,
-            full_name=telegram_user.full_name or telegram_user.first_name,
-        )
-        trial_available = not user.trial_used
+    trial_available = True
+    try:
+        async with get_session() as session:
+            user, _ = await get_or_create_user(
+                session=session,
+                telegram_id=telegram_user.id,
+                username=telegram_user.username,
+                full_name=telegram_user.full_name or telegram_user.first_name,
+            )
+            trial_available = not user.trial_used
+    except Exception as e:
+        logger.error(f"Error checking user in handle_start: {e}", exc_info=True)
 
     first_name_safe = html.escape(telegram_user.first_name or "")
     welcome_text = (
@@ -150,12 +158,19 @@ async def handle_start(message: Message, state: FSMContext):
         "สามารถกดปุ่ม <b>'💬 เข้ากลุ่มแชทพูดคุย (ฟรี)'</b> ด้านล่าง เพื่อเข้าร่วมพูดคุยกับเพื่อนๆ ได้ทันทีครับ!"
     )
 
-    await message.answer(
-        text=welcome_text,
-        reply_markup=get_main_menu_keyboard(trial_available=trial_available),
-        parse_mode="HTML",
-    )
-    await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text="/start")
+    try:
+        await message.answer(
+            text=welcome_text,
+            reply_markup=get_main_menu_keyboard(trial_available=trial_available),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"Failed to send start message: {e}", exc_info=True)
+
+    try:
+        await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text="/start")
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "menu:main")
@@ -450,7 +465,7 @@ async def handle_status_command(message: Message, state: FSMContext):
     await log_chat_message(user_id=user_id, sender_role="USER", message_text="/status")
 
 
-@router.message(F.chat.type == "private", StateFilter(default_state), F.text)
+@router.message(F.chat.type == "private", StateFilter(default_state), F.text, ~F.text.startswith("/"))
 async def handle_user_dm_message(message: Message, bot: Bot):
     """บันทึกข้อความที่ผู้ใช้พิมพ์คุยกับบอทในแชทส่วนตัว (DM) และส่งต่อเข้า Admin Group แบบ Real-time"""
     if not message.from_user:

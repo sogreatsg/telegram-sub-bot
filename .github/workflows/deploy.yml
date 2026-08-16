@@ -25,8 +25,13 @@ jobs:
             # Pull latest changes from main branch
             git pull origin main
             
+            # Clean up any zombie standalone python bot processes if any
+            pkill -f "python.*bot.main" || true
+            pkill -f "python.*bot/main" || true
+            
             # Rebuild and restart docker containers in background
-            docker compose up -d --build
+            docker compose down || true
+            docker compose up -d --build --remove-orphans
             
             echo "✅ Deployment completed successfully!"
             docker compose ps
