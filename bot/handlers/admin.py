@@ -10,7 +10,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from bot.config import get_settings
-from bot.models.schema import User, PaymentSlip, Subscription, ChatMessage, SlipStatus, SubStatus, PlanType
+from bot.models.schema import User, PaymentSlip, Subscription, ChatMessage, SlipStatus, SubStatus, PlanType, PLAN_DETAILS
 from bot.services.database import get_session, get_or_create_user
 from bot.services.scheduler import build_active_members_report, sync_pending_members
 from bot.services.chat_logger import log_chat_message
@@ -68,10 +68,11 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
         slip.admin_id = admin_user.id
         session.add(slip)
 
-        # 2. สร้างรายการ Subscription ใหม่แบบ PENDING
+        # 2. สร้างรายการ Subscription ใหม่แบบ PENDING ตามแพ็กเกจที่ผู้ใช้เลือก
+        requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
         subscription = Subscription(
             user_id=slip.user_id,
-            plan_type=PlanType.MONTHLY_30D.value,
+            plan_type=requested_plan,
             status=SubStatus.PENDING.value,
         )
         session.add(subscription)
@@ -95,14 +96,15 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
         return
 
     # 4. ส่งลิงก์เชิญพร้อมปุ่มกดเข้าร่วมให้ผู้ใช้ทาง DM
-    paid_min = config.PAID_DURATION_MINUTES
-    plan_desc = f"{paid_min // 1440} วัน" if paid_min >= 1440 else f"{paid_min} นาที (โหมดทดสอบ)"
+    plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
+    plan_badge = plan_info["badge"]
+    plan_desc = f"{plan_info['days']} วัน"
 
     user_dm_sent = False
     try:
         user_message = (
             "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n\n"
-            f"แพ็กเกจ <b>สมาชิก VIP ({plan_desc})</b> ของคุณพร้อมใช้งานแล้วครับ\n\n"
+            f"แพ็กเกจ <b>สมาชิก {plan_badge} ({plan_desc})</b> ของคุณพร้อมใช้งานแล้วครับ\n\n"
             f"🔗 <b>ลิงก์เชิญเข้า Channel ส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
             "📌 <b>ข้อควรทราบ:</b>\n"
             "• ลิงก์นี้สามารถใช้งานได้เพียง 1 ครั้งเท่านั้น\n"
@@ -640,7 +642,15 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
             joined_thai = format_thai_datetime(s.joined_at)
             expired_thai = format_thai_datetime(s.expires_at)
             
-            plan_label = f"ทดลองใช้ 15 นาที" if s.plan_type == PlanType.TRIAL_15M.value else s.plan_type
+            if s.plan_type == PlanType.TRIAL_15M.value:
+                plan_label = "ทดลองใช้ 15 นาที"
+            elif s.plan_type in PLAN_DETAILS:
+                plan_label = PLAN_DETAILS[s.plan_type]["badge"]
+            elif s.plan_type.startswith("MANUAL_VIP_"):
+                plan_label = s.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
+            else:
+                plan_label = s.plan_type
+
             status_badge = {
                 SubStatus.ACTIVE.value: "🟢 ACTIVE (กำลังใช้งาน)",
                 SubStatus.PENDING.value: "🟡 PENDING (ออกลิงก์แล้ว-รอกดเข้า)",
@@ -914,7 +924,14 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
 
     for i, s in enumerate(subs[:3], 1):
         expired_thai = format_thai_datetime(s.expires_at)
-        plan_label = f"ทดลองใช้ 15 นาที" if s.plan_type == PlanType.TRIAL_15M.value else s.plan_type
+        if s.plan_type == PlanType.TRIAL_15M.value:
+            plan_label = "ทดลองใช้ 15 นาที"
+        elif s.plan_type in PLAN_DETAILS:
+            plan_label = PLAN_DETAILS[s.plan_type]["badge"]
+        elif s.plan_type.startswith("MANUAL_VIP_"):
+            plan_label = s.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
+        else:
+            plan_label = s.plan_type
         resp.append(f"• [#{s.id}] <b>{plan_label}</b> ({s.status}) | หมดอายุ: <code>{expired_thai} น.</code>")
 
     if slips:

@@ -26,7 +26,42 @@ class Base(DeclarativeBase):
 class PlanType(str, enum.Enum):
     """Subscription plan types."""
     TRIAL_15M = "TRIAL_15M"
-    MONTHLY_30D = "MONTHLY_30D"
+    VIP_3D = "VIP_3D"
+    VIP_10D = "VIP_10D"
+    VIP_30D = "VIP_30D"
+    MONTHLY_30D = "MONTHLY_30D"  # Legacy support
+
+
+PLAN_DETAILS = {
+    PlanType.VIP_3D.value: {
+        "name": "VIP 3 วัน",
+        "badge": "🥉 VIP 3 วัน",
+        "price": 300,
+        "days": 3,
+        "qr_filename": "qr_300.png",
+    },
+    PlanType.VIP_10D.value: {
+        "name": "VIP 10 วัน",
+        "badge": "🥈 VIP 10 วัน",
+        "price": 500,
+        "days": 10,
+        "qr_filename": "qr_500.png",
+    },
+    PlanType.VIP_30D.value: {
+        "name": "VIP 30 วัน",
+        "badge": "🥇 VIP 30 วัน",
+        "price": 1000,
+        "days": 30,
+        "qr_filename": "qr_1000.png",
+    },
+    PlanType.MONTHLY_30D.value: {
+        "name": "VIP 30 วัน",
+        "badge": "🥇 VIP 30 วัน",
+        "price": 1000,
+        "days": 30,
+        "qr_filename": "qr_payment.png",
+    },
+}
 
 
 class SubStatus(str, enum.Enum):
@@ -124,6 +159,9 @@ class PaymentSlip(Base):
         BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True
     )
     file_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    plan_type: Mapped[str] = mapped_column(
+        String(32), default=PlanType.VIP_30D.value, nullable=True
+    )
     status: Mapped[str] = mapped_column(
         String(32), default=SlipStatus.PENDING.value, nullable=False, index=True
     )
@@ -138,7 +176,7 @@ class PaymentSlip(Base):
     def __repr__(self) -> str:
         return (
             f"<PaymentSlip(id={self.id}, user_id={self.user_id}, "
-            f"status={self.status}, admin_id={self.admin_id})>"
+            f"plan_type={self.plan_type}, status={self.status}, admin_id={self.admin_id})>"
         )
 
 

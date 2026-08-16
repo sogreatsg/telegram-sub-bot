@@ -13,12 +13,15 @@ Production-ready Telegram Membership Bot built with **Python 3.11+**, **aiogram 
    - Once expired, the bot soft-kicks (ban + immediate unban) the user and notifies them in DM.
    - Strictly enforced one-time usage per Telegram user ID.
 
-2. **💳 30-Day VIP Paid Subscription:**
-   - User initiates subscription and views payment details (PromptPay / Bank Transfer).
+2. **💳 VIP Paid Subscription (3 Dynamic Packages):**
+   - **🥉 VIP 3 วัน (300 บาท)**
+   - **🥈 VIP 10 วัน (500 บาท)**
+   - **🥇 VIP 30 วัน (1,000 บาท)**
+   - User selects desired package and views PromptPay QR Code.
    - User submits a photo or document of their payment transfer slip via FSM.
-   - Bot immediately forwards the slip to the **Admin Group** with `[✅ Approve (30 Days)]` and `[❌ Reject]` inline buttons.
+   - Bot immediately forwards the slip to the **Admin Group** with package details and `[✅ อนุมัติ]` / `[❌ ปฏิเสธ]` buttons.
    - Upon admin approval, the bot automatically generates a 1-use invite link and sends it to the user's DM.
-   - 30-day countdown begins when the user enters the channel.
+   - Countdown begins the moment the user enters the channel.
 
 3. **⚙️ Automated Background Expiry Worker:**
    - APScheduler runs asynchronously every 60 seconds.

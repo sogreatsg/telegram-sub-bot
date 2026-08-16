@@ -12,7 +12,7 @@ from aiogram.types import (
 from sqlalchemy import select
 
 from bot.config import get_settings
-from bot.models.schema import User, Subscription, SubStatus, PlanType
+from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
 
@@ -34,7 +34,7 @@ def format_thai_datetime(dt: datetime) -> str:
 
 
 def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup:
-    """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard"""
+    """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard พร้อม 3 แพ็กเกจ"""
     trial_button_text = "⏱️ ทดลองใช้ฟรี 15 นาที" if trial_available else "⏱️ ทดลองฟรี (ใช้สิทธิ์แล้ว)"
     
     keyboard = [
@@ -46,9 +46,21 @@ def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup
         ],
         [
             InlineKeyboardButton(
-                text="💳 สมัครสมาชิก VIP 30 วัน",
-                callback_data="menu:subscribe_30d",
-            )
+                text="🥉 VIP 3 วัน — 300 บาท",
+                callback_data="menu:subscribe:VIP_3D",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🥈 VIP 10 วัน — 500 บาท",
+                callback_data="menu:subscribe:VIP_10D",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🥇 VIP 30 วัน — 1,000 บาท",
+                callback_data="menu:subscribe:VIP_30D",
+            ),
         ],
         [
             InlineKeyboardButton(
@@ -119,10 +131,12 @@ async def handle_start(message: Message):
     first_name_safe = html.escape(telegram_user.first_name or "")
     welcome_text = (
         f"👋 <b>ยินดีต้อนรับสู่ระบบสมาชิก BareLive, {first_name_safe}!</b>\n\n"
-        "เข้าถึงเนื้อหาสุดพิเศษใน Channel ส่วนตัว พร้อมการอัปเดตแบบเรียลไทม์\n\n"
-        "🌟 <b>กรุณาเลือกเมนูที่ต้องการด้านล่าง:</b>\n"
-        "• <b>ทดลองใช้ฟรี 15 นาที</b>: ทดลองเข้าชม Channel ฟรี 1 ครั้ง (15 นาที)\n"
-        "• <b>สมัครสมาชิก VIP 30 วัน</b>: เข้าใช้งานเต็มรูปแบบ 30 วันเต็ม"
+        "เข้าถึงเนื้อหาสุดพิเศษใน Channel VIP ส่วนตัว พร้อมการอัปเดตแบบเรียลไทม์\n\n"
+        "🌟 <b>กรุณาเลือกแพ็กเกจที่ต้องการด้านล่าง:</b>\n"
+        "• <b>⏱️ ทดลองใช้ฟรี 15 นาที</b>: ทดลองเข้าชม Channel ฟรี 1 ครั้ง\n"
+        "• <b>🥉 VIP 3 วัน</b>: ราคา 300 บาท\n"
+        "• <b>🥈 VIP 10 วัน</b>: ราคา 500 บาท\n"
+        "• <b>🥇 VIP 30 วัน</b>: ราคา 1,000 บาท"
     )
 
     await message.answer(
@@ -346,8 +360,8 @@ async def handle_help(callback: CallbackQuery):
         "กดปุ่ม 'ทดลองใช้ฟรี' บอทจะส่งลิงก์เชิญแบบ 1 ครั้งให้คุณ "
         "โดยเวลานับถอยหลังจะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel\n\n"
         "• <b>ขั้นตอนการสมัครสมาชิก VIP:</b>\n"
-        "กดปุ่ม 'สมัครสมาชิก VIP 30 วัน' สแกน QR Code พร้อมเพย์ 300 บาท "
-        "แล้วส่งรูปภาพสลิปการโอนเงินเข้ามาในแชทนี้ได้ทันที\n\n"
+        "เลือกแพ็กเกจที่ต้องการ (3 วัน 300฿, 10 วัน 500฿ หรือ 30 วัน 1,000฿) "
+        "สแกน QR Code พร้อมเพย์ตามยอดที่ระบุ แล้วส่งรูปภาพสลิปการโอนเงินเข้ามาในแชทนี้ได้ทันที\n\n"
         "• <b>จะได้รับลิงก์เข้า Channel เมื่อใด?</b>\n"
         "เมื่อแอดมินตรวจสอบความถูกต้องของสลิปและกดอนุมัติ "
         "บอทจะส่งลิงก์เชิญส่วนตัวให้คุณในแชทนี้โดยอัตโนมัติทันทีครับ\n\n"
@@ -395,7 +409,15 @@ async def handle_status_command(message: Message):
         status_text += "พิมพ์ /start เพื่อทดลองใช้ฟรี หรือสมัครสมาชิก VIP"
     elif sub.status == SubStatus.ACTIVE.value:
         status_text += "🟢 <b>สถานะ:</b> กำลังใช้งาน (ACTIVE)\n"
-        plan_label = f"ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที" if sub.plan_type == PlanType.TRIAL_15M.value else "สมาชิก VIP"
+        if sub.plan_type == PlanType.TRIAL_15M.value:
+            plan_label = f"ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที"
+        elif sub.plan_type in PLAN_DETAILS:
+            plan_label = PLAN_DETAILS[sub.plan_type]["badge"]
+        elif sub.plan_type.startswith("MANUAL_VIP_"):
+            plan_label = sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
+        else:
+            plan_label = sub.plan_type
+
         status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"
         if sub.expires_at:
             status_text += f"⏳ <b>หมดอายุวันที่:</b> <code>{format_thai_datetime(sub.expires_at)} น.</code>\n"

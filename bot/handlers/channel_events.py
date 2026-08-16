@@ -7,7 +7,7 @@ from aiogram.enums import ChatMemberStatus
 from sqlalchemy import select
 
 from bot.config import get_settings
-from bot.models.schema import User, Subscription, SubStatus, PlanType
+from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS
 from bot.services.database import get_session
 
 logger = logging.getLogger(__name__)
@@ -115,20 +115,25 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
                     user_obj.trial_used = True
                     session.add(user_obj)
 
-            elif sub.plan_type == PlanType.MONTHLY_30D.value:
-                paid_minutes = config.PAID_DURATION_MINUTES
-                sub.expires_at = now + timedelta(minutes=paid_minutes)
-                if paid_minutes >= 1440:
-                    days = paid_minutes // 1440
-                    plan_title = f"สมาชิก VIP {days} วัน"
-                    duration_str = f"{days} วัน"
-                else:
-                    plan_title = f"สมาชิก VIP {paid_minutes} นาที (โหมดทดสอบ)"
-                    duration_str = f"{paid_minutes} นาที"
+            elif sub.plan_type in PLAN_DETAILS:
+                p_info = PLAN_DETAILS[sub.plan_type]
+                sub.expires_at = now + timedelta(days=p_info["days"])
+                plan_title = f"สมาชิก {p_info['badge']}"
+                duration_str = f"{p_info['days']} วัน"
+
+            elif sub.plan_type.startswith("MANUAL_VIP_"):
+                try:
+                    days = int(sub.plan_type.replace("MANUAL_VIP_", "").replace("D", ""))
+                except Exception:
+                    days = 30
+                sub.expires_at = now + timedelta(days=days)
+                plan_title = f"สมาชิก VIP {days} วัน"
+                duration_str = f"{days} วัน"
+
             else:
-                sub.expires_at = now + timedelta(minutes=config.PAID_DURATION_MINUTES)
+                sub.expires_at = now + timedelta(days=30)
                 plan_title = sub.plan_type
-                duration_str = f"{config.PAID_DURATION_MINUTES} นาที"
+                duration_str = "30 วัน"
 
             session.add(sub)
             sub_id = sub.id

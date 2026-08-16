@@ -15,7 +15,8 @@ from aiogram.types import (
 from aiogram.filters import Command
 
 from bot.config import get_settings
-from bot.models.schema import PaymentSlip, SlipStatus
+from bot.config import get_settings
+from bot.models.schema import PaymentSlip, SlipStatus, PlanType, PLAN_DETAILS
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
 
@@ -68,27 +69,46 @@ def get_admin_slip_keyboard(slip_id: int) -> InlineKeyboardMarkup:
     )
 
 
-@router.callback_query(F.data == "menu:subscribe_30d")
-async def handle_subscribe_30d_button(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    """เริ่มขั้นตอนการสมัครสมาชิก VIP พร้อมส่งรูป QR Code PromptPay 300 บาท"""
+@router.callback_query(F.data.startswith("menu:subscribe"))
+async def handle_subscribe_plan_button(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    """เริ่มขั้นตอนการสมัครสมาชิก VIP ตามแพ็กเกจที่เลือก พร้อมส่งรูป QR Code PromptPay"""
     if not callback.from_user or not callback.message:
         return
 
-    await state.set_state(PaymentStates.waiting_for_slip)
+    # ระบุประเภทแพ็กเกจจาก Callback data
+    plan_key = PlanType.VIP_30D.value
+    if ":" in callback.data:
+        parts = callback.data.split(":")
+        if len(parts) >= 3:
+            plan_key = parts[2]
+        elif callback.data == "menu:subscribe_30d":
+            plan_key = PlanType.VIP_30D.value
 
-    qr_path = Path(config.PAYMENT_QR_PATH)
-    
+    plan_info = PLAN_DETAILS.get(plan_key, PLAN_DETAILS[PlanType.VIP_30D.value])
+
+    await state.set_state(PaymentStates.waiting_for_slip)
+    await state.update_data(plan_type=plan_key)
+
     caption_text = (
-        "💳 <b>สมัครสมาชิก VIP (ราคา 300 บาท)</b>\n\n"
+        f"💳 <b>สมัครสมาชิก {plan_info['badge']} (ราคา {plan_info['price']:,} บาท)</b>\n\n"
+        f"⏳ <b>ระยะเวลา:</b> {plan_info['days']} วันเต็ม\n"
         "📲 <b>สแกน QR Code พร้อมเพย์ด้านบนเพื่อชำระเงิน</b>\n"
-        "• ยอดชำระ: <b>300 บาท</b>\n"
-        "• สแกนจ่ายผ่านแอปธนาคารได้ทันที ไม่ต้องกรอกเลขบัญชีเอง\n\n"
+        f"• ยอดชำระ: <b>{plan_info['price']:,} บาท</b>\n"
+        "• สแกนจ่ายผ่านแอปธนาคารได้ทันที\n\n"
         "📸 <b>ขั้นตอนถัดไป:</b>\n"
         "เมื่อโอนเงินเรียบร้อยแล้ว กรุณาส่งรูปสลิปเข้ามาในแชทนี้ได้เลยครับ\n\n"
         "💡 <i>คำแนะนำ: คุณสามารถพิมพ์ /cancel ได้ตลอดเวลาหากต้องการยกเลิก</i>"
     )
 
-    if qr_path.exists():
+    # ค้นหารูป QR Code สำหรับแพ็กเกจนี้ หรือรูปเริ่มต้น
+    qr_candidates = [
+        Path(f"bot/assets/{plan_info.get('qr_filename', '')}"),
+        Path("bot/assets/qr_payment.png"),
+        Path(config.PAYMENT_QR_PATH),
+    ]
+    qr_path = next((p for p in qr_candidates if p.exists()), None)
+
+    if qr_path:
         try:
             qr_photo = FSInputFile(str(qr_path))
             await callback.message.answer_photo(
@@ -152,6 +172,10 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
     if not message.from_user or not message.photo:
         return
 
+    fsm_data = await state.get_data()
+    plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
+    plan_info = PLAN_DETAILS.get(plan_key, PLAN_DETAILS[PlanType.VIP_30D.value])
+
     telegram_user = message.from_user
     photo = message.photo[-1]
     file_id = photo.file_id
@@ -168,6 +192,7 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
         slip = PaymentSlip(
             user_id=user.telegram_id,
             file_id=file_id,
+            plan_type=plan_key,
             status=SlipStatus.PENDING.value,
         )
         session.add(slip)
@@ -179,13 +204,13 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
 
     # 3. ส่งข้อความยืนยันให้ผู้ใช้
     await message.answer(
-        "✅ <b>ได้รับสลิปการโอนเงินเรียบร้อยแล้ว!</b>\n\n"
+        f"✅ <b>ได้รับสลิปการโอนเงินสำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"
         "ระบบได้ส่งสลิปให้ทีมงานแอดมินเพื่อตรวจสอบความถูกต้องเรียบร้อยแล้วครับ\n"
         "เมื่อได้รับการอนุมัติ คุณจะได้รับลิงก์เชิญเข้า Channel VIP ในแชทนี้ทันที\n\n"
         "ขอบคุณที่ร่วมเป็นสมาชิก VIP ครับ!",
         parse_mode="HTML",
     )
-    await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text=f"[ส่งรูปภาพสลิปโอนเงิน #{slip_id}]")
+    await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text=f"[ส่งรูปภาพสลิปโอนเงิน #{slip_id} ({plan_info['badge']})]")
 
     # 4. ส่งต่อไปยังกลุ่ม Admin (เวลาไทย)
     user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
@@ -197,7 +222,8 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
         f"🆔 <b>รหัสสลิป:</b> <code>#{slip_id}</code>\n"
         f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
-        f"📦 <b>แพ็กเกจที่ขอ:</b> สมาชิก VIP (300 บาท)\n"
+        f"📦 <b>แพ็กเกจที่ขอ:</b> <b>{plan_info['badge']} ({plan_info['price']:,} บาท)</b>\n"
+        f"⏳ <b>ระยะเวลา:</b> {plan_info['days']} วัน\n"
         f"📅 <b>เวลาที่ส่ง:</b> <code>{submitted_time_thai} น.</code>\n\n"
         "👉 <b>กรุณาตรวจสอบสลิปและเลือกการดำเนินการด้านล่าง:</b>"
     )
@@ -233,6 +259,10 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
         )
         return
 
+    fsm_data = await state.get_data()
+    plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
+    plan_info = PLAN_DETAILS.get(plan_key, PLAN_DETAILS[PlanType.VIP_30D.value])
+
     file_id = doc.file_id
     telegram_user = message.from_user
 
@@ -247,6 +277,7 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
         slip = PaymentSlip(
             user_id=user.telegram_id,
             file_id=file_id,
+            plan_type=plan_key,
             status=SlipStatus.PENDING.value,
         )
         session.add(slip)
@@ -256,12 +287,12 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
     await state.clear()
 
     await message.answer(
-        "✅ <b>ได้รับไฟล์สลิปการโอนเงินเรียบร้อยแล้ว!</b>\n\n"
+        f"✅ <b>ได้รับไฟล์สลิปการโอนเงินสำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"
         "ระบบได้ส่งสลิปให้ทีมงานแอดมินเพื่อตรวจสอบความถูกต้องเรียบร้อยแล้วครับ\n"
         "เมื่อได้รับการอนุมัติ คุณจะได้รับลิงก์เชิญเข้า Channel VIP ทางแชทนี้ทันที",
         parse_mode="HTML",
     )
-    await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text=f"[ส่งไฟล์เอกสารสลิป #{slip_id}]")
+    await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text=f"[ส่งไฟล์เอกสารสลิป #{slip_id} ({plan_info['badge']})]")
 
     user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
     full_name_safe = html.escape(telegram_user.full_name or telegram_user.first_name)
@@ -272,7 +303,8 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
         f"🆔 <b>รหัสสลิป:</b> <code>#{slip_id}</code>\n"
         f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
-        f"📦 <b>แพ็กเกจที่ขอ:</b> สมาชิก VIP (300 บาท)\n"
+        f"📦 <b>แพ็กเกจที่ขอ:</b> <b>{plan_info['badge']} ({plan_info['price']:,} บาท)</b>\n"
+        f"⏳ <b>ระยะเวลา:</b> {plan_info['days']} วัน\n"
         f"📅 <b>เวลาที่ส่ง:</b> <code>{submitted_time_thai} น.</code>\n\n"
         "👉 <b>กรุณาตรวจสอบสลิปและเลือกการดำเนินการด้านล่าง:</b>"
     )

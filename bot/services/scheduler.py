@@ -11,7 +11,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
 
 from bot.config import get_settings
-from bot.models.schema import User, Subscription, SubStatus, PlanType
+from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS
 from bot.services.database import get_session
 
 logger = logging.getLogger(__name__)
@@ -111,10 +111,17 @@ async def sync_pending_members(bot: Bot) -> dict:
                     if user_obj:
                         user_obj.trial_used = True
                         session.add(user_obj)
-                elif sub.plan_type == PlanType.MONTHLY_30D.value:
-                    sub.expires_at = joined_time + timedelta(minutes=config.PAID_DURATION_MINUTES)
+                elif sub.plan_type in PLAN_DETAILS:
+                    p_info = PLAN_DETAILS[sub.plan_type]
+                    sub.expires_at = joined_time + timedelta(days=p_info["days"])
+                elif sub.plan_type.startswith("MANUAL_VIP_"):
+                    try:
+                        days = int(sub.plan_type.replace("MANUAL_VIP_", "").replace("D", ""))
+                    except Exception:
+                        days = 30
+                    sub.expires_at = joined_time + timedelta(days=days)
                 else:
-                    sub.expires_at = joined_time + timedelta(minutes=config.PAID_DURATION_MINUTES)
+                    sub.expires_at = joined_time + timedelta(days=30)
 
                 if sub.expires_at <= now:
                     # หมดอายุแล้ว -> เตะออกทันที
@@ -396,9 +403,12 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 
                 if sub.plan_type == PlanType.TRIAL_15M.value:
                     plan_name = f"ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที"
+                elif sub.plan_type in PLAN_DETAILS:
+                    plan_name = PLAN_DETAILS[sub.plan_type]["badge"]
+                elif sub.plan_type.startswith("MANUAL_VIP_"):
+                    plan_name = sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
                 else:
-                    paid_min = config.PAID_DURATION_MINUTES
-                    plan_name = f"สมาชิก VIP {paid_min // 1440} วัน" if paid_min >= 1440 else f"สมาชิก VIP {paid_min} นาที (Test)"
+                    plan_name = sub.plan_type
 
                 start_time = format_thai_datetime(sub.joined_at)
                 end_time = format_thai_datetime(sub.expires_at)

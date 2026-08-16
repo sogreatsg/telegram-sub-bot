@@ -63,6 +63,11 @@ async def init_db() -> None:
             await conn.execute(text("PRAGMA journal_mode=WAL;"))
             await conn.execute(text("PRAGMA synchronous=NORMAL;"))
         await conn.run_sync(Base.metadata.create_all)
+        if "sqlite" in config.DATABASE_URL:
+            try:
+                await conn.execute(text("ALTER TABLE payment_slips ADD COLUMN plan_type VARCHAR(32) DEFAULT 'VIP_30D';"))
+            except Exception:
+                pass
     logger.info("Database initialized successfully with WAL mode enabled.")
 
 
