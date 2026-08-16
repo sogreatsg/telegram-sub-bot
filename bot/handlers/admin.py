@@ -800,6 +800,133 @@ async def handle_admin_reply_command(message: Message, bot: Bot):
         await message.answer(f"❌ <b>ส่งข้อความไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>\n(ผู้ใช้อาจบล็อกบอทหรือยังไม่เคยกด /start)", parse_mode="HTML")
 
 
+@router.callback_query(F.data.startswith("admin:view_chat:"))
+async def handle_admin_view_chat_callback(callback: CallbackQuery):
+    """Callback เมื่อแอดมินกดปุ่ม [📜 ดูประวัติการคุย]"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    uid_str = callback.data.split(":")[-1]
+    if not uid_str.isdigit():
+        await callback.answer("❌ User ID ไม่ถูกต้อง")
+        return
+
+    user_id = int(uid_str)
+    async with get_session() as session:
+        user = (await session.execute(select(User).where(User.telegram_id == user_id))).scalar_one_or_none()
+        if not user:
+            await callback.answer("❌ ไม่พบข้อมูลผู้ใช้นี้ในระบบ", show_alert=True)
+            return
+
+        chat_stmt = (
+            select(ChatMessage)
+            .where(ChatMessage.user_id == user_id)
+            .order_by(ChatMessage.id.desc())
+            .limit(15)
+        )
+        messages = (await session.execute(chat_stmt)).scalars().all()
+
+    user_name = html.escape(user.full_name or f"User {user_id}")
+    user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
+
+    lines = [
+        f"💬 <b>ประวัติการสนทนาของ:</b> {user_name} ({user_handle})",
+        f"🔢 <b>User ID:</b> <code>{user_id}</code>",
+        f"📊 <b>แสดง:</b> {len(messages)} ข้อความล่าสุด",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+    ]
+
+    if not messages:
+        lines.append("📭 <i>ยังไม่มีประวัติการส่งข้อความใหม่ที่บันทึกไว้ในระบบ</i>")
+    else:
+        for msg in reversed(messages):
+            t_str = format_thai_datetime(msg.created_at)
+            role_icon = "👤" if msg.sender_role == "USER" else ("🤖" if msg.sender_role == "BOT" else "👑")
+            role_label = "ผู้ใช้" if msg.sender_role == "USER" else ("บอท" if msg.sender_role == "BOT" else "แอดมิน")
+            time_short = t_str[11:16] if len(t_str) >= 16 else t_str
+            safe_content = html.escape(msg.message_text)
+            lines.append(f"[{time_short} น.] {role_icon} <b>{role_label}:</b> {safe_content}")
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📋 <b>แตะเพื่อคัดลอกคำสั่งตอบกลับ:</b>\n<code>/reply {user_id} </code>")
+
+    await callback.message.answer(text="\n".join(lines), parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:view_user:"))
+async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เมื่อแอดมินกดปุ่ม [👤 ดูข้อมูลสมาชิก]"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    uid_str = callback.data.split(":")[-1]
+    if not uid_str.isdigit():
+        await callback.answer("❌ User ID ไม่ถูกต้อง")
+        return
+
+    user_id = int(uid_str)
+    async with get_session() as session:
+        user = (await session.execute(select(User).where(User.telegram_id == user_id))).scalar_one_or_none()
+        if not user:
+            await callback.answer("❌ ไม่พบข้อมูลผู้ใช้ในระบบ", show_alert=True)
+            return
+
+        subs_stmt = select(Subscription).where(Subscription.user_id == user_id).order_by(Subscription.id.desc())
+        subs = (await session.execute(subs_stmt)).scalars().all()
+
+        slips_stmt = select(PaymentSlip).where(PaymentSlip.user_id == user_id).order_by(PaymentSlip.id.desc())
+        slips = (await session.execute(slips_stmt)).scalars().all()
+
+    channel_status_str = "ไม่ทราบสถานะ"
+    try:
+        chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id)
+        status_map = {
+            ChatMemberStatus.CREATOR: "👑 เจ้าของห้อง (Creator)",
+            ChatMemberStatus.ADMINISTRATOR: "🛡️ ผู้ดูแล (Admin)",
+            ChatMemberStatus.MEMBER: "🟢 อยู่ใน Channel (Member)",
+            ChatMemberStatus.LEFT: "⚪ ออกจากห้องไปแล้ว (Left)",
+            ChatMemberStatus.KICKED: "🔴 ถูกแบน/เตะออก (Kicked/Banned)",
+            ChatMemberStatus.RESTRICTED: "🟡 ถูกจำกัดสิทธิ์ (Restricted)",
+        }
+        channel_status_str = status_map.get(chat_member.status, chat_member.status)
+    except Exception as e:
+        channel_status_str = f"ไม่อยู่ใน Channel ({e})"
+
+    user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
+    full_name_safe = html.escape(user.full_name or "")
+    
+    resp = [
+        f"👤 <b>ข้อมูลผู้ใช้งาน: {full_name_safe}</b> ({user_handle})",
+        f"🔢 <b>Telegram ID:</b> <code>{user.telegram_id}</code>",
+        f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
+        f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> {channel_status_str}",
+        f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
+        "\n━━━━━━━━━━━━━━━━━━━━",
+        f"📦 <b>ประวัติการขอแพ็กเกจ ({len(subs)} รายการ):</b>",
+    ]
+
+    for i, s in enumerate(subs[:3], 1):
+        expired_thai = format_thai_datetime(s.expires_at)
+        plan_label = f"ทดลองใช้ 15 นาที" if s.plan_type == PlanType.TRIAL_15M.value else s.plan_type
+        resp.append(f"• [#{s.id}] <b>{plan_label}</b> ({s.status}) | หมดอายุ: <code>{expired_thai} น.</code>")
+
+    if slips:
+        resp.append(f"\n💳 <b>สลิปล่าสุด:</b> #{slips[0].id} ({slips[0].status})")
+
+    resp.append("\n━━━━━━━━━━━━━━━━━━━━")
+    resp.append(f"📋 <b>แตะเพื่อคัดลอกคำสั่งตอบกลับ:</b>\n<code>/reply {user_id} </code>")
+
+    await callback.message.answer("\n".join(resp), parse_mode="HTML")
+    await callback.answer()
+
+
 USERS_PER_PAGE = 5
 
 

@@ -429,6 +429,15 @@ async def handle_user_dm_message(message: Message, bot: Bot):
     user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
     time_now = format_thai_datetime(datetime.now(timezone.utc))
 
+    admin_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{user_id}"),
+                InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{user_id}"),
+            ],
+        ]
+    )
+
     admin_alert = (
         "💬 <b>มีข้อความใหม่จากผู้ใช้ (Direct Message)!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -437,14 +446,15 @@ async def handle_user_dm_message(message: Message, bot: Bot):
         f"📝 <b>ข้อความ:</b>\n<i>{html.escape(msg_text)}</i>\n"
         f"📅 <b>เวลา:</b> <code>{time_now} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 <i>พิมพ์ <code>/reply {user_id} [ข้อความ]</code> เพื่อตอบกลับทันที\n"
-        f"หรือ <code>/chat {user_id}</code> เพื่อดูประวัติการคุย</i>"
+        "📋 <b>แตะข้อความด้านล่างเพื่อคัดลอกคำสั่งตอบกลับ:</b>\n"
+        f"<code>/reply {user_id} </code>"
     )
 
     try:
         await bot.send_message(
             chat_id=config.ADMIN_GROUP_ID,
             text=admin_alert,
+            reply_markup=admin_keyboard,
             parse_mode="HTML",
         )
     except Exception as e:
