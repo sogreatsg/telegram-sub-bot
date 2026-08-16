@@ -67,6 +67,9 @@ class User(Base):
     payment_slips: Mapped[List["PaymentSlip"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", order_by="desc(PaymentSlip.id)"
     )
+    chat_messages: Mapped[List["ChatMessage"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", order_by="desc(ChatMessage.id)"
+    )
 
     def __repr__(self) -> str:
         return f"<User(telegram_id={self.telegram_id}, username={self.username}, trial_used={self.trial_used})>"
@@ -136,4 +139,31 @@ class PaymentSlip(Base):
         return (
             f"<PaymentSlip(id={self.id}, user_id={self.user_id}, "
             f"status={self.status}, admin_id={self.admin_id})>"
+        )
+
+
+class ChatMessage(Base):
+    """บันทึกประวัติข้อความสนทนาระหว่างผู้ใช้ บอท และแอดมิน"""
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sender_role: Mapped[str] = mapped_column(
+        String(16), nullable=False
+    )  # 'USER', 'BOT', 'ADMIN'
+    message_text: Mapped[str] = mapped_column(String(4000), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    # Relationship
+    user: Mapped["User"] = relationship(back_populates="chat_messages")
+
+    def __repr__(self) -> str:
+        return (
+            f"<ChatMessage(id={self.id}, user_id={self.user_id}, "
+            f"sender_role={self.sender_role})>"
         )

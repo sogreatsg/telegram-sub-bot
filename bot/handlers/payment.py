@@ -17,6 +17,7 @@ from aiogram.filters import Command
 from bot.config import get_settings
 from bot.models.schema import PaymentSlip, SlipStatus
 from bot.services.database import get_session, get_or_create_user
+from bot.services.chat_logger import log_chat_message
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -184,6 +185,7 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
         "ขอบคุณที่ร่วมเป็นสมาชิก VIP ครับ!",
         parse_mode="HTML",
     )
+    await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text=f"[ส่งรูปภาพสลิปโอนเงิน #{slip_id}]")
 
     # 4. ส่งต่อไปยังกลุ่ม Admin (เวลาไทย)
     user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
@@ -259,6 +261,7 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
         "เมื่อได้รับการอนุมัติ คุณจะได้รับลิงก์เชิญเข้า Channel VIP ทางแชทนี้ทันที",
         parse_mode="HTML",
     )
+    await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text=f"[ส่งไฟล์เอกสารสลิป #{slip_id}]")
 
     user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
     full_name_safe = html.escape(telegram_user.full_name or telegram_user.first_name)

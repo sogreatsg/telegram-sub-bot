@@ -10,9 +10,10 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from bot.config import get_settings
-from bot.models.schema import User, PaymentSlip, Subscription, SlipStatus, SubStatus, PlanType
+from bot.models.schema import User, PaymentSlip, Subscription, ChatMessage, SlipStatus, SubStatus, PlanType
 from bot.services.database import get_session, get_or_create_user
 from bot.services.scheduler import build_active_members_report, sync_pending_members
+from bot.services.chat_logger import log_chat_message
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -245,11 +246,14 @@ async def handle_admin_menu_command(message: Message):
         "• <code>/summary</code> หรือ <code>/report</code> — ดูสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบยอดสมาชิกใน Channel จริง\n"
         "• <code>/users</code> หรือ <code>/users [หน้า]</code> — ดูประวัติผู้ใช้งานย้อนหลังทั้งหมดในระบบ พร้อมปุ่มเลื่อนหน้า\n"
         "• <code>/user [User ID หรือ @username]</code> — ดูประวัติเจาะลึกเฉพาะราย (เวลาออกลิงก์ 15m, เวลากดเข้าห้อง, เวลาหมดอายุ, สลิปโอนเงิน)\n\n"
-        "🔄 <b>2. ซิงค์และกู้คืนสมาชิกตกหล่น:</b>\n"
+        "💬 <b>2. ดูประวัติการคุย & ตอบกลับผู้ใช้:</b>\n"
+        "• <code>/chat [User ID หรือ @username] [จำนวน]</code> — ดูประวัติการสนทนาย้อนหลังระหว่าง User กับ Bot\n"
+        "• <code>/reply [User ID หรือ @username] [ข้อความ]</code> — ส่งข้อความตอบกลับผู้ใช้ทาง DM ในนามทีมงานแอดมิน\n\n"
+        "🔄 <b>3. ซิงค์และกู้คืนสมาชิกตกหล่น:</b>\n"
         "• <code>/sync</code> หรือ <code>/sync_channel</code> — ตรวจเช็คผู้ใช้ที่ค้าง PENDING ทั้งหมด หากพบว่าอยู่ใน Channel แล้วจะเปิดใช้งาน ACTIVE และเริ่มนับเวลาให้ทันที (พร้อมเตะคนที่หมดเวลาแล้ว)\n\n"
-        "⚙️ <b>3. ตรวจสอบระบบ & สิทธิ์บอท:</b>\n"
+        "⚙️ <b>4. ตรวจสอบระบบ & สิทธิ์บอท:</b>\n"
         "• <code>/audit</code> หรือ <code>/check</code> — ตรวจสอบสิทธิ์ของ Bot ใน Channel VIP (สิทธิ์ Ban Users, สิทธิ์สร้าง Invite Links) และสถานะการเชื่อมต่อ\n\n"
-        "🛠️ <b>4. จัดการสมาชิกใน Channel:</b>\n"
+        "🛠️ <b>5. จัดการสมาชิกใน Channel:</b>\n"
         "• <code>/kick [User ID]</code> — สั่งเตะ (Soft-Kick) ผู้ใช้ออกจาก Channel VIP ทันที พร้อมอัปเดตสถานะในระบบ\n"
         "• <code>/add_vip [User ID] [จำนวนวัน เช่น 30]</code> — เพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง บอทจะสร้างและส่งลิงก์เชิญให้ผู้ใช้ทาง DM ทันที\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -661,6 +665,139 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
             resp.append(f"• สลิป #{sl.id} | สถานะ: <b>{sl.status}</b> | เวลาส่ง: <code>{sl_created} น.</code>")
 
     await message.answer("\n".join(resp), parse_mode="HTML")
+
+
+@router.message(Command("chat", "history", "chat_history"))
+async def handle_admin_chat_history_command(message: Message):
+    """คำสั่งดูประวัติการสนทนาย้อนหลัง: /chat <@username หรือ User ID> [จำนวนข้อความ]"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/chat [User ID หรือ @username] [จำนวนข้อความ (ค่าเริ่มต้น 15)]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/chat 5125375696</code>\n"
+            "• <code>/chat @some_user 20</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    limit = 15
+    if len(args) >= 3:
+        try:
+            limit = min(max(int(args[2]), 1), 50)
+        except ValueError:
+            limit = 15
+
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not user:
+            await message.answer(f"❌ <b>ไม่พบข้อมูลผู้ใช้:</b> <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+            return
+
+        chat_stmt = (
+            select(ChatMessage)
+            .where(ChatMessage.user_id == user.telegram_id)
+            .order_by(ChatMessage.id.desc())
+            .limit(limit)
+        )
+        messages = (await session.execute(chat_stmt)).scalars().all()
+
+    user_name = html.escape(user.full_name or f"User {user.telegram_id}")
+    user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
+
+    lines = [
+        f"💬 <b>ประวัติการสนทนาของ:</b> {user_name} ({user_handle})",
+        f"🔢 <b>User ID:</b> <code>{user.telegram_id}</code>",
+        f"📊 <b>แสดง:</b> {len(messages)} ข้อความล่าสุด (จากทั้งหมด)",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+    ]
+
+    if not messages:
+        lines.append("📭 <i>ยังไม่มีประวัติการส่งข้อความใหม่ที่บันทึกไว้ในระบบ</i>")
+        lines.append("(ระบบจะเริ่มบันทึกบทสนทนาใหม่นับตั้งแต่เริ่มเปิดใช้งานระบบนี้)")
+    else:
+        for msg in reversed(messages):
+            t_str = format_thai_datetime(msg.created_at)
+            role_icon = "👤" if msg.sender_role == "USER" else ("🤖" if msg.sender_role == "BOT" else "👑")
+            role_label = "ผู้ใช้" if msg.sender_role == "USER" else ("บอท" if msg.sender_role == "BOT" else "แอดมิน")
+            
+            # Short time for cleaner view
+            time_short = t_str[11:16] if len(t_str) >= 16 else t_str
+            safe_content = html.escape(msg.message_text)
+            lines.append(f"[{time_short} น.] {role_icon} <b>{role_label}:</b> {safe_content}")
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"💡 <i>พิมพ์ <code>/reply {user.telegram_id} [ข้อความ]</code> เพื่อตอบกลับผู้ใช้</i>")
+
+    await message.answer(text="\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("reply", "send"))
+async def handle_admin_reply_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินส่งข้อความตอบกลับผู้ใช้ทาง DM: /reply <@username หรือ User ID> <ข้อความ>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/reply [User ID หรือ @username] [ข้อความที่ต้องการส่ง]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/reply 5125375696 สวัสดีครับ แอดมินกำลังตรวจสอบสลิปให้ครับ</code>\n"
+            "• <code>/reply @some_user สวัสดีครับ มีอะไรให้ช่วยเหลือเพิ่มเติมมั้ยครับ</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    reply_text = args[2].strip()
+
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not user:
+            # If not in DB but is digits, try sending directly
+            if query.isdigit():
+                target_uid = int(query)
+                user_name = f"User {target_uid}"
+            else:
+                await message.answer(f"❌ ไม่พบผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+                return
+        else:
+            target_uid = user.telegram_id
+            user_name = html.escape(user.full_name or f"User {target_uid}")
+
+    dm_msg = (
+        "💬 <b>ข้อความจากทีมงานผู้ดูแลระบบ:</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"{html.escape(reply_text)}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>คุณสามารถพิมพ์ข้อความตอบกลับในแชทนี้ได้ตลอดเวลาครับ</i>"
+    )
+
+    try:
+        await bot.send_message(chat_id=target_uid, text=dm_msg, parse_mode="HTML")
+        await log_chat_message(user_id=target_uid, sender_role="ADMIN", message_text=reply_text)
+        await message.answer(
+            f"✅ <b>ส่งข้อความไปยัง {user_name} (<code>{target_uid}</code>) สำเร็จ!</b>\n\n"
+            f"📝 <b>ข้อความที่ส่ง:</b>\n<i>{html.escape(reply_text)}</i>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await message.answer(f"❌ <b>ส่งข้อความไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>\n(ผู้ใช้อาจบล็อกบอทหรือยังไม่เคยกด /start)", parse_mode="HTML")
 
 
 USERS_PER_PAGE = 5

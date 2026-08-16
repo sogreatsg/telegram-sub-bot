@@ -14,6 +14,7 @@ from sqlalchemy import select
 from bot.config import get_settings
 from bot.models.schema import User, Subscription, SubStatus, PlanType
 from bot.services.database import get_session, get_or_create_user
+from bot.services.chat_logger import log_chat_message
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -129,6 +130,7 @@ async def handle_start(message: Message):
         reply_markup=get_main_menu_keyboard(trial_available=trial_available),
         parse_mode="HTML",
     )
+    await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text="/start")
 
 
 @router.callback_query(F.data == "menu:main")
@@ -406,3 +408,26 @@ async def handle_status_command(message: Message):
         reply_markup=get_main_menu_keyboard(trial_available=not user.trial_used),
         parse_mode="HTML",
     )
+    await log_chat_message(user_id=user_id, sender_role="USER", message_text="/status")
+
+
+@router.message(F.chat.type == "private")
+async def handle_user_dm_message(message: Message):
+    """บันทึกข้อความที่ผู้ใช้พิมพ์คุยกับบอทในแชทส่วนตัว (DM) เพื่อให้แอดมินดูย้อนหลังและตอบกลับได้"""
+    if not message.from_user:
+        return
+
+    user_id = message.from_user.id
+    msg_text = message.text or (f"[{message.content_type}]" if message.content_type else "[ข้อความ/ไฟล์]")
+    
+    # บันทึกข้อความของผู้ใช้ลงในฐานข้อมูล
+    await log_chat_message(user_id=user_id, sender_role="USER", message_text=msg_text)
+
+    # ส่งข้อความแนะนำเบื้องต้น
+    reply_text = (
+        "🤖 <b>ระบบได้รับข้อความของคุณเรียบร้อยแล้วครับ</b>\n\n"
+        "หากต้องการเปิดเมนูทำรายการ กรุณาพิมพ์คำสั่ง <b>/start</b>\n"
+        "หรือรอทีมงานแอดมินตอบกลับในแชทนี้ครับ"
+    )
+    await message.answer(text=reply_text, parse_mode="HTML")
+    await log_chat_message(user_id=user_id, sender_role="BOT", message_text=reply_text)
