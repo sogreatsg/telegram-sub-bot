@@ -23,6 +23,7 @@ jobs:
             cd ~/telegram-sub-bot
             
             # Pull latest changes from main branch
+            git reset --hard HEAD
             git pull origin main
             
             # Rebuild and restart docker containers in background
