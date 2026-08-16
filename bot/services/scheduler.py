@@ -59,12 +59,110 @@ def format_remaining_time(expires_at: Optional[datetime]) -> str:
     return " ".join(parts)
 
 
+async def sync_pending_members(bot: Bot) -> dict:
+    """
+    ตรวจสอบและซิงค์ผู้ใช้ที่มีสถานะ PENDING ในฐานข้อมูล:
+    - หากผู้ใช้เข้าไปอยู่ใน Channel แล้ว -> เปิดใช้งาน ACTIVE ให้ทันที
+    - หากหมดอายุแล้วขณะบอทออฟไลน์ -> สั่ง Soft-Kick ทันที
+    - หากค้าง PENDING เกิน 24 ชม. และไม่ได้เข้า Channel -> ปรับเป็น EXPIRED
+    """
+    now = datetime.now(timezone.utc)
+    results = {"activated": 0, "kicked_expired": 0, "stale_cleaned": 0}
+
+    async with get_session() as session:
+        stmt = (
+            select(Subscription)
+            .options(selectinload(Subscription.user))
+            .where(Subscription.status == SubStatus.PENDING.value)
+        )
+        pending_subs = (await session.execute(stmt)).scalars().all()
+
+        if not pending_subs:
+            return results
+
+        logger.info(f"Syncing {len(pending_subs)} PENDING subscription(s)...")
+
+        for sub in pending_subs:
+            user_id = sub.user_id
+            user_obj = sub.user
+
+            try:
+                chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id)
+                in_channel = chat_member.status in (
+                    ChatMemberStatus.MEMBER,
+                    ChatMemberStatus.RESTRICTED,
+                    ChatMemberStatus.ADMINISTRATOR,
+                    ChatMemberStatus.CREATOR,
+                )
+            except Exception as e:
+                logger.debug(f"Could not check member status for User {user_id}: {e}")
+                in_channel = False
+
+            if in_channel:
+                # ผู้ใช้อยู่ใน Channel แล้ว -> คำนวณเวลาและ Activate
+                joined_time = sub.created_at if sub.created_at else now
+                if joined_time.tzinfo is None:
+                    joined_time = joined_time.replace(tzinfo=timezone.utc)
+
+                sub.joined_at = joined_time
+
+                if sub.plan_type == PlanType.TRIAL_15M.value:
+                    sub.expires_at = joined_time + timedelta(minutes=config.TRIAL_DURATION_MINUTES)
+                    if user_obj:
+                        user_obj.trial_used = True
+                        session.add(user_obj)
+                elif sub.plan_type == PlanType.MONTHLY_30D.value:
+                    sub.expires_at = joined_time + timedelta(minutes=config.PAID_DURATION_MINUTES)
+                else:
+                    sub.expires_at = joined_time + timedelta(minutes=config.PAID_DURATION_MINUTES)
+
+                if sub.expires_at <= now:
+                    # หมดอายุแล้ว -> เตะออกทันที
+                    try:
+                        await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, revoke_messages=False)
+                        await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, only_if_banned=True)
+                        sub.status = SubStatus.KICKED.value
+                        results["kicked_expired"] += 1
+                        logger.info(f"[SYNC] User {user_id} was PENDING but already expired in channel. Kicked successfully.")
+                    except Exception as e:
+                        sub.status = SubStatus.KICK_FAILED.value
+                        logger.warning(f"[SYNC] Failed to kick expired user {user_id}: {e}")
+                else:
+                    # ยังไม่หมดอายุ -> เปิดใช้งาน ACTIVE
+                    sub.status = SubStatus.ACTIVE.value
+                    results["activated"] += 1
+                    logger.info(f"[SYNC] Activated PENDING sub for User {user_id}. Expires at {sub.expires_at}")
+
+                session.add(sub)
+
+            else:
+                # ไม่ได้อยู่ใน Channel -> เช็คว่าเกิน 24 ชม. หรือไม่
+                sub_created = sub.created_at if sub.created_at else now
+                if sub_created.tzinfo is None:
+                    sub_created = sub_created.replace(tzinfo=timezone.utc)
+
+                if now - sub_created > timedelta(hours=24):
+                    sub.status = SubStatus.EXPIRED.value
+                    session.add(sub)
+                    results["stale_cleaned"] += 1
+                    logger.info(f"[SYNC] Cleaned up stale PENDING sub for User {user_id}")
+
+    return results
+
+
 async def check_expired_subscriptions(bot: Bot) -> None:
     """
     Background worker ทำงานตามช่วงเวลาที่กำหนด
-    ค้นหาแพ็กเกจสมาชิกที่หมดอายุ (ACTIVE หรือ KICK_FAILED ที่ต้องลองเตะซ้ำ)
+    1. ตรวจสอบซิงค์ผู้ใช้ PENDING ที่เข้า Channel แล้ว
+    2. ค้นหาแพ็กเกจสมาชิกที่หมดอายุ (ACTIVE หรือ KICK_FAILED ที่ต้องลองเตะซ้ำ)
     ดำเนินการ Soft-kick ออกจาก Channel อัปเดตสถานะในฐานข้อมูล และส่งแจ้งเตือน
     """
+    # 1. ซิงค์สถานะ PENDING ก่อน
+    try:
+        await sync_pending_members(bot)
+    except Exception as e:
+        logger.error(f"Error in sync_pending_members background worker: {e}", exc_info=True)
+
     now = datetime.now(timezone.utc)
     logger.debug(f"Checking for expired subscriptions at {now.isoformat()}...")
 

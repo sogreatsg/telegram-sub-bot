@@ -53,7 +53,7 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
 
     # ตรวจสอบการเข้าร่วม Channel (เปลี่ยนสถานะเป็น member หรือ administrator)
     is_joined = (
-        old_status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED, ChatMemberStatus.RESTRICTED)
+        old_status != new_status
         and new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR)
     )
 

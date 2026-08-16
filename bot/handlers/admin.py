@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 from bot.config import get_settings
 from bot.models.schema import User, PaymentSlip, Subscription, SlipStatus, SubStatus, PlanType
 from bot.services.database import get_session, get_or_create_user
-from bot.services.scheduler import build_active_members_report
+from bot.services.scheduler import build_active_members_report, sync_pending_members
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -245,9 +245,11 @@ async def handle_admin_menu_command(message: Message):
         "• <code>/summary</code> หรือ <code>/report</code> — ดูสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบยอดสมาชิกใน Channel จริง\n"
         "• <code>/users</code> หรือ <code>/users [หน้า]</code> — ดูประวัติผู้ใช้งานย้อนหลังทั้งหมดในระบบ พร้อมปุ่มเลื่อนหน้า\n"
         "• <code>/user [User ID หรือ @username]</code> — ดูประวัติเจาะลึกเฉพาะราย (เวลาออกลิงก์ 15m, เวลากดเข้าห้อง, เวลาหมดอายุ, สลิปโอนเงิน)\n\n"
-        "⚙️ <b>2. ตรวจสอบระบบ & สิทธิ์บอท:</b>\n"
+        "🔄 <b>2. ซิงค์และกู้คืนสมาชิกตกหล่น:</b>\n"
+        "• <code>/sync</code> หรือ <code>/sync_channel</code> — ตรวจเช็คผู้ใช้ที่ค้าง PENDING ทั้งหมด หากพบว่าอยู่ใน Channel แล้วจะเปิดใช้งาน ACTIVE และเริ่มนับเวลาให้ทันที (พร้อมเตะคนที่หมดเวลาแล้ว)\n\n"
+        "⚙️ <b>3. ตรวจสอบระบบ & สิทธิ์บอท:</b>\n"
         "• <code>/audit</code> หรือ <code>/check</code> — ตรวจสอบสิทธิ์ของ Bot ใน Channel VIP (สิทธิ์ Ban Users, สิทธิ์สร้าง Invite Links) และสถานะการเชื่อมต่อ\n\n"
-        "🛠️ <b>3. จัดการสมาชิกใน Channel:</b>\n"
+        "🛠️ <b>4. จัดการสมาชิกใน Channel:</b>\n"
         "• <code>/kick [User ID]</code> — สั่งเตะ (Soft-Kick) ผู้ใช้ออกจาก Channel VIP ทันที พร้อมอัปเดตสถานะในระบบ\n"
         "• <code>/add_vip [User ID] [จำนวนวัน เช่น 30]</code> — เพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง บอทจะสร้างและส่งลิงก์เชิญให้ผู้ใช้ทาง DM ทันที\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -258,9 +260,10 @@ async def handle_admin_menu_command(message: Message):
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="📊 สรุปสมาชิก Active", callback_data="admin_menu:summary"),
-                InlineKeyboardButton(text="🔍 Audit สิทธิ์บอท", callback_data="admin_menu:audit"),
+                InlineKeyboardButton(text="🔄 ซิงค์สมาชิกค้าง (/sync)", callback_data="admin_menu:sync"),
             ],
             [
+                InlineKeyboardButton(text="🔍 Audit สิทธิ์บอท", callback_data="admin_menu:audit"),
                 InlineKeyboardButton(text="📑 ประวัติผู้ใช้ทั้งหมด (/users)", callback_data="admin:users_page:1"),
             ],
         ]
@@ -317,6 +320,53 @@ async def handle_admin_menu_audit_callback(callback: CallbackQuery, bot: Bot):
 
     await callback.message.answer(text="\n".join(status_lines), parse_mode="HTML")
     await callback.answer()
+
+
+@router.callback_query(F.data == "admin_menu:sync")
+async def handle_admin_menu_sync_callback(callback: CallbackQuery, bot: Bot):
+    """ปุ่มลัดสำหรับสั่งซิงค์สมาชิกตกหล่น"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+    
+    await callback.answer("⏳ กำลังตรวจสอบและซิงค์ข้อมูลสมาชิก...")
+    res = await sync_pending_members(bot=bot)
+    sync_msg = (
+        "🔄 <b>ผลการตรวจสอบและซิงค์สมาชิกค้าง (Sync Completed)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🟢 <b>ตรวจพบในห้องและเปิดใช้งาน (Activated):</b> {res['activated']} คน\n"
+        f"🔴 <b>หมดอายุขณะออฟไลน์และเตะออกแล้ว (Kicked):</b> {res['kicked_expired']} คน\n"
+        f"⚪ <b>เคลียร์คำขอเก่าที่ไม่ได้เข้าห้อง (Stale):</b> {res['stale_cleaned']} คน\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>พิมพ์ <code>/summary</code> เพื่อดูรายชื่อสมาชิก Active ล่าสุด</i>"
+    )
+    await callback.message.answer(text=sync_msg, parse_mode="HTML")
+
+
+@router.message(Command("sync", "sync_channel"))
+async def handle_admin_sync_command(message: Message, bot: Bot):
+    """คำสั่งสำหรับแอดมินสั่งซิงค์สมาชิกที่ค้าง PENDING ทั้งหมด: /sync"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    status_msg = await message.answer("⏳ <i>กำลังตรวจสอบรายชื่อสมาชิกและซิงค์ข้อมูลกับ Telegram Channel...</i>", parse_mode="HTML")
+    res = await sync_pending_members(bot=bot)
+
+    sync_msg = (
+        "🔄 <b>ผลการตรวจสอบและซิงค์สมาชิกค้าง (Sync Completed)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🟢 <b>ตรวจพบในห้องและเปิดใช้งาน (Activated):</b> {res['activated']} คน\n"
+        f"🔴 <b>หมดอายุขณะออฟไลน์และเตะออกแล้ว (Kicked):</b> {res['kicked_expired']} คน\n"
+        f"⚪ <b>เคลียร์คำขอเก่าที่ไม่ได้เข้าห้อง (Stale):</b> {res['stale_cleaned']} คน\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>พิมพ์ <code>/summary</code> เพื่อดูรายชื่อสมาชิก Active ล่าสุด</i>"
+    )
+    try:
+        await status_msg.edit_text(text=sync_msg, parse_mode="HTML")
+    except Exception:
+        await message.answer(text=sync_msg, parse_mode="HTML")
 
 
 @router.message(Command("report", "summary"))
