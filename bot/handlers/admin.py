@@ -460,6 +460,7 @@ async def handle_admin_menu_command(message: Message):
         "👑 <b>เมนูคำสั่งผู้ดูแลระบบ (Admin Panel & Commands)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 <b>1. ตรวจสอบสมาชิก & รายงาน:</b>\n"
+        "• <code>/top_referrals</code> หรือ <code>/top_refs</code> — 🏆 ดูอันดับผู้ใช้งานที่ชวนเพื่อนได้มากที่สุด (Leaderboard) เรียงจากมากไปน้อย\n"
         "• <code>/audit_user [User ID หรือ @username]</code> — 🔍 ตรวจสอบยอดและกระทบยอดเวลาสมาชิก (ยอดชวนเพื่อน, แพ็กเกจที่ซื้อ, โควต้ารวม, วันหมดอายุจริง)\n"
         "• <code>/summary</code> หรือ <code>/report</code> — ดูสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบยอดสมาชิกใน Channel จริง\n"
         "• <code>/users_lasted</code> หรือ <code>/users_latest</code> — ดูรายชื่อผู้ใช้ที่สมัครใหม่ล่าสุด 10 คนแบบรวดเร็ว\n"
@@ -499,18 +500,19 @@ async def handle_admin_menu_command(message: Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
+                InlineKeyboardButton(text="🏆 อันดับชวนเพื่อน (/top_refs)", callback_data="admin_menu:top_referrals"),
                 InlineKeyboardButton(text="📊 สรุปสมาชิก Active", callback_data="admin_menu:summary"),
-                InlineKeyboardButton(text="📢 ยอด Broadcast", callback_data="admin_menu:broadcast_count"),
             ],
             [
                 InlineKeyboardButton(text="🔄 ซิงค์สมาชิกค้าง (/sync)", callback_data="admin_menu:sync"),
-                InlineKeyboardButton(text="🔍 Audit สิทธิ์บอท", callback_data="admin_menu:audit"),
+                InlineKeyboardButton(text="📢 ยอด Broadcast", callback_data="admin_menu:broadcast_count"),
             ],
             [
                 InlineKeyboardButton(text="⚡ 10 ผู้ใช้ล่าสุด (/users_lasted)", callback_data="admin_menu:users_latest"),
                 InlineKeyboardButton(text="📑 ผู้ใช้ทั้งหมด (/users)", callback_data="admin:users_page:1"),
             ],
             [
+                InlineKeyboardButton(text="🔍 Audit สิทธิ์บอท", callback_data="admin_menu:audit"),
                 InlineKeyboardButton(text="🎁 ตั้งค่าโปรโมชั่น", callback_data="admin_menu:promotion"),
             ],
         ]
@@ -2354,6 +2356,189 @@ async def handle_admin_users_latest_callback(callback: CallbackQuery):
         await callback.message.edit_text(text=text, reply_markup=markup, parse_mode="HTML")
     except Exception:
         pass
+    await callback.answer()
+
+
+async def build_top_referrals_view(page: int = 1, page_size: int = 10) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+    """สร้างรายงานอันดับผู้แนะนำเพื่อน (Top Referrers) เรียงจากยอดชวนเพื่อนมากไปน้อย"""
+    now = datetime.now(timezone.utc)
+
+    async with get_session() as session:
+        # 1. สถิติภาพรวม Referral
+        total_referrers = (await session.execute(
+            select(func.count(User.telegram_id)).where(User.referral_count > 0)
+        )).scalar() or 0
+
+        total_invited = (await session.execute(
+            select(func.sum(User.referral_count)).where(User.referral_count > 0)
+        )).scalar() or 0
+
+        total_bonus_days = (await session.execute(
+            select(func.sum(User.referral_bonus_days)).where(User.referral_bonus_days > 0)
+        )).scalar() or 0
+
+        if total_referrers == 0:
+            return (
+                "🏆 <b>รายงานอันดับผู้แนะนำเพื่อน (Top Referrals Leaderboard)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "ℹ️ <i>ขณะนี้ยังไม่มีผู้ใช้งานคนใดชวนเพื่อนสำเร็จในระบบ</i>",
+                None,
+            )
+
+        # คำนวณหน้า
+        total_pages = max(1, (total_referrers + page_size - 1) // page_size)
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * page_size
+
+        # 2. ดึงผู้ใช้ที่ชวนเพื่อน เรียงจากมากไปน้อย
+        stmt = (
+            select(User)
+            .options(selectinload(User.subscriptions))
+            .where(User.referral_count > 0)
+            .order_by(User.referral_count.desc(), User.referral_bonus_days.desc(), User.created_at.asc())
+            .offset(offset)
+            .limit(page_size)
+        )
+        users = (await session.execute(stmt)).scalars().all()
+
+    now_thai = format_thai_datetime(now)
+    lines = [
+        "🏆 <b>อันดับผู้แนะนำเพื่อนสูงสุด (Top Referrals Leaderboard)</b>",
+        f"📅 <b>ข้อมูล ณ วันที่:</b> <code>{now_thai} น.</code>",
+        f"📄 <b>หน้าที่:</b> {page}/{total_pages} (ทั้งหมด {total_referrers} คน)",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "📊 <b>สถิติระบบชวนเพื่อนรวม (Overview):</b>",
+        f"• 👥 สมาชิกที่เคยชวนเพื่อน: <b>{total_referrers} คน</b>",
+        f"• 🤝 ยอดชวนเพื่อนสำเร็จรวม: <b>{total_invited} คน</b>",
+        f"• 🎁 โบนัส VIP ที่แจกไปแล้ว: <b>{total_bonus_days} วัน ({total_bonus_days * 24} ชั่วโมง)</b>",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+    ]
+
+    buttons = []
+    medals = ["🥇", "🥈", "🥉"]
+
+    for idx, u in enumerate(users, start=offset + 1):
+        medal = medals[idx - 1] if idx <= 3 else f"<b>#{idx}</b>"
+        user_handle = f"@{u.username}" if u.username else "ไม่มี Username"
+        full_name_safe = html.escape(u.full_name or f"User {u.telegram_id}")
+
+        # ตรวจสอบสถานะ VIP ล่าสุด
+        active_subs = [s for s in u.subscriptions if s.status == SubStatus.ACTIVE.value and s.expires_at and s.expires_at > now]
+        pending_subs = [s for s in u.subscriptions if s.status == SubStatus.PENDING.value]
+
+        if active_subs:
+            exp_thai = format_thai_datetime(active_subs[0].expires_at)
+            rem_str = format_time_remaining(active_subs[0].expires_at)
+            vip_status_str = f"🟢 ACTIVE (หมดอายุ: <code>{exp_thai} น.</code> - เหลือ {rem_str})"
+        elif pending_subs:
+            pending_days = 0
+            for ps in pending_subs:
+                p_type = ps.plan_type
+                if p_type.startswith("REFERRAL_VIP"):
+                    if "_" in p_type and p_type.endswith("D"):
+                        try:
+                            pending_days += int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
+                        except Exception:
+                            pending_days += 1
+                    elif u.referral_bonus_days > 0:
+                        pending_days += u.referral_bonus_days
+                    else:
+                        pending_days += 1
+                elif p_type in PLAN_DETAILS:
+                    pending_days += PLAN_DETAILS[p_type]["days"]
+                elif p_type.startswith("PROMOTION_") or p_type.startswith("MANUAL_VIP_"):
+                    try:
+                        pending_days += int(p_type.replace("PROMOTION_", "").replace("MANUAL_VIP_", "").replace("D", ""))
+                    except Exception:
+                        pending_days += 30
+                elif p_type == PlanType.TRIAL_15M.value:
+                    pass
+                else:
+                    pending_days += 30
+            vip_status_str = f"🟡 PENDING (มีโควต้ารอกดเข้าสะสม <b>{pending_days} วัน</b>)"
+        else:
+            vip_status_str = "⚪ EXPIRED (ไม่อยู่ในห้อง)"
+
+        user_block = [
+            f"{medal} <b>อันดับ {idx}. {full_name_safe}</b> ({user_handle})",
+            f"   • 🔢 <b>User ID:</b> <code>{u.telegram_id}</code>",
+            f"   • 👥 <b>ชวนเพื่อนสำเร็จ:</b> <b>{u.referral_count} คน</b> | 🎁 <b>โบนัสสะสม:</b> <b>{u.referral_bonus_days} วัน</b>",
+            f"   • 📦 <b>สถานะ VIP:</b> {vip_status_str}",
+            "",
+        ]
+        lines.extend(user_block)
+
+        buttons.append([InlineKeyboardButton(text=f"👤 {idx}. จัดการ {full_name_safe} ({u.referral_count} คน)", callback_data=f"admin:view_user:{u.telegram_id}")])
+
+    # ปุ่มเปลี่ยนหน้า
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="⬅️ ก่อนหน้า", callback_data=f"admin:top_refs_page:{page-1}"))
+    nav_row.append(InlineKeyboardButton(text=f"📄 {page}/{total_pages}", callback_data="admin:noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="ถัดไป ➡️", callback_data=f"admin:top_refs_page:{page+1}"))
+
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([
+        InlineKeyboardButton(text="🔄 รีเฟรช", callback_data=f"admin:top_refs_page:{page}"),
+        InlineKeyboardButton(text="⚡ 10 ผู้ใช้ล่าสุด", callback_data="admin_menu:users_latest"),
+    ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    return "\n".join(lines), keyboard
+
+
+@router.message(Command("top_referrals", "top_referral", "top_refs", "referrals", "ref_ranking", "referral_leaderboard"))
+async def handle_admin_top_referrals_command(message: Message):
+    """คำสั่งดูอันดับผู้แนะนำเพื่อนสูงสุด (Leaderboard): /top_referrals [หน้าที่ต้องการดู]"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split()
+    page = 1
+    if len(args) >= 2 and args[1].isdigit():
+        page = int(args[1])
+
+    text, markup = await build_top_referrals_view(page=page)
+    await message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("admin:top_refs_page:"))
+async def handle_admin_top_refs_page_callback(callback: CallbackQuery):
+    """จัดการการเปลี่ยนหน้าในรายงาน /top_referrals ผ่าน Inline Keyboard"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    page_str = callback.data.split(":")[-1]
+    try:
+        page = int(page_str)
+    except ValueError:
+        page = 1
+
+    text, markup = await build_top_referrals_view(page=page)
+    try:
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_menu:top_referrals")
+async def handle_admin_menu_top_referrals_callback(callback: CallbackQuery):
+    """จัดการปุ่มลัด [🏆 อันดับชวนเพื่อน] ในเมนู Admin"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    text, markup = await build_top_referrals_view(page=1)
+    await callback.message.answer(text=text, reply_markup=markup, parse_mode="HTML")
     await callback.answer()
 
 
