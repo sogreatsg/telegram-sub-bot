@@ -18,7 +18,7 @@ from bot.services.database import get_session, get_or_create_user
 from bot.services.scheduler import build_active_members_report, sync_pending_members
 from bot.services.chat_logger import log_chat_message
 from bot.handlers.user_menu import get_main_menu_keyboard
-from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -698,10 +698,29 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
     async with get_session() as session:
         if query_clean.isdigit():
             user_stmt = select(User).where(User.telegram_id == int(query_clean))
+            user = (await session.execute(user_stmt)).scalar_one_or_none()
         else:
             user_stmt = select(User).where(User.username.ilike(query_clean))
+            user = (await session.execute(user_stmt)).scalar_one_or_none()
+            if not user:
+                user_stmt = select(User).where(User.full_name.ilike(f"%{query_clean}%"))
+                user = (await session.execute(user_stmt)).scalars().first()
 
-        user = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not user and query_clean.isdigit():
+            target_uid = int(query_clean)
+            try:
+                cm = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid)
+                tg_u = getattr(cm, "user", None)
+                if tg_u:
+                    user, _ = await get_or_create_user(
+                        session=session,
+                        telegram_id=target_uid,
+                        username=tg_u.username,
+                        full_name=tg_u.full_name,
+                    )
+            except Exception:
+                pass
+
         if not user:
             return f"❌ <b>ไม่พบข้อมูลผู้ใช้:</b> <code>{html.escape(query)}</code> ในระบบฐานข้อมูล", None
 
@@ -725,7 +744,7 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
         )
         slips = (await session.execute(slips_stmt)).scalars().all()
 
-    # ตรวจสอบสถานะจริงใน Channel
+    # ตรวจสอบสถานะจริงใน Channel พร้อมอัปเดตชื่อผู้ใช้ล่าสุดจาก Telegram
     channel_status_str = "ไม่ทราบสถานะ"
     is_in_channel = False
     try:
@@ -739,7 +758,28 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
             ChatMemberStatus.RESTRICTED: "🟡 ถูกจำกัดสิทธิ์ (Restricted)",
         }
         channel_status_str = status_map.get(chat_member.status, chat_member.status)
-        is_in_channel = chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+        is_in_channel = chat_member.status in (
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR,
+            ChatMemberStatus.RESTRICTED,
+        )
+        tg_u = getattr(chat_member, "user", None)
+        if tg_u:
+            updated_meta = False
+            if tg_u.full_name and user.full_name != tg_u.full_name:
+                user.full_name = tg_u.full_name
+                updated_meta = True
+            if tg_u.username and user.username != tg_u.username:
+                user.username = tg_u.username
+                updated_meta = True
+            if updated_meta:
+                async with get_session() as session:
+                    db_u = (await session.execute(select(User).where(User.telegram_id == user.telegram_id))).scalar_one_or_none()
+                    if db_u:
+                        db_u.full_name = user.full_name
+                        db_u.username = user.username
+                        session.add(db_u)
     except Exception as e:
         channel_status_str = f"ไม่อยู่ใน Channel / ตรวจสอบไม่ได้ ({e})"
         is_in_channel = False
@@ -844,14 +884,12 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
         verdict_lines.append("• ⏳ <b>เวลาคงเหลือ:</b> 0 วัน (หมดอายุการใช้งานแล้ว)")
         verdict_lines.append("• 🎯 <b>ผลการกระทบยอด:</b> ประวัติทั้งหมดถูกปิดรอบสมบูรณ์ ✅")
 
-    user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
-    full_name_safe = html.escape(user.full_name or f"User {user.telegram_id}")
+    user_header = format_user_title(user.full_name, user.username, user.telegram_id)
 
     lines = [
         "🔍 <b>[Audit & Reconciliation] ตรวจสอบยอดและประวัติสมาชิก</b>",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})",
-        f"🔢 <b>Telegram ID:</b> <code>{user.telegram_id}</code>",
+        f"👤 <b>ผู้ใช้งาน:</b> {user_header}",
         f"📢 <b>สถานะใน Channel VIP:</b> {channel_status_str}",
         f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
         f"⏱️ <b>สิทธิ์ทดลองใช้ฟรี:</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้ (โควต้า 15 นาที)'}",
@@ -1064,6 +1102,7 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
 
     # ตรวจสอบสถานะจริงใน Channel
     is_in_channel = False
+    tg_user = None
     try:
         chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid)
         is_in_channel = chat_member.status in (
@@ -1072,6 +1111,7 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
             ChatMemberStatus.ADMINISTRATOR,
             ChatMemberStatus.CREATOR,
         )
+        tg_user = getattr(chat_member, "user", None)
     except Exception:
         is_in_channel = False
 
@@ -1079,8 +1119,8 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         user, _ = await get_or_create_user(
             session=session,
             telegram_id=target_uid,
-            username=None,
-            full_name=f"User {target_uid}",
+            username=tg_user.username if tg_user else None,
+            full_name=tg_user.full_name if tg_user else f"User {target_uid}",
         )
 
         active_stmt = (
@@ -1159,10 +1199,11 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
     except Exception:
         pass
 
+    user_header = format_user_title(user.full_name, user.username, target_uid)
     if is_stack_extension:
         resp = (
             "✅ <b>ต่อเวลาสะสม VIP สำเร็จ!</b>\n\n"
-            f"👤 <b>User ID:</b> <code>{target_uid}</code>\n"
+            f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
             f"➕ <b>เพิ่มเวลา:</b> +{days} วัน\n"
             f"⏳ <b>วันหมดอายุใหม่:</b> <code>{exp_thai} น.</code> (คงเหลือ {time_rem})\n"
             f"🆔 <b>Sub ID:</b> <code>#{sub_id}</code>\n"
@@ -1171,7 +1212,7 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
     else:
         resp = (
             "✅ <b>เพิ่มสิทธิ์ VIP เรียบร้อยแล้ว!</b>\n\n"
-            f"👤 <b>User ID:</b> <code>{target_uid}</code>\n"
+            f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
             f"📅 <b>ระยะเวลา:</b> {days} วัน (หมดอายุ: <code>{exp_thai} น.</code>)\n"
             f"🆔 <b>Sub ID:</b> <code>#{sub_id}</code>\n"
             f"🔗 <b>Invite Link:</b> <code>{invite_url}</code>"
@@ -1391,14 +1432,32 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     query = args[1].strip().lstrip("@")
     
     async with get_session() as session:
-        # ค้นหาด้วย User ID (ถ้าเป็นตัวเลข) หรือ username
+        # ค้นหาด้วย User ID (ถ้าเป็นตัวเลข) หรือ username หรือ display name
         if query.isdigit():
             user_stmt = select(User).where(User.telegram_id == int(query))
+            user = (await session.execute(user_stmt)).scalar_one_or_none()
         else:
             user_stmt = select(User).where(User.username.ilike(query))
-            
-        user = (await session.execute(user_stmt)).scalar_one_or_none()
-        
+            user = (await session.execute(user_stmt)).scalar_one_or_none()
+            if not user:
+                user_stmt = select(User).where(User.full_name.ilike(f"%{query}%"))
+                user = (await session.execute(user_stmt)).scalars().first()
+
+        if not user and query.isdigit():
+            target_uid = int(query)
+            try:
+                cm = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid)
+                tg_u = getattr(cm, "user", None)
+                if tg_u:
+                    user, _ = await get_or_create_user(
+                        session=session,
+                        telegram_id=target_uid,
+                        username=tg_u.username,
+                        full_name=tg_u.full_name,
+                    )
+            except Exception:
+                pass
+
         if not user:
             await message.answer(f"❌ <b>ไม่พบข้อมูลผู้ใช้:</b> <code>{html.escape(query)}</code> ในระบบฐานข้อมูล", parse_mode="HTML")
             return
@@ -1419,7 +1478,7 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
         )
         slips = (await session.execute(slips_stmt)).scalars().all()
 
-    # ตรวจสอบสถานะใน Channel จริง
+    # ตรวจสอบสถานะใน Channel จริง พร้อมอัปเดตชื่อผู้ใช้ล่าสุดจาก Telegram
     channel_status_str = "ไม่ทราบสถานะ"
     try:
         chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user.telegram_id)
@@ -1432,13 +1491,25 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
             ChatMemberStatus.RESTRICTED: "🟡 ถูกจำกัดสิทธิ์ (Restricted)",
         }
         channel_status_str = status_map.get(chat_member.status, chat_member.status)
+        tg_u = getattr(chat_member, "user", None)
+        if tg_u:
+            updated_meta = False
+            if tg_u.full_name and user.full_name != tg_u.full_name:
+                user.full_name = tg_u.full_name
+                updated_meta = True
+            if tg_u.username and user.username != tg_u.username:
+                user.username = tg_u.username
+                updated_meta = True
+            if updated_meta:
+                async with get_session() as session:
+                    db_u = (await session.execute(select(User).where(User.telegram_id == user.telegram_id))).scalar_one_or_none()
+                    if db_u:
+                        db_u.full_name = user.full_name
+                        db_u.username = user.username
+                        session.add(db_u)
     except Exception as e:
         channel_status_str = f"ไม่อยู่ใน Channel / ตรวจสอบไม่ได้ ({e})"
 
-    # จัดรูปแบบข้อความ
-    user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
-    full_name_safe = html.escape(user.full_name or "")
-    
     # ประวัติการเข้า Channel ทั้งหมด
     joined_times = [s.joined_at for s in subs if s.joined_at is not None]
     if joined_times:
@@ -1497,9 +1568,10 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
         summary_str = " + ".join(parts) if parts else "0 วัน"
         pending_quota_line = f"⏳ <b>โควต้ารอกดเข้าห้องสะสมรวม:</b> {summary_str} <i>(จาก {len(pending_subs)} รายการรอกดเข้า)</i>"
 
+    user_header = format_user_title(user.full_name, user.username, user.telegram_id)
+
     resp = [
-        f"👤 <b>ข้อมูลผู้ใช้งาน: {full_name_safe}</b> ({user_handle})",
-        f"🔢 <b>Telegram ID:</b> <code>{user.telegram_id}</code>",
+        f"👤 <b>ข้อมูลผู้ใช้งาน:</b> {user_header}",
         f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
         f"🎁 <b>สถิติ Referral:</b> ชวนสำเร็จ {user.referral_count or 0} คน | โบนัสสะสม {user.referral_bonus_days or 0} วัน",
         f"🔗 <b>สมัครผ่านผู้แนะนำ (Referred By):</b> {ref_by_str}",
@@ -2127,14 +2199,12 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
     buttons = []
     
     for i, u in enumerate(users, start=start_index):
-        user_handle = f"@{u.username}" if u.username else "ไม่มี Username"
-        full_name_safe = html.escape(u.full_name or "ไม่ระบุชื่อ")
+        u_header = format_user_title(u.full_name, u.username, u.telegram_id)
         trial_str = "เคยใช้แล้ว ✅" if u.trial_used else "ยังไม่เคยใช้ ⏱️"
         
         user_block = [
-            f"<b>{i}. {full_name_safe}</b> ({user_handle})",
-            f"   • 🔢 <b>User ID:</b> <code>{u.telegram_id}</code> | สิทธิ์ฟรี: {trial_str}",
-            f"   • 📅 <b>เข้าใช้บอทครั้งแรก:</b> <code>{format_thai_datetime(u.created_at)} น.</code>",
+            f"<b>{i}.</b> {u_header}",
+            f"   • สิทธิ์ฟรี: {trial_str} | 📅 <b>เข้าใช้บอทครั้งแรก:</b> <code>{format_thai_datetime(u.created_at)} น.</code>",
         ]
 
         # ตรวจสอบประวัติการกดเข้า Channel ทั้งหมด
@@ -2179,7 +2249,8 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
         lines.extend(user_block)
         
         # เพิ่มปุ่มจัดการผู้ใช้รายบุคคล (UX improvement)
-        buttons.append([InlineKeyboardButton(text=f"👤 {i}. จัดการ {full_name_safe}", callback_data=f"admin:view_user:{u.telegram_id}")])
+        btn_name = html.escape(u.full_name or f"User {u.telegram_id}")
+        buttons.append([InlineKeyboardButton(text=f"👤 {i}. จัดการ {btn_name}", callback_data=f"admin:view_user:{u.telegram_id}")])
 
     lines.append(f"📄 <b>หน้า {page}/{total_pages}</b> (แสดงครั้งละ {USERS_PER_PAGE} คน)")
     lines.append("💡 <i>คลิกที่ปุ่มด้านล่างเพื่อจัดการผู้ใช้งานรายบุคคล</i>")
@@ -2291,14 +2362,12 @@ async def build_users_latest_view(limit: int = 10) -> tuple[str, Optional[Inline
 
     buttons = []
     for i, u in enumerate(users, start=1):
-        user_handle = f"@{u.username}" if u.username else "ไม่มี Username"
-        full_name_safe = html.escape(u.full_name or "ไม่ระบุชื่อ")
+        u_header = format_user_title(u.full_name, u.username, u.telegram_id)
         trial_str = "เคยใช้แล้ว ✅" if u.trial_used else "ยังไม่เคยใช้ ⏱️"
         
         user_block = [
-            f"<b>{i}. {full_name_safe}</b> ({user_handle})",
-            f"   • 🔢 <b>User ID:</b> <code>{u.telegram_id}</code> | สิทธิ์ฟรี: {trial_str}",
-            f"   • 📅 <b>เข้าใช้บอทครั้งแรก:</b> <code>{format_thai_datetime(u.created_at)} น.</code>",
+            f"<b>{i}.</b> {u_header}",
+            f"   • สิทธิ์ฟรี: {trial_str} | 📅 <b>เข้าใช้บอทครั้งแรก:</b> <code>{format_thai_datetime(u.created_at)} น.</code>",
         ]
 
         # ตรวจสอบประวัติการกดเข้า Channel ทั้งหมด
@@ -2501,9 +2570,9 @@ async def build_top_referrals_view(page: int = 1, page_size: int = 10) -> tuple[
     for row in user_rows:
         idx = row["idx"]
         medal = medals[idx - 1] if idx <= 3 else f"<b>#{idx}</b>"
+        u_header = format_user_title(row['name'], row['handle'].lstrip("@") if row['handle'] != "ไม่มี Username" else None, row['uid'])
         user_block = [
-            f"{medal} <b>อันดับ {idx}. {row['name']}</b> ({row['handle']})",
-            f"   • 🔢 <b>User ID:</b> <code>{row['uid']}</code>",
+            f"{medal} <b>อันดับ {idx}.</b> {u_header}",
             f"   • 👥 <b>ชวนเพื่อนสำเร็จ:</b> <b>{row['ref_count']} คน</b> | 🎁 <b>โบนัสสะสม:</b> <b>{row['bonus_days']} วัน</b>",
             f"   • 📦 <b>สถานะ VIP:</b> {row['vip_status']}",
             "",

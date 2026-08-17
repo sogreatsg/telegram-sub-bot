@@ -149,9 +149,22 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
     sub_id = None
 
     async with get_session() as session:
-        # 1. ตรวจสอบข้อมูล User ในฐานข้อมูล
+        # 1. ตรวจสอบข้อมูล User ในฐานข้อมูล และอัปเดตชื่อล่าสุดจาก Telegram ทันที
         user_stmt = select(User).where(User.telegram_id == user_id)
         user_obj = (await session.execute(user_stmt)).scalar_one_or_none()
+        if user_obj:
+            if user.full_name and user_obj.full_name != user.full_name:
+                user_obj.full_name = user.full_name
+            if user.username and user_obj.username != user.username:
+                user_obj.username = user.username
+            session.add(user_obj)
+        else:
+            user_obj, _ = await get_or_create_user(
+                session=session,
+                telegram_id=user_id,
+                username=user.username,
+                full_name=user.full_name or f"User {user_id}",
+            )
 
         # 2. ค้นหา Subscription ที่มีสถานะ PENDING ทั้งหมดของผู้ใช้นี้
         pending_stmt = (

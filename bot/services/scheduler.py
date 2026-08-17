@@ -19,7 +19,7 @@ from bot.services.referral import award_referral_bonus
 logger = logging.getLogger(__name__)
 config = get_settings()
 
-from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title
 
 def format_remaining_time(expires_at: Optional[datetime]) -> str:
     """แปลงเวลาคงเหลือให้อ่านง่ายเป็นภาษาไทย"""
@@ -115,6 +115,13 @@ async def sync_pending_members(bot: Bot) -> dict:
                     ChatMemberStatus.ADMINISTRATOR,
                     ChatMemberStatus.CREATOR,
                 )
+                tg_user = getattr(chat_member, "user", None)
+                if tg_user and user_obj:
+                    if tg_user.full_name and user_obj.full_name != tg_user.full_name:
+                        user_obj.full_name = tg_user.full_name
+                    if tg_user.username and user_obj.username != tg_user.username:
+                        user_obj.username = tg_user.username
+                    session.add(user_obj)
             except Exception as e:
                 logger.debug(f"Could not check member status for User {user_id}: {e}")
                 in_channel = False
@@ -714,6 +721,13 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                     cm = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=sub.user_id)
                     if cm.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
                         is_in = True
+                    tg_u = getattr(cm, "user", None)
+                    if tg_u and sub.user:
+                        if tg_u.full_name and sub.user.full_name != tg_u.full_name:
+                            sub.user.full_name = tg_u.full_name
+                        if tg_u.username and sub.user.username != tg_u.username:
+                            sub.user.username = tg_u.username
+                        session.add(sub.user)
                 except Exception:
                     is_in = False
 
@@ -759,11 +773,10 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
             report += "⚠️ <b>[สมาชิกที่หมดอายุแต่เตะไม่สำเร็จ]:</b>\n"
             for sub in failed_subs:
                 user = sub.user
-                user_handle = f"@{user.username}" if (user and user.username) else ""
-                full_name = html.escape(user.full_name) if (user and user.full_name) else f"User {sub.user_id}"
+                u_header = format_user_title(user.full_name if user else None, user.username if user else None, sub.user_id)
                 exp_thai = format_thai_datetime(sub.expires_at)
                 report += (
-                    f"• <b>{full_name}</b> ({user_handle}) | ID: <code>{sub.user_id}</code>\n"
+                    f"• {u_header}\n"
                     f"  หมดอายุเมื่อ: <code>{exp_thai} น.</code> (ใช้ <code>/kick {sub.user_id}</code>)\n"
                 )
             report += "\n"
@@ -775,8 +788,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
             report += "📋 <b>รายชื่อสมาชิก Active ปัจจุบัน:</b>\n\n"
             for i, sub in enumerate(unique_active_subs, start=1):
                 user = sub.user
-                user_handle = f"@{user.username}" if (user and user.username) else "ไม่มี Username"
-                full_name = html.escape(user.full_name) if (user and user.full_name) else "ไม่ระบุชื่อ"
+                u_header = format_user_title(user.full_name if user else None, user.username if user else None, sub.user_id)
                 
                 plan_name, _ = get_plan_display_name(sub.plan_type)
                 start_time = format_thai_datetime(sub.joined_at)
@@ -790,8 +802,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                     channel_badge = "🟢 ACTIVE"
 
                 report += (
-                    f"<b>{i}. {full_name}</b> ({user_handle}) — {channel_badge}\n"
-                    f"   • <b>User ID:</b> <code>{sub.user_id}</code>\n"
+                    f"<b>{i}.</b> {u_header} — {channel_badge}\n"
                     f"   • <b>แพ็กเกจ:</b> {plan_name}\n"
                     f"   • 🟢 <b>เริ่ม (Start):</b> <code>{start_time} น.</code>\n"
                     f"   • 🔴 <b>หมดอายุ (End):</b> <code>{end_time} น.</code>\n"
@@ -804,16 +815,14 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
             report += "🟡 <b>รายชื่อสมาชิกรอกดเข้าร่วม (Pending):</b>\n\n"
             for p_idx, (p_uid, p_list) in enumerate(user_pending_map.items(), start=1):
                 p_user = p_list[0].user
-                p_user_handle = f"@{p_user.username}" if (p_user and p_user.username) else "ไม่มี Username"
-                p_user_name = html.escape(p_user.full_name) if (p_user and p_user.full_name) else f"User {p_uid}"
+                p_u_header = format_user_title(p_user.full_name if p_user else None, p_user.username if p_user else None, p_uid)
                 p_plan_names = []
                 for s in p_list:
                     p_title, _ = get_plan_display_name(s.plan_type)
                     p_plan_names.append(p_title)
                 p_plans_str = ", ".join(p_plan_names)
                 report += (
-                    f"<b>{p_idx}. {p_user_name}</b> ({p_user_handle})\n"
-                    f"   • <b>User ID:</b> <code>{p_uid}</code>\n"
+                    f"<b>{p_idx}.</b> {p_u_header}\n"
                     f"   • <b>โควต้ารอใช้งาน:</b> {p_plans_str}\n"
                     f"   • 🟡 <b>สถานะ:</b> ออกลิงก์แล้ว-รอกดเข้าห้อง\n\n"
                 )

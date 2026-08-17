@@ -120,10 +120,13 @@ async def get_or_create_user(
     
     if user:
         updated = False
-        if user.username != username:
+        if username is not None and user.username != username:
             user.username = username
             updated = True
-        if user.full_name != full_name:
+        if full_name and full_name != f"User {telegram_id}" and user.full_name != full_name:
+            user.full_name = full_name
+            updated = True
+        elif not user.full_name and full_name:
             user.full_name = full_name
             updated = True
         if updated:

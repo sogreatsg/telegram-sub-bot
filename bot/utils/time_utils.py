@@ -67,3 +67,28 @@ def split_text_chunks(text: str, max_chunk_size: int = 3800) -> list[str]:
         chunks.append("\n\n".join(current_chunk))
 
     return chunks
+
+
+def format_user_title(full_name: Optional[str], username: Optional[str], user_id: int, include_id: bool = True) -> str:
+    """
+    จัดรูปแบบชื่อผู้ใช้ให้อ่านง่าย สม่ำเสมอ และปลอดภัย:
+    - ถ้ามี username: '<b>ชื่อ</b> (@username) | ID: <code>123456789</code>'
+    - ถ้าไม่มี username: '<b>ชื่อ</b> (ไม่มี Username) | ID: <code>123456789</code>'
+    """
+    import html as html_lib
+
+    name = (full_name or "").strip()
+    if not name or name == f"User {user_id}":
+        name_display = f"User {user_id}"
+    else:
+        name_display = html_lib.escape(name)
+
+    if username and username.strip():
+        u_clean = username.strip().lstrip("@")
+        handle_display = f"(@{html_lib.escape(u_clean)})"
+    else:
+        handle_display = "(ไม่มี Username)"
+
+    if include_id:
+        return f"<b>{name_display}</b> {handle_display} | ID: <code>{user_id}</code>"
+    return f"<b>{name_display}</b> {handle_display}"
