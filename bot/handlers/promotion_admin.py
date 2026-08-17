@@ -24,31 +24,33 @@ class PromoBroadcastStates(StatesGroup):
     waiting_for_message = State()
     waiting_for_target = State()
 
+async def show_promotion_status(message: Message):
+    settings = get_promotion_settings()
+    status = "🟢 เปิดใช้งาน" if settings.get("is_active") else "🔴 ปิดใช้งาน"
+    days = settings.get("days", 0)
+    price = settings.get("price", 0)
+    await message.answer(
+        f"🎯 <b>ระบบโปรโมชั่น</b>\n\n"
+        f"สถานะ: {status}\n"
+        f"จำนวนวัน: {days} วัน\n"
+        f"ราคา: {price} บาท\n\n"
+        "คำสั่งที่ใช้งานได้:\n"
+        "• `/promotion setting` - ตั้งค่าโปรโมชั่นใหม่\n"
+        "• `/promotion on` - เปิดใช้งาน\n"
+        "• `/promotion off` - ปิดใช้งาน\n"
+        "• `/promo_broadcast` - ส่งข้อความแจ้งเตือนโปรโมชั่น",
+        parse_mode="HTML"
+    )
+
 @router.message(Command("promotion"))
 async def handle_promotion_command(message: Message, state: FSMContext):
     if message.chat.id != config.ADMIN_GROUP_ID:
         return
 
     args = (message.text or "").split()[1:]
-    settings = get_promotion_settings()
-
+    
     if not args:
-        # Show current status
-        status = "🟢 เปิดใช้งาน" if settings.get("is_active") else "🔴 ปิดใช้งาน"
-        days = settings.get("days", 0)
-        price = settings.get("price", 0)
-        await message.answer(
-            f"🎯 <b>ระบบโปรโมชั่น</b>\n\n"
-            f"สถานะ: {status}\n"
-            f"จำนวนวัน: {days} วัน\n"
-            f"ราคา: {price} บาท\n\n"
-            "คำสั่งที่ใช้งานได้:\n"
-            "• `/promotion setting` - ตั้งค่าโปรโมชั่นใหม่\n"
-            "• `/promotion on` - เปิดใช้งาน\n"
-            "• `/promotion off` - ปิดใช้งาน\n"
-            "• `/promo_broadcast` - ส่งข้อความแจ้งเตือนโปรโมชั่น",
-            parse_mode="HTML"
-        )
+        await show_promotion_status(message)
         return
 
     subcmd = args[0].lower()
@@ -209,3 +211,12 @@ async def process_broadcast_single_user(message: Message, state: FSMContext, bot
         await message.answer(f"❌ ส่งข้อความไม่สำเร็จ: {e}")
         
     await state.clear()
+
+
+@router.callback_query(F.data == 'admin_menu:promotion')
+async def handle_admin_menu_promotion_callback(callback: CallbackQuery):
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer('❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น', show_alert=True)
+        return
+    await callback.answer()
+    await show_promotion_status(callback.message)

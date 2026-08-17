@@ -406,6 +406,11 @@ async def handle_admin_menu_command(message: Message):
         "🗑️ <b>7. รีเซ็ต & ลบประวัติผู้ใช้ (สำหรับทดสอบระบบ):</b>\n"
         "• <code>/reset_user [User ID หรือ @username]</code> — ลบประวัติแชท สลิป สิทธิ์ และบัญชีผู้ใช้ทั้งหมด พร้อมเตะออกจากห้อง VIP เพื่อให้เริ่มใหม่เป็นผู้ใช้ใหม่ 100%\n"
         "• <code>/reset_trial [User ID หรือ @username]</code> — รีเซ็ตเฉพาะสิทธิ์ทดลองใช้ฟรี 15 นาที ให้ผู้ใช้กดรับสิทธิ์ใหม่ได้ทันที\n\n"
+        "🎁 <b>8. ระบบโปรโมชั่น (Promotion System):</b>\n"
+        "• <code>/promotion</code> — ดูสถานะโปรโมชั่นปัจจุบัน (เปิด/ปิด ราคา และจำนวนวัน)\n"
+        "• <code>/promotion setting</code> — ตั้งค่าราคาและจำนวนวันของโปรโมชั่น (รองรับราคา 300, 500, 1000)\n"
+        "• <code>/promotion on</code> / <code>/promotion off</code> — เปิด/ปิด ระบบโปรโมชั่นสำหรับผู้ใช้\n"
+        "• <code>/promo_broadcast</code> — ส่งข้อความแจ้งข่าวโปรโมชั่น (เลือกกลุ่มเป้าหมาย: ทั้งหมด, เฉพาะคนหมดอายุ, หรือรายบุคคลได้)\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "💡 <i>สามารถกดปุ่มลัดด้านล่างเพื่อใช้งานเมนูหลักได้ทันทีครับ</i>"
     )
@@ -422,6 +427,7 @@ async def handle_admin_menu_command(message: Message):
             ],
             [
                 InlineKeyboardButton(text="📑 ประวัติผู้ใช้ทั้งหมด (/users)", callback_data="admin:users_page:1"),
+                InlineKeyboardButton(text="🎁 ตั้งค่าโปรโมชั่น", callback_data="admin_menu:promotion"),
             ],
         ]
     )
