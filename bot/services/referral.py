@@ -79,6 +79,7 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
         if active_sub:
             # ซ้อนทับและขยายเวลาเพิ่มอีก 1 วัน (24 ชั่วโมง) จากเวลาหมดอายุเดิม!
             active_sub.expires_at = active_sub.expires_at + timedelta(days=1)
+            active_sub.warned_1d = False
             session.add(active_sub)
             sub_extended = True
             new_expires_at = active_sub.expires_at
@@ -87,7 +88,7 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
                 f"New expires_at: {new_expires_at}"
             )
         else:
-            # เช็คว่ามี Pending Referral Sub หรือไม่
+            # เช็คว่ามี Pending Referral Sub อยู่แล้วหรือไม่
             pending_sub_stmt = (
                 select(Subscription)
                 .where(
@@ -98,15 +99,28 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
             )
             pending_sub = (await session.execute(pending_sub_stmt)).scalar_one_or_none()
 
-            if not pending_sub:
-                # สร้าง Subscription ใหม่เป็น VIP โบนัสชวนเพื่อน
+            if pending_sub and pending_sub.plan_type.startswith("REFERRAL_VIP"):
+                # มี PENDING อยู่แล้ว -> เพิ่มสะสมวันใน PENDING
+                current_days = 1
+                if "_" in pending_sub.plan_type and pending_sub.plan_type.endswith("D"):
+                    try:
+                        current_days = int(pending_sub.plan_type.replace("REFERRAL_VIP_", "").replace("D", ""))
+                    except Exception:
+                        current_days = 1
+                new_pending_days = current_days + 1
+                pending_sub.plan_type = f"REFERRAL_VIP_{new_pending_days}D"
+                session.add(pending_sub)
+                bonus_total_days = new_pending_days
+            else:
+                # ยังไม่มี -> สร้าง PENDING ใหม่
                 new_sub = Subscription(
                     user_id=referrer_id,
-                    plan_type=PlanType.REFERRAL_VIP.value,
+                    plan_type="REFERRAL_VIP_1D",
                     status=SubStatus.PENDING.value,
                 )
                 session.add(new_sub)
                 new_sub_created = True
+                bonus_total_days = 1
 
     # 4. หากไม่มี Active Sub -> สร้าง Invite Link ส่งให้ผู้แนะนำ
     if not sub_extended:

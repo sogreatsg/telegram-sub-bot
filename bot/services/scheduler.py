@@ -152,8 +152,15 @@ async def sync_pending_members(bot: Bot) -> dict:
 
                         user_obj.trial_used = True
                         session.add(user_obj)
-                elif sub.plan_type == PlanType.REFERRAL_VIP.value:
-                    bonus_days = user_obj.referral_bonus_days if (user_obj and user_obj.referral_bonus_days > 0) else 1
+                elif sub.plan_type.startswith("REFERRAL_VIP"):
+                    bonus_days = 1
+                    if "_" in sub.plan_type and sub.plan_type.endswith("D"):
+                        try:
+                            bonus_days = int(sub.plan_type.replace("REFERRAL_VIP_", "").replace("D", ""))
+                        except Exception:
+                            bonus_days = 1
+                    elif user_obj and user_obj.referral_bonus_days > 0:
+                        bonus_days = user_obj.referral_bonus_days
                     sub.expires_at = joined_time + timedelta(days=bonus_days)
                     plan_title = f"สมาชิก 🎁 VIP โบนัสชวนเพื่อน ({bonus_days} วัน)"
                     duration_str = f"{bonus_days} วัน"
