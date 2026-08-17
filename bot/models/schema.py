@@ -166,6 +166,9 @@ class Subscription(Base):
     status: Mapped[str] = mapped_column(
         String(32), default=SubStatus.PENDING.value, nullable=False, index=True
     )
+    warned_1d: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )

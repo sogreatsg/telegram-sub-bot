@@ -84,6 +84,10 @@ async def init_db() -> None:
                 await conn.execute(text("ALTER TABLE users ADD COLUMN referral_bonus_days INTEGER DEFAULT 0;"))
             except Exception:
                 pass
+            try:
+                await conn.execute(text("ALTER TABLE subscriptions ADD COLUMN warned_1d BOOLEAN DEFAULT 0;"))
+            except Exception:
+                pass
     logger.info("Database initialized successfully with WAL mode enabled.")
 
 

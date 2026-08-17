@@ -210,6 +210,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 new_expires_at = base_time + timedelta(days=additional_days)
                 active_sub.expires_at = new_expires_at
                 active_sub.plan_type = requested_plan
+                active_sub.warned_1d = False
                 session.add(active_sub)
                 is_stack_extension = True
                 logger.info(
@@ -810,6 +811,7 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
             base_time = max(current_exp, now) if current_exp else now
             new_expires_at = base_time + timedelta(days=days)
             active_sub.expires_at = new_expires_at
+            active_sub.warned_1d = False
             session.add(active_sub)
             sub_id = active_sub.id
             is_stack_extension = True

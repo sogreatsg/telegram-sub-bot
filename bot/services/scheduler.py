@@ -3,6 +3,7 @@ import html
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from aiogram import Bot
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -280,11 +281,88 @@ async def sync_pending_members(bot: Bot) -> dict:
     return results
 
 
+async def check_expiring_soon_subscriptions(bot: Bot) -> None:
+    """
+    ตรวจสอบสมาชิกที่กำลังจะหมดอายุล่วงหน้า 1 วัน (24 ชั่วโมง)
+    และส่งข้อความแจ้งเตือนทาง DM แนะนำให้กด /start หรือกดปุ่มต่ออายุสมาชิก
+    """
+    now = datetime.now(timezone.utc)
+    one_day_later = now + timedelta(hours=24)
+
+    async with get_session() as session:
+        stmt = (
+            select(Subscription)
+            .options(selectinload(Subscription.user))
+            .where(
+                Subscription.status == SubStatus.ACTIVE.value,
+                Subscription.expires_at.is_not(None),
+                Subscription.expires_at > now,
+                Subscription.expires_at <= one_day_later,
+                Subscription.warned_1d == False,
+                Subscription.plan_type != PlanType.TRIAL_15M.value,
+            )
+        )
+        expiring_subs = (await session.execute(stmt)).scalars().all()
+
+        if not expiring_subs:
+            return
+
+        logger.info(f"Found {len(expiring_subs)} subscription(s) expiring within 24 hours. Sending 1-day warning...")
+
+        for sub in expiring_subs:
+            user_id = sub.user_id
+            user_obj = sub.user
+            sub_id = sub.id
+            plan = sub.plan_type
+            plan_title, duration_str = get_plan_display_name(plan)
+            expires_at_thai = format_thai_datetime(sub.expires_at)
+            time_rem = format_remaining_time(sub.expires_at)
+            user_name = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
+
+            # มาร์กว่าได้ส่งแจ้งเตือน 1 วันแล้ว
+            sub.warned_1d = True
+            session.add(sub)
+
+            # ส่งข้อความเตือนเข้า DM ของผู้ใช้
+            warn_text = (
+                "⚠️ <b>[แจ้งเตือน] แพ็กเกจสมาชิก VIP ของคุณจะหมดอายุในอีก 24 ชั่วโมง!</b>\n\n"
+                f"เรียนคุณ {user_name} 👋\n"
+                f"แพ็กเกจ <b>{plan_title}</b> ของคุณกำลังจะหมดอายุใน:\n"
+                f"📅 <code>{expires_at_thai} น.</code> (เหลือเวลาประมาณ {time_rem})\n\n"
+                "✨ <b>เพื่อการรับชมและเข้าถึง Channel VIP อย่างต่อเนื่อง:</b>\n"
+                "คุณสามารถต่อเวลาสะสมล่วงหน้าได้ทันที โดยพิมพ์ <b>/start</b> หรือกดปุ่ม <b>'💳 ต่ออายุสมาชิก VIP'</b> ด้านล่างนี้ครับ\n\n"
+                "💡 <i>(วันใหม่จะถูกนำไปบวกเพิ่มสะสมกับเวลาที่เหลืออยู่อัตโนมัติ โดยคุณไม่ต้องออกจากห้อง VIP ครับ)</i>"
+            )
+
+            renew_keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="💳 ต่ออายุสมาชิก VIP", callback_data="menu:packages"),
+                        InlineKeyboardButton(text="📊 เช็คสถานะ", callback_data="menu:status"),
+                    ],
+                ]
+            )
+
+            try:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=warn_text,
+                    reply_markup=renew_keyboard,
+                    parse_mode="HTML",
+                )
+                logger.info(f"Sent 1-day expiration warning DM to User ID={user_id} (Sub #{sub_id}).")
+            except TelegramForbiddenError:
+                logger.info(f"User ID={user_id} has blocked the bot. Skipping 1-day warning.")
+            except Exception as e:
+                logger.warning(f"Failed to send 1-day warning DM to User ID={user_id}: {e}")
+
+
 async def check_expired_subscriptions(bot: Bot) -> None:
     """
     Background worker ทำงานตามช่วงเวลาที่กำหนด
     1. ตรวจสอบซิงค์ผู้ใช้ PENDING ที่เข้า Channel แล้ว
-    2. ค้นหาแพ็กเกจสมาชิกที่หมดอายุ (ACTIVE หรือ KICK_FAILED ที่ต้องลองเตะซ้ำ)
+    2. ส่งแจ้งเตือนผู้ใช้ที่กำลังจะหมดอายุล่วงหน้า 24 ชม.
+    3. ค้นหาแพ็กเกจสมาชิกที่หมดอายุ (ACTIVE หรือ KICK_FAILED ที่ต้องลองเตะซ้ำ)
     ดำเนินการ Soft-kick ออกจาก Channel อัปเดตสถานะในฐานข้อมูล และส่งแจ้งเตือน
     """
     # 1. ซิงค์สถานะ PENDING ก่อน
@@ -292,6 +370,12 @@ async def check_expired_subscriptions(bot: Bot) -> None:
         await sync_pending_members(bot)
     except Exception as e:
         logger.error(f"Error in sync_pending_members background worker: {e}", exc_info=True)
+
+    # 2. แจ้งเตือนสมาชิกที่กำลังจะหมดอายุล่วงหน้า 24 ชม.
+    try:
+        await check_expiring_soon_subscriptions(bot)
+    except Exception as e:
+        logger.error(f"Error in check_expiring_soon_subscriptions: {e}", exc_info=True)
 
     now = datetime.now(timezone.utc)
     logger.debug(f"Checking for expired subscriptions at {now.isoformat()}...")
