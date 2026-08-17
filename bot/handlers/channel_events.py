@@ -153,7 +153,7 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
         user_stmt = select(User).where(User.telegram_id == user_id)
         user_obj = (await session.execute(user_stmt)).scalar_one_or_none()
 
-        # 2. ค้นหา Subscription ที่มีสถานะ PENDING ล่าสุด (ถ้ามี)
+        # 2. ค้นหา Subscription ที่มีสถานะ PENDING ทั้งหมดของผู้ใช้นี้
         pending_stmt = (
             select(Subscription)
             .where(
@@ -162,7 +162,7 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
             )
             .order_by(Subscription.id.desc())
         )
-        pending_sub = (await session.execute(pending_stmt)).scalars().first()
+        raw_pending_subs = (await session.execute(pending_stmt)).scalars().all()
 
         # 3. ตรวจสอบ ACTIVE subscription ที่ยังไม่หมดอายุ (ถ้ามี)
         active_stmt = (
@@ -176,103 +176,120 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
         )
         existing_active = (await session.execute(active_stmt)).scalar_one_or_none()
 
-        if pending_sub:
-            # === กรณีมี PENDING subscription (เช่น เพิ่งกด Trial หรือ แอดมินเพิ่งอนุมัติแพ็กเกจ) ===
-            sub_created = pending_sub.created_at if pending_sub.created_at else now
+        valid_pending_subs = []
+        for psub in raw_pending_subs:
+            sub_created = psub.created_at if psub.created_at else now
             if sub_created.tzinfo is None:
                 sub_created = sub_created.replace(tzinfo=timezone.utc)
             is_stale = (now - sub_created) > timedelta(hours=48)
-            is_trial_abuse = (pending_sub.plan_type == PlanType.TRIAL_15M.value and user_obj and user_obj.trial_used)
+            is_trial_abuse = (psub.plan_type == PlanType.TRIAL_15M.value and user_obj and user_obj.trial_used)
 
             if is_stale or is_trial_abuse:
-                logger.warning(f"Invalid pending sub #{pending_sub.id} for User {user_id}: is_stale={is_stale}, is_trial_abuse={is_trial_abuse}")
-                pending_sub.status = SubStatus.EXPIRED.value
-                session.add(pending_sub)
-                pending_sub = None
-
-        if pending_sub:
-            # คำนวณระยะเวลาของแพ็กเกจ
-            p_type = pending_sub.plan_type
-            if p_type == PlanType.TRIAL_15M.value:
-                trial_minutes = config.TRIAL_DURATION_MINUTES
-                pending_sub.expires_at = now + timedelta(minutes=trial_minutes)
-                plan_title = f"ทดลองใช้งานฟรี {trial_minutes} นาที"
-                duration_str = f"{trial_minutes} นาที"
-                if user_obj:
-                    if not user_obj.trial_used and user_obj.referred_by_id:
-                        referred_by_to_award = user_obj.referred_by_id
-                        friend_user_snapshot = user_obj
-                    user_obj.trial_used = True
-                    session.add(user_obj)
-            elif p_type.startswith("REFERRAL_VIP"):
-                bonus_days = 1
-                if "_" in p_type and p_type.endswith("D"):
-                    try:
-                        bonus_days = int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
-                    except Exception:
-                        bonus_days = 1
-                elif user_obj and user_obj.referral_bonus_days > 0:
-                    bonus_days = user_obj.referral_bonus_days
-                pending_sub.expires_at = now + timedelta(days=bonus_days)
-                plan_title = f"สมาชิก 🎁 VIP โบนัสชวนเพื่อน ({bonus_days} วัน)"
-                duration_str = f"{bonus_days} วัน"
-            elif p_type in PLAN_DETAILS:
-                p_info = get_dynamic_plan_info(p_type)
-                add_days = p_info["days"]
-                plan_title = f"สมาชิก {p_info['badge']}"
-                duration_str = f"{add_days} วัน"
-                if existing_active and existing_active.plan_type != PlanType.TRIAL_15M.value:
-                    # ถ้ามี VIP เดิมอยู่แล้วและไม่ใช่ Trial -> ต่อเวลาสะสม
-                    base_time = max(ensure_utc(existing_active.expires_at), now)
-                    pending_sub.expires_at = base_time + timedelta(days=add_days)
-                    existing_active.status = SubStatus.EXPIRED.value
-                    session.add(existing_active)
-                    is_stack_extension = True
-                else:
-                    # สมัครใหม่ หรือ Upgrade จาก Trial
-                    if existing_active:
-                        existing_active.status = SubStatus.EXPIRED.value
-                        session.add(existing_active)
-                    pending_sub.expires_at = now + timedelta(days=add_days)
-            elif p_type.startswith("PROMOTION_"):
-                try:
-                    add_days = int(p_type.replace("PROMOTION_", "").replace("D", ""))
-                except Exception:
-                    add_days = 30
-                plan_title = f"สมาชิก 🔥 โปรโมชั่นพิเศษ {add_days} วัน"
-                duration_str = f"{add_days} วัน"
-                if existing_active and existing_active.plan_type != PlanType.TRIAL_15M.value:
-                    base_time = max(ensure_utc(existing_active.expires_at), now)
-                    pending_sub.expires_at = base_time + timedelta(days=add_days)
-                    existing_active.status = SubStatus.EXPIRED.value
-                    session.add(existing_active)
-                    is_stack_extension = True
-                else:
-                    if existing_active:
-                        existing_active.status = SubStatus.EXPIRED.value
-                        session.add(existing_active)
-                    pending_sub.expires_at = now + timedelta(days=add_days)
-            elif p_type.startswith("MANUAL_VIP_"):
-                try:
-                    add_days = int(p_type.replace("MANUAL_VIP_", "").replace("D", ""))
-                except Exception:
-                    add_days = 30
-                plan_title = f"สมาชิก VIP {add_days} วัน"
-                duration_str = f"{add_days} วัน"
-                pending_sub.expires_at = now + timedelta(days=add_days)
+                logger.warning(f"Invalid pending sub #{psub.id} for User {user_id}: is_stale={is_stale}, is_trial_abuse={is_trial_abuse}")
+                psub.status = SubStatus.EXPIRED.value
+                session.add(psub)
             else:
-                pending_sub.expires_at = now + timedelta(days=30)
-                plan_title = f"สมาชิก {p_type}"
-                duration_str = "30 วัน"
+                valid_pending_subs.append(psub)
 
-            pending_sub.joined_at = now
-            pending_sub.status = SubStatus.ACTIVE.value
-            session.add(pending_sub)
+        if valid_pending_subs:
+            # === รวมโควต้าวันและเวลาของทุก PENDING subscription เข้าด้วยกัน ===
+            total_days = 0
+            total_minutes = 0
+            primary_plan_badge = None
+
+            for psub in valid_pending_subs:
+                p_type = psub.plan_type
+                if p_type == PlanType.TRIAL_15M.value:
+                    trial_minutes = config.TRIAL_DURATION_MINUTES
+                    total_minutes += trial_minutes
+                    if user_obj:
+                        if not user_obj.trial_used and user_obj.referred_by_id:
+                            referred_by_to_award = user_obj.referred_by_id
+                            friend_user_snapshot = user_obj
+                        user_obj.trial_used = True
+                        session.add(user_obj)
+                    if not primary_plan_badge:
+                        primary_plan_badge = f"ทดลองใช้งานฟรี {trial_minutes} นาที"
+                elif p_type.startswith("REFERRAL_VIP"):
+                    bonus_days = 1
+                    if "_" in p_type and p_type.endswith("D"):
+                        try:
+                            bonus_days = int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
+                        except Exception:
+                            bonus_days = 1
+                    elif user_obj and user_obj.referral_bonus_days > 0:
+                        bonus_days = user_obj.referral_bonus_days
+                    total_days += bonus_days
+                    if not primary_plan_badge:
+                        primary_plan_badge = f"สมาชิก 🎁 VIP โบนัสชวนเพื่อน ({bonus_days} วัน)"
+                elif p_type in PLAN_DETAILS:
+                    p_info = get_dynamic_plan_info(p_type)
+                    total_days += p_info["days"]
+                    if not primary_plan_badge:
+                        primary_plan_badge = f"สมาชิก {p_info['badge']}"
+                elif p_type.startswith("PROMOTION_"):
+                    try:
+                        add_days = int(p_type.replace("PROMOTION_", "").replace("D", ""))
+                    except Exception:
+                        add_days = 30
+                    total_days += add_days
+                    if not primary_plan_badge:
+                        primary_plan_badge = f"สมาชิก 🔥 โปรโมชั่นพิเศษ {add_days} วัน"
+                elif p_type.startswith("MANUAL_VIP_"):
+                    try:
+                        add_days = int(p_type.replace("MANUAL_VIP_", "").replace("D", ""))
+                    except Exception:
+                        add_days = 30
+                    total_days += add_days
+                    if not primary_plan_badge:
+                        primary_plan_badge = f"สมาชิก VIP {add_days} วัน"
+                else:
+                    total_days += 30
+                    if not primary_plan_badge:
+                        primary_plan_badge = f"สมาชิก {p_type}"
+
+            if existing_active and existing_active.plan_type != PlanType.TRIAL_15M.value:
+                # ถ้ามี VIP เดิมอยู่แล้วและไม่ใช่ Trial -> ต่อเวลาสะสม
+                base_time = max(ensure_utc(existing_active.expires_at), now)
+                existing_active.status = SubStatus.EXPIRED.value
+                session.add(existing_active)
+                is_stack_extension = True
+            else:
+                if existing_active:
+                    existing_active.status = SubStatus.EXPIRED.value
+                    session.add(existing_active)
+                base_time = now
+
+            final_expires_at = base_time + timedelta(days=total_days, minutes=total_minutes)
+
+            # ตั้งค่า Subscription หลักให้เป็น ACTIVE
+            primary_sub = valid_pending_subs[0]
+            primary_sub.joined_at = now
+            primary_sub.expires_at = final_expires_at
+            primary_sub.status = SubStatus.ACTIVE.value
+            primary_sub.warned_1d = False
+            session.add(primary_sub)
+
+            # ยุบรวม PENDING รายการอื่นๆ ที่ถูกรวมไปแล้วให้เป็น EXPIRED (รวมยอดแล้ว)
+            for sec_sub in valid_pending_subs[1:]:
+                sec_sub.joined_at = now
+                sec_sub.expires_at = final_expires_at
+                sec_sub.status = SubStatus.EXPIRED.value
+                session.add(sec_sub)
+
             await session.flush()
-            sub_id = pending_sub.id
-            new_expires_at = pending_sub.expires_at
-            sub_to_activate = pending_sub
-            logger.info(f"Activated subscription #{sub_id} for user {user_id} ({plan_title})")
+            sub_id = primary_sub.id
+            new_expires_at = final_expires_at
+            sub_to_activate = primary_sub
+
+            if len(valid_pending_subs) > 1:
+                duration_str = f"{total_days} วัน (รวม {len(valid_pending_subs)} แพ็กเกจ)"
+                plan_title = f"สมาชิก VIP รวมสะสม {total_days} วัน ({len(valid_pending_subs)} รายการ)"
+            else:
+                duration_str = f"{total_days} วัน" if total_days > 0 else f"{total_minutes} นาที"
+                plan_title = primary_plan_badge or f"สมาชิก VIP ({duration_str})"
+
+            logger.info(f"Activated combined subscriptions #{[s.id for s in valid_pending_subs]} for user {user_id} ({plan_title})")
 
         elif existing_active:
             # === กรณีไม่มี PENDING แต่มี ACTIVE อยู่แล้ว (สมาชิกเดิมหลุดแล้วเข้าใหม่) ===

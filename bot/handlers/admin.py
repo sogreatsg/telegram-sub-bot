@@ -1170,6 +1170,51 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
         join_str = "🚪 <b>เวลากดเข้า Channel:</b> <i>ยังไม่เคยกดเข้าห้อง</i>"
 
     ref_by_str = f"<code>{user.referred_by_id}</code>" if user.referred_by_id else "<i>ไม่มี (เข้าเองโดยตรง)</i>"
+
+    # คำนวณโควต้า PENDING สะสมทั้งหมดที่รอกดเข้าห้อง
+    pending_subs = [s for s in subs if s.status == SubStatus.PENDING.value]
+    pending_quota_line = None
+    if pending_subs:
+        total_p_days = 0
+        total_p_minutes = 0
+        for ps in pending_subs:
+            p_type = ps.plan_type
+            if p_type == PlanType.TRIAL_15M.value:
+                total_p_minutes += config.TRIAL_DURATION_MINUTES
+            elif p_type.startswith("REFERRAL_VIP"):
+                if "_" in p_type and p_type.endswith("D"):
+                    try:
+                        total_p_days += int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
+                    except Exception:
+                        total_p_days += 1
+                elif user.referral_bonus_days > 0:
+                    total_p_days += user.referral_bonus_days
+                else:
+                    total_p_days += 1
+            elif p_type in PLAN_DETAILS:
+                total_p_days += PLAN_DETAILS[p_type]["days"]
+            elif p_type.startswith("PROMOTION_"):
+                try:
+                    total_p_days += int(p_type.replace("PROMOTION_", "").replace("D", ""))
+                except Exception:
+                    total_p_days += 30
+            elif p_type.startswith("MANUAL_VIP_"):
+                try:
+                    total_p_days += int(p_type.replace("MANUAL_VIP_", "").replace("D", ""))
+                except Exception:
+                    total_p_days += 30
+            else:
+                total_p_days += 30
+
+        parts = []
+        if total_p_days > 0:
+            total_hours = total_p_days * 24
+            parts.append(f"<b>{total_p_days} วัน ({total_hours} ชั่วโมง)</b>")
+        if total_p_minutes > 0:
+            parts.append(f"<b>{total_p_minutes} นาที</b>")
+        summary_str = " + ".join(parts) if parts else "0 วัน"
+        pending_quota_line = f"⏳ <b>โควต้ารอกดเข้าห้องสะสมรวม:</b> {summary_str} <i>(จาก {len(pending_subs)} รายการรอกดเข้า)</i>"
+
     resp = [
         f"👤 <b>ข้อมูลผู้ใช้งาน: {full_name_safe}</b> ({user_handle})",
         f"🔢 <b>Telegram ID:</b> <code>{user.telegram_id}</code>",
@@ -1179,9 +1224,13 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
         f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> {channel_status_str}",
         f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
         join_str,
+    ]
+    if pending_quota_line:
+        resp.append(pending_quota_line)
+    resp.extend([
         "\n━━━━━━━━━━━━━━━━━━━━",
         "📦 <b>ประวัติการขอแพ็กเกจ/สิทธิ์ (Subscriptions):</b>",
-    ]
+    ])
 
     if not subs:
         resp.append("<i>ไม่มีประวัติการขอแพ็กเกจ</i>")

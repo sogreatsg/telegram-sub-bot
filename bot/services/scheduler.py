@@ -98,9 +98,14 @@ async def sync_pending_members(bot: Bot) -> dict:
 
         logger.info(f"Syncing {len(pending_subs)} PENDING subscription(s)...")
 
+        # จัดกลุ่ม PENDING ตาม user_id
+        user_pending_map = {}
         for sub in pending_subs:
-            user_id = sub.user_id
-            user_obj = sub.user
+            user_pending_map.setdefault(sub.user_id, []).append(sub)
+
+        for user_id, u_subs in user_pending_map.items():
+            primary_sub = u_subs[0]
+            user_obj = primary_sub.user
 
             try:
                 chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id)
@@ -115,93 +120,103 @@ async def sync_pending_members(bot: Bot) -> dict:
                 in_channel = False
 
             if in_channel:
-                # ผู้ใช้อยู่ใน Channel แล้ว -> คำนวณเวลาและ Activate
-                joined_time = sub.created_at if sub.created_at else now
+                # ผู้ใช้อยู่ใน Channel แล้ว -> รวมโควต้า PENDING ทั้งหมดของผู้ใช้นี้
+                joined_time = primary_sub.created_at if primary_sub.created_at else now
                 if joined_time.tzinfo is None:
                     joined_time = joined_time.replace(tzinfo=timezone.utc)
 
-                sub.joined_at = joined_time
                 referred_by_to_award = None
                 friend_snapshot = None
+                total_days = 0
+                total_minutes = 0
+                primary_plan_badge = None
+                valid_subs = []
 
-                # ตรวจสอบว่าเคยใช้ Trial ไปแล้วหรือไม่
-                if sub.plan_type == PlanType.TRIAL_15M.value and user_obj and user_obj.trial_used:
-                    # ไม่อนุญาตให้ใช้ Trial ซ้ำ -> สั่งเตะออกทันที
-                    try:
-                        await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, revoke_messages=False)
-                        await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, only_if_banned=True)
-                        sub.status = SubStatus.KICKED.value
-                        results["kicked_expired"] += 1
-                        logger.warning(f"[SYNC] User {user_id} attempted trial abuse in channel. Kicked successfully.")
-                    except Exception as e:
-                        sub.status = SubStatus.KICK_FAILED.value
-                        logger.warning(f"[SYNC] Failed to kick trial abuse user {user_id}: {e}")
-                    session.add(sub)
+                for sub in u_subs:
+                    # ตรวจสอบว่าเคยใช้ Trial ไปแล้วหรือไม่
+                    if sub.plan_type == PlanType.TRIAL_15M.value and user_obj and user_obj.trial_used:
+                        sub.status = SubStatus.EXPIRED.value
+                        session.add(sub)
+                        continue
+
+                    valid_subs.append(sub)
+                    sub.joined_at = joined_time
+                    p_type = sub.plan_type
+                    if p_type == PlanType.TRIAL_15M.value:
+                        total_minutes += config.TRIAL_DURATION_MINUTES
+                        if user_obj:
+                            if not user_obj.trial_used and user_obj.referred_by_id:
+                                referred_by_to_award = user_obj.referred_by_id
+                                friend_snapshot = user_obj
+                            user_obj.trial_used = True
+                            session.add(user_obj)
+                        if not primary_plan_badge:
+                            primary_plan_badge = f"ทดลองใช้งานฟรี {config.TRIAL_DURATION_MINUTES} นาที"
+                    elif p_type.startswith("REFERRAL_VIP"):
+                        bonus_days = 1
+                        if "_" in p_type and p_type.endswith("D"):
+                            try:
+                                bonus_days = int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
+                            except Exception:
+                                bonus_days = 1
+                        elif user_obj and user_obj.referral_bonus_days > 0:
+                            bonus_days = user_obj.referral_bonus_days
+                        total_days += bonus_days
+                        if not primary_plan_badge:
+                            primary_plan_badge = f"สมาชิก 🎁 VIP โบนัสชวนเพื่อน ({bonus_days} วัน)"
+                    elif p_type in PLAN_DETAILS:
+                        p_info = get_dynamic_plan_info(p_type)
+                        total_days += p_info["days"]
+                        if not primary_plan_badge:
+                            primary_plan_badge = f"สมาชิก {p_info['badge']}"
+                    elif p_type.startswith("PROMOTION_"):
+                        try:
+                            days = int(p_type.replace("PROMOTION_", "").replace("D", ""))
+                        except Exception:
+                            days = 30
+                        total_days += days
+                        if not primary_plan_badge:
+                            primary_plan_badge = f"สมาชิก 🔥 โปรโมชั่นพิเศษ {days} วัน"
+                    elif p_type.startswith("MANUAL_VIP_"):
+                        try:
+                            days = int(p_type.replace("MANUAL_VIP_", "").replace("D", ""))
+                        except Exception:
+                            days = 30
+                        total_days += days
+                        if not primary_plan_badge:
+                            primary_plan_badge = f"สมาชิก VIP {days} วัน"
+                    else:
+                        total_days += 30
+                        if not primary_plan_badge:
+                            primary_plan_badge = f"สมาชิก {p_type}"
+
+                if not valid_subs:
                     continue
 
-                plan_title = "สมาชิก VIP"
-                duration_str = "30 วัน"
-                if sub.plan_type == PlanType.TRIAL_15M.value:
-                    sub.expires_at = joined_time + timedelta(minutes=config.TRIAL_DURATION_MINUTES)
-                    plan_title = f"ทดลองใช้งานฟรี {config.TRIAL_DURATION_MINUTES} นาที"
-                    duration_str = f"{config.TRIAL_DURATION_MINUTES} นาที"
-                    if user_obj:
-                        if not user_obj.trial_used and user_obj.referred_by_id:
-                            referred_by_to_award = user_obj.referred_by_id
-                            friend_snapshot = user_obj
+                final_expires_at = joined_time + timedelta(days=total_days, minutes=total_minutes)
 
-                        user_obj.trial_used = True
-                        session.add(user_obj)
-                elif sub.plan_type.startswith("REFERRAL_VIP"):
-                    bonus_days = 1
-                    if "_" in sub.plan_type and sub.plan_type.endswith("D"):
-                        try:
-                            bonus_days = int(sub.plan_type.replace("REFERRAL_VIP_", "").replace("D", ""))
-                        except Exception:
-                            bonus_days = 1
-                    elif user_obj and user_obj.referral_bonus_days > 0:
-                        bonus_days = user_obj.referral_bonus_days
-                    sub.expires_at = joined_time + timedelta(days=bonus_days)
-                    plan_title = f"สมาชิก 🎁 VIP โบนัสชวนเพื่อน ({bonus_days} วัน)"
-                    duration_str = f"{bonus_days} วัน"
-                elif sub.plan_type in PLAN_DETAILS:
-                    p_info = get_dynamic_plan_info(sub.plan_type)
-                    sub.expires_at = joined_time + timedelta(days=p_info["days"])
-                    plan_title = f"สมาชิก {p_info['badge']}"
-                    duration_str = f"{p_info['days']} วัน"
-                elif sub.plan_type.startswith("PROMOTION_"):
-                    try:
-                        days = int(sub.plan_type.replace("PROMOTION_", "").replace("D", ""))
-                    except Exception:
-                        days = 30
-                    sub.expires_at = joined_time + timedelta(days=days)
-                    plan_title = f"สมาชิก 🔥 โปรโมชั่นพิเศษ {days} วัน"
-                    duration_str = f"{days} วัน"
-                elif sub.plan_type.startswith("MANUAL_VIP_"):
-                    try:
-                        days = int(sub.plan_type.replace("MANUAL_VIP_", "").replace("D", ""))
-                    except Exception:
-                        days = 30
-                    sub.expires_at = joined_time + timedelta(days=days)
-                    plan_title = f"สมาชิก VIP {days} วัน"
-                    duration_str = f"{days} วัน"
+                if len(valid_subs) > 1:
+                    duration_str = f"{total_days} วัน (รวม {len(valid_subs)} แพ็กเกจ)"
+                    plan_title = f"สมาชิก VIP รวมสะสม {total_days} วัน ({len(valid_subs)} รายการ)"
                 else:
-                    sub.expires_at = joined_time + timedelta(days=30)
-                    plan_title = f"สมาชิก {sub.plan_type}"
-                    duration_str = "30 วัน"
+                    duration_str = f"{total_days} วัน" if total_days > 0 else f"{total_minutes} นาที"
+                    plan_title = primary_plan_badge or f"สมาชิก VIP ({duration_str})"
 
-                if sub.expires_at <= now:
+                if final_expires_at <= now:
                     # หมดอายุแล้ว -> เตะออกทันที
                     try:
                         await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, revoke_messages=False)
                         await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, only_if_banned=True)
-                        sub.status = SubStatus.KICKED.value
+                        for s in valid_subs:
+                            s.status = SubStatus.KICKED.value
+                            s.expires_at = final_expires_at
+                            session.add(s)
                         results["kicked_expired"] += 1
                         logger.info(f"[SYNC] User {user_id} was PENDING but already expired in channel. Kicked successfully.")
 
                         # ส่งแจ้งเตือนเข้ากลุ่ม Admin
                         start_time_thai = format_thai_datetime(joined_time)
-                        expires_at_thai = format_thai_datetime(sub.expires_at)
+                        expires_at_thai = format_thai_datetime(final_expires_at)
                         user_handle_sync = f"@{user_obj.username}" if (user_obj and user_obj.username) else "ไม่มี Username"
                         full_name_sync = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
                         admin_kick_msg = (
@@ -211,7 +226,7 @@ async def sync_pending_members(bot: Bot) -> dict:
                             f"📦 <b>แพ็กเกจ:</b> <b>{plan_title}</b> ({duration_str})\n"
                             f"🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_time_thai} น.</code>\n"
                             f"🔴 <b>เวลาหมดอายุ (End):</b> <code>{expires_at_thai} น.</code>\n"
-                            f"🆔 <b>Subscription ID:</b> <code>#{sub.id}</code>\n"
+                            f"🆔 <b>Subscription ID:</b> <code>#{primary_sub.id}</code>\n"
                             "━━━━━━━━━━━━━━━━━━━━\n"
                             "ℹ️ <i>ตรวจพบสมาชิกหมดอายุในห้องและนำออกจาก Channel เรียบร้อย</i>"
                         )
@@ -220,18 +235,29 @@ async def sync_pending_members(bot: Bot) -> dict:
                         except Exception:
                             pass
                     except Exception as e:
-                        sub.status = SubStatus.KICK_FAILED.value
+                        for s in valid_subs:
+                            s.status = SubStatus.KICK_FAILED.value
+                            session.add(s)
                         logger.warning(f"[SYNC] Failed to kick expired user {user_id}: {e}")
                 else:
                     # ยังไม่หมดอายุ -> เปิดใช้งาน ACTIVE
-                    sub.status = SubStatus.ACTIVE.value
+                    primary_sub.status = SubStatus.ACTIVE.value
+                    primary_sub.expires_at = final_expires_at
+                    primary_sub.warned_1d = False
+                    session.add(primary_sub)
+
+                    for s in valid_subs[1:]:
+                        s.status = SubStatus.EXPIRED.value
+                        s.expires_at = final_expires_at
+                        session.add(s)
+
                     results["activated"] += 1
-                    sub_id = sub.id
-                    logger.info(f"[SYNC] Activated PENDING sub #{sub_id} for User {user_id}. Expires at {sub.expires_at}")
+                    sub_id = primary_sub.id
+                    logger.info(f"[SYNC] Activated PENDING sub #{sub_id} for User {user_id}. Expires at {final_expires_at}")
 
                     # ส่ง DM ต้อนรับหาผู้ใช้
                     start_time_thai = format_thai_datetime(joined_time)
-                    expires_at_thai = format_thai_datetime(sub.expires_at)
+                    expires_at_thai = format_thai_datetime(final_expires_at)
                     try:
                         welcome_dm = (
                             f"🎉 <b>ยินดีต้อนรับเข้าสู่ VIP Channel!</b>\n\n"
@@ -262,10 +288,8 @@ async def sync_pending_members(bot: Bot) -> dict:
                     )
                     try:
                         await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_log_msg, parse_mode="HTML")
-                    except Exception as e:
+                    except Exception:
                         logger.warning(f"[SYNC] Could not send join notification to Admin Group: {e}")
-
-                session.add(sub)
 
                 if referred_by_to_award and friend_snapshot:
                     try:
@@ -274,15 +298,15 @@ async def sync_pending_members(bot: Bot) -> dict:
                         logger.error(f"[SYNC] Failed to award referral bonus: {e}")
 
             else:
-                # ไม่ได้อยู่ใน Channel -> เช็คว่าเกิน 24 ชม. หรือไม่
-                sub_created = sub.created_at if sub.created_at else now
-                if sub_created.tzinfo is None:
-                    sub_created = sub_created.replace(tzinfo=timezone.utc)
+                for sub in u_subs:
+                    sub_created = sub.created_at if sub.created_at else now
+                    if sub_created.tzinfo is None:
+                        sub_created = sub_created.replace(tzinfo=timezone.utc)
 
-                if now - sub_created > timedelta(hours=24):
-                    sub.status = SubStatus.EXPIRED.value
-                    session.add(sub)
-                    results["stale_cleaned"] += 1
+                    if now - sub_created > timedelta(hours=48):
+                        sub.status = SubStatus.EXPIRED.value
+                        session.add(sub)
+                        results["stale_cleaned"] += 1
                     logger.info(f"[SYNC] Cleaned up stale PENDING sub for User {user_id}")
 
     return results
