@@ -60,6 +60,15 @@ class UserReconcileResult:
     message: str
 
 
+def is_datetime_different(dt1: Optional[datetime], dt2: Optional[datetime], threshold_sec: float = 60.0) -> bool:
+    """เปรียบเทียบวันเวลา 2 ค่าว่าต่างกันเกิน threshold หรือไม่ (จัดการ naive vs aware UTC อย่างปลอดภัย)"""
+    if dt1 is None and dt2 is None:
+        return False
+    if dt1 is None or dt2 is None:
+        return True
+    return abs((ensure_utc(dt1) - ensure_utc(dt2)).total_seconds()) >= threshold_sec
+
+
 def format_reconcile_formula(r: UserReconcileResult) -> str:
     """
     จัดรูปแบบข้อความแจกแจงตามสูตรชัดเจน:
@@ -75,10 +84,13 @@ def format_reconcile_formula(r: UserReconcileResult) -> str:
     if r.expires_at_old and r.expires_at_new:
         sec_diff = (ensure_utc(r.expires_at_new) - ensure_utc(r.expires_at_old)).total_seconds()
         days_diff = round(sec_diff / 86400.0, 1)
-        if days_diff > 0:
-            diff_text = f"➕ ขยายเพิ่ม {days_diff} วัน"
-        elif days_diff < 0:
-            diff_text = f"➖ ปรับลด {abs(days_diff)} วัน ⚠️"
+        if abs(sec_diff) >= 60.0:
+            if days_diff > 0:
+                diff_text = f"➕ ขยายเพิ่ม {days_diff} วัน"
+            elif days_diff < 0:
+                diff_text = f"➖ ปรับลด {abs(days_diff)} วัน ⚠️"
+        else:
+            diff_text = "ตรงกันอยู่แล้ว ✅"
     elif not r.expires_at_old and r.expires_at_new:
         diff_text = "🆕 กำหนดวันหมดอายุใหม่"
 
@@ -212,7 +224,7 @@ async def reconcile_user(
     # 5. คำนวณวันหมดอายุใหม่ (Recalculate expires_at)
     status_old = sub.status if sub else "NONE"
     status_new = status_old
-    expires_at_old = sub.expires_at if sub else None
+    expires_at_old = ensure_utc(sub.expires_at) if (sub and sub.expires_at) else None
     expires_at_new = expires_at_old
     joined_at = sub.joined_at if (sub and sub.joined_at) else user.created_at
     expiry_changed = False
@@ -230,9 +242,10 @@ async def reconcile_user(
                 status_changed = True
             else:
                 status_new = SubStatus.ACTIVE.value
+                status_changed = False
 
             expires_at_new = calculated_expiry
-            expiry_changed = (expires_at_old != expires_at_new)
+            expiry_changed = is_datetime_different(expires_at_old, expires_at_new, threshold_sec=60.0)
 
             sub.expires_at = expires_at_new
             sub.status = status_new
@@ -257,13 +270,17 @@ async def reconcile_user(
                 status_changed = True
                 is_active = True
                 expires_at_new = calculated_expiry
-                expiry_changed = (expires_at_old != expires_at_new)
+                expiry_changed = is_datetime_different(expires_at_old, expires_at_new, threshold_sec=60.0)
                 sub.status = status_new
                 sub.expires_at = expires_at_new
                 session.add(sub)
             else:
                 expires_at_new = calculated_expiry
-                expiry_changed = (expires_at_old != expires_at_new)
+                # หากเดิมก็หมดอายุในอดีตอยู่แล้วและปัจจุบันก็ยังหมดอายุ ไม่ต้องแจ้งเตือนว่าเปลี่ยน
+                if expires_at_old and expires_at_old <= now and expires_at_new <= now:
+                    expiry_changed = False
+                else:
+                    expiry_changed = is_datetime_different(expires_at_old, expires_at_new, threshold_sec=60.0)
                 sub.expires_at = expires_at_new
                 session.add(sub)
 
