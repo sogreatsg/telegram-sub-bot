@@ -19,7 +19,7 @@ from bot.services.referral import award_referral_bonus
 logger = logging.getLogger(__name__)
 config = get_settings()
 
-from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc
 
 def format_remaining_time(expires_at: Optional[datetime]) -> str:
     """แปลงเวลาคงเหลือให้อ่านง่ายเป็นภาษาไทย"""
@@ -121,10 +121,6 @@ async def sync_pending_members(bot: Bot) -> dict:
 
             if in_channel:
                 # ผู้ใช้อยู่ใน Channel แล้ว -> รวมโควต้า PENDING ทั้งหมดของผู้ใช้นี้
-                joined_time = primary_sub.created_at if primary_sub.created_at else now
-                if joined_time.tzinfo is None:
-                    joined_time = joined_time.replace(tzinfo=timezone.utc)
-
                 referred_by_to_award = None
                 friend_snapshot = None
                 total_days = 0
@@ -140,7 +136,6 @@ async def sync_pending_members(bot: Bot) -> dict:
                         continue
 
                     valid_subs.append(sub)
-                    sub.joined_at = joined_time
                     p_type = sub.plan_type
                     if p_type == PlanType.TRIAL_15M.value:
                         total_minutes += config.TRIAL_DURATION_MINUTES
@@ -193,11 +188,39 @@ async def sync_pending_members(bot: Bot) -> dict:
                 if not valid_subs:
                     continue
 
-                final_expires_at = joined_time + timedelta(days=total_days, minutes=total_minutes)
+                # 1. ตรวจสอบว่าผู้ใช้มี Subscription ที่ ACTIVE อยู่แล้วหรือไม่
+                active_stmt = (
+                    select(Subscription)
+                    .where(
+                        Subscription.user_id == user_id,
+                        Subscription.status == SubStatus.ACTIVE.value,
+                        Subscription.expires_at > now,
+                    )
+                    .order_by(Subscription.id.desc())
+                )
+                existing_active = (await session.execute(active_stmt)).scalar_one_or_none()
 
-                if len(valid_subs) > 1:
-                    duration_str = f"{total_days} วัน (รวม {len(valid_subs)} แพ็กเกจ)"
-                    plan_title = f"สมาชิก VIP รวมสะสม {total_days} วัน ({len(valid_subs)} รายการ)"
+                if existing_active and existing_active.plan_type != PlanType.TRIAL_15M.value:
+                    base_time = max(ensure_utc(existing_active.expires_at), now)
+                    existing_active.status = SubStatus.EXPIRED.value
+                    session.add(existing_active)
+                    is_stack_extension = True
+                else:
+                    if existing_active:
+                        existing_active.status = SubStatus.EXPIRED.value
+                        session.add(existing_active)
+                    base_time = now
+                    is_stack_extension = False
+
+                final_expires_at = base_time + timedelta(days=total_days, minutes=total_minutes)
+                joined_time = now
+
+                for sub in valid_subs:
+                    sub.joined_at = joined_time
+
+                if len(valid_subs) > 1 or is_stack_extension:
+                    duration_str = f"{total_days} วัน (ต่อเวลาสะสมรวม {len(valid_subs)} รายการ)" if is_stack_extension else f"{total_days} วัน (รวม {len(valid_subs)} แพ็กเกจ)"
+                    plan_title = f"สมาชิก VIP รวมสะสม {total_days} วัน"
                 else:
                     duration_str = f"{total_days} วัน" if total_days > 0 else f"{total_minutes} นาที"
                     plan_title = primary_plan_badge or f"สมาชิก VIP ({duration_str})"
@@ -345,6 +368,24 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
             user_obj = sub.user
             sub_id = sub.id
             plan = sub.plan_type
+
+            # ตรวจสอบว่ามี ACTIVE subscription อื่นที่มีวันหมดอายุเกิน 24 ชั่วโมงข้างหน้าหรือไม่
+            other_active_later_stmt = (
+                select(Subscription)
+                .where(
+                    Subscription.user_id == user_id,
+                    Subscription.id != sub_id,
+                    Subscription.status == SubStatus.ACTIVE.value,
+                    Subscription.expires_at.is_not(None),
+                    Subscription.expires_at > one_day_later,
+                )
+            )
+            has_later_sub = (await session.execute(other_active_later_stmt)).scalars().first()
+            if has_later_sub:
+                sub.warned_1d = True
+                session.add(sub)
+                continue
+
             plan_title, duration_str = get_plan_display_name(plan)
             expires_at_thai = format_thai_datetime(sub.expires_at)
             time_rem = format_remaining_time(sub.expires_at)
@@ -440,6 +481,24 @@ async def check_expired_subscriptions(bot: Bot) -> None:
             user_obj = sub.user
             user_handle = f"@{user_obj.username}" if (user_obj and user_obj.username) else ""
             user_name = html.escape(user_obj.full_name) if (user_obj and user_obj.full_name) else f"User {user_id}"
+
+            # ตรวจสอบก่อนว่า User คนนี้มี ACTIVE subscription อื่นที่ยังไม่หมดอายุหรือไม่!
+            other_active_stmt = (
+                select(Subscription)
+                .where(
+                    Subscription.user_id == user_id,
+                    Subscription.id != sub_id,
+                    Subscription.status == SubStatus.ACTIVE.value,
+                    Subscription.expires_at.is_not(None),
+                    Subscription.expires_at > now,
+                )
+            )
+            other_active = (await session.execute(other_active_stmt)).scalars().first()
+            if other_active:
+                logger.info(f"[EXPIRE_CHECK] User {user_id} has another active sub #{other_active.id} (expires {other_active.expires_at}). Marking #{sub_id} as EXPIRED without kicking.")
+                sub.status = SubStatus.EXPIRED.value
+                session.add(sub)
+                continue
 
             logger.info(f"Processing expiration for Subscription ID={sub_id}, User ID={user_id}, Plan={plan}")
 
