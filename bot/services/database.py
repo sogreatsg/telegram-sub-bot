@@ -95,11 +95,29 @@ async def _migrate_legacy_subscriptions(conn: AsyncConnection) -> None:
 
     now = datetime.now(timezone.utc)
 
+    # ตรวจสอบคอลัมน์ optional จริงบนตารางเก่าก่อน SELECT เสมอ (อย่าสมมติว่ามี)
+    # เพราะบางฐานข้อมูลจริงอาจไม่เคยผ่าน ALTER TABLE ที่เพิ่มคอลัมน์เหล่านี้มาก่อนเลย
+    legacy_info = await conn.execute(text("PRAGMA table_info(subscriptions_legacy_v1);"))
+    legacy_cols = {row[1] for row in legacy_info.fetchall()}
+    has_warned_1d = "warned_1d" in legacy_cols
+    has_stale_alerted = "stale_alerted" in legacy_cols
+
+    select_cols = ["id", "user_id", "plan_type", "joined_at", "expires_at", "status", "created_at"]
+    if has_warned_1d:
+        select_cols.append("warned_1d")
+    if has_stale_alerted:
+        select_cols.append("stale_alerted")
+
     result = await conn.execute(text(
-        "SELECT id, user_id, plan_type, joined_at, expires_at, status, warned_1d, stale_alerted, created_at "
-        "FROM subscriptions_legacy_v1 ORDER BY user_id, id"
+        f"SELECT {', '.join(select_cols)} FROM subscriptions_legacy_v1 ORDER BY user_id, id"
     ))
     rows = result.fetchall()
+
+    def _warned(r) -> bool:
+        return bool(getattr(r, "warned_1d", 0)) if has_warned_1d else False
+
+    def _stale_alerted(r) -> bool:
+        return bool(getattr(r, "stale_alerted", 0)) if has_stale_alerted else False
 
     by_user: dict = defaultdict(list)
     for row in rows:
@@ -148,7 +166,7 @@ async def _migrate_legacy_subscriptions(conn: AsyncConnection) -> None:
                 "is_trial_active": plan_type == "TRIAL_15M",
                 "source_label": plan_badge_text(plan_type),
                 "pending_days": 0, "pending_minutes": 0, "pending_has_value": False, "pending_since": None,
-                "warned_1d": bool(best.warned_1d), "stale_alerted": bool(best.stale_alerted),
+                "warned_1d": _warned(best), "stale_alerted": _stale_alerted(best),
                 "created_at": best.created_at,
             })
         elif kick_failed_rows:
@@ -159,7 +177,7 @@ async def _migrate_legacy_subscriptions(conn: AsyncConnection) -> None:
                 "joined_at": best.joined_at, "expires_at": best.expires_at,
                 "is_trial_active": False, "source_label": plan_badge_text(plan_type),
                 "pending_days": 0, "pending_minutes": 0, "pending_has_value": False, "pending_since": None,
-                "warned_1d": bool(best.warned_1d), "stale_alerted": bool(best.stale_alerted),
+                "warned_1d": _warned(best), "stale_alerted": _stale_alerted(best),
                 "created_at": best.created_at,
             })
         elif pending_rows:
@@ -195,7 +213,7 @@ async def _migrate_legacy_subscriptions(conn: AsyncConnection) -> None:
                 "joined_at": latest.joined_at, "expires_at": latest.expires_at,
                 "is_trial_active": False, "source_label": plan_badge_text(plan_type),
                 "pending_days": 0, "pending_minutes": 0, "pending_has_value": False, "pending_since": None,
-                "warned_1d": bool(latest.warned_1d), "stale_alerted": bool(latest.stale_alerted),
+                "warned_1d": _warned(latest), "stale_alerted": _stale_alerted(latest),
                 "created_at": latest.created_at,
             })
 
