@@ -309,7 +309,7 @@ async def sync_pending_members(bot: Bot) -> dict:
                     )
                     try:
                         await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_log_msg, parse_mode="HTML")
-                    except Exception:
+                    except Exception as e:
                         logger.warning(f"[SYNC] Could not send join notification to Admin Group: {e}")
 
                 if referred_by_to_award and friend_snapshot:
