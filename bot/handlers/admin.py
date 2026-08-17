@@ -11,6 +11,7 @@ from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError, TelegramBadRequest
 from sqlalchemy import select, func, delete
 from sqlalchemy.orm import selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import get_settings
 from bot.models.schema import User, PaymentSlip, Subscription, SubscriptionGrant, ChatMessage, SlipStatus, SubStatus, PlanType, GrantType, PLAN_DETAILS, get_dynamic_plan_info
