@@ -560,15 +560,62 @@ async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
     if not message.from_user:
         return
 
-    # 0. ตรวจสอบว่าผู้ใช้ส่งลิงก์ซองของขวัญ TrueMoney เข้ามาหรือไม่
-    from bot.handlers.payment import extract_truemoney_url, process_truemoney_submission
-    angpao_url = extract_truemoney_url(message.text or "")
-    if angpao_url:
-        await process_truemoney_submission(message=message, state=state, bot=bot, angpao_url=angpao_url)
-        return
-
     telegram_user = message.from_user
     user_id = telegram_user.id
+    user_name = html.escape(telegram_user.full_name or telegram_user.first_name)
+    user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
+    time_now = format_thai_datetime(datetime.now(timezone.utc))
+
+    # ตรวจสอบกรณีผู้ใช้ส่งลิงก์ซองแดงเข้ามาโดยยังไม่ได้เลือกแพ็กเกจ
+    from bot.handlers.payment import extract_truemoney_url
+    angpao_url = extract_truemoney_url(message.text or "")
+    if angpao_url:
+        await log_chat_message(user_id=user_id, sender_role="USER", message_text=f"[ส่งลิงก์ซองแดงนอกขั้นตอน]: {angpao_url}")
+        
+        # 1. แจ้งเตือนผู้ใช้ให้ไปเลือกแพ็กเกจก่อน
+        await message.answer(
+            "⚠️ <b>กรุณาเลือกแพ็กเกจก่อนส่งลิงก์ซองของขวัญครับ</b>\n\n"
+            "เนื่องจากระบบต้องการทราบแพ็กเกจ VIP ที่คุณต้องการสมัคร\n"
+            "👉 <b>กรุณาพิมพ์ /start</b> แล้วกดเลือกแพ็กเกจ (3 วัน, 10 วัน, 30 วัน หรือ โปรโมชั่น)\n"
+            "จากนั้นเลือกช่องทาง <b>'🧧 ส่งซองของขวัญ TrueMoney'</b> แล้วค่อยส่งลิงก์เข้ามาครับ 🙏",
+            parse_mode="HTML",
+        )
+        await log_chat_message(user_id=user_id, sender_role="BOT", message_text="⚠️ กรุณาเลือกแพ็กเกจก่อนส่งลิงก์ซองของขวัญครับ")
+
+        # 2. ส่งแจ้งเตือนให้แอดมินรับทราบ
+        admin_keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{user_id}"),
+                    InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{user_id}"),
+                ],
+            ]
+        )
+        admin_alert = (
+            "💬 <b>มีผู้ใช้ส่งลิงก์ซองของขวัญ TrueMoney (ยังไม่ได้เลือกแพ็กเกจ)!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
+            f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+            f"🔗 <b>ลิงก์ที่ส่ง:</b> <code>{html.escape(angpao_url)}</code>\n"
+            f"📅 <b>เวลา:</b> <code>{time_now} น.</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "ℹ️ <i>บอทได้แนะนำให้ผู้ใช้พิมพ์ /start เพื่อกดเลือกแพ็กเกจก่อนแล้ว</i>\n\n"
+            "📋 <b>แตะข้อความด้านล่างเพื่อคัดลอกคำสั่ง:</b>\n"
+            f"<code>/reply {user_id} </code>\n"
+            f"<code>/add_vip {user_id} 30</code>"
+        )
+        try:
+            await bot.send_message(
+                chat_id=config.ADMIN_GROUP_ID,
+                text=admin_alert,
+                reply_markup=admin_keyboard,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            logger.error(f"Failed to forward unselected angpao link to Admin Group: {e}")
+        return
+
     msg_text = message.text or (f"[{message.content_type}]" if message.content_type else "[ข้อความ/ไฟล์]")
     
     # 1. บันทึกข้อความของผู้ใช้ลงในฐานข้อมูล

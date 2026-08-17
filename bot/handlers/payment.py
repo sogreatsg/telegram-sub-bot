@@ -335,18 +335,13 @@ async def process_truemoney_submission(
     bot: Bot,
     angpao_url: str,
 ):
-    """ฟังก์ชันประมวลผลการส่งลิงก์ซองของขวัญ TrueMoney และส่งต่อไปยังกลุ่ม Admin (ทำงานได้ทุกสถานะ)"""
+    """ฟังก์ชันประมวลผลการส่งลิงก์ซองของขวัญ TrueMoney และส่งต่อไปยังกลุ่ม Admin (เฉพาะเมื่อเลือกแพ็กเกจแล้ว)"""
     telegram_user = message.from_user
     if not telegram_user:
         return
 
     fsm_data = await state.get_data()
-    plan_key = fsm_data.get("plan_type")
-
-    # หากส่งลิงก์มาโดยตรงนอกขั้นตอน FSM ให้ใช้ VIP_30D เป็นค่าเริ่มต้น
-    if not plan_key:
-        plan_key = PlanType.VIP_30D.value
-
+    plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
     plan_info = get_dynamic_plan_info(plan_key)
 
     # 1. บันทึกลงฐานข้อมูล
@@ -426,28 +421,20 @@ async def process_truemoney_submission(
         )
 
 
-@router.message(F.chat.type == "private", F.text.func(lambda t: bool(extract_truemoney_url(t))), ~F.text.startswith("/"))
-async def handle_any_truemoney_link(message: Message, state: FSMContext, bot: Bot):
-    """ตรวจจับลิงก์ซองของขวัญ TrueMoney อัตโนมัติทุกกรณีในแชทส่วนตัว (แม้ไม่ได้กดเลือกแพ็กเกจก่อน)"""
-    if not message.text:
-        return
-    angpao_url = extract_truemoney_url(message.text.strip())
-    if angpao_url:
-        await process_truemoney_submission(message=message, state=state, bot=bot, angpao_url=angpao_url)
-
-
 @router.message(PaymentStates.waiting_for_truemoney, F.text, ~F.text.startswith("/"))
-async def handle_invalid_truemoney_text(message: Message, state: FSMContext, bot: Bot):
-    """แจ้งเตือนเมื่อผู้ใช้อยู่ในหน้ารอส่งลิงก์ซองแดงแต่ส่งข้อความที่ไม่มีลิงก์ TrueMoney"""
+async def handle_truemoney_angpao_input(message: Message, state: FSMContext, bot: Bot):
+    """จัดการข้อความที่ผู้ใช้ส่งมาระหว่างรอลิงก์ซองของขวัญ TrueMoney"""
     if not message.from_user or not message.text:
         return
 
     text_input = message.text.strip()
     angpao_url = extract_truemoney_url(text_input)
+
     if angpao_url:
         await process_truemoney_submission(message=message, state=state, bot=bot, angpao_url=angpao_url)
         return
 
+    # กรณีส่งข้อความธรรมดาที่ไม่ใช่ลิงก์ TrueMoney
     fsm_data = await state.get_data()
     plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
 
