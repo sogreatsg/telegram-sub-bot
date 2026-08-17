@@ -57,48 +57,65 @@ def get_bot_version_info() -> str:
     """ดึงข้อมูลเวอร์ชันและประวัติ Commit ล่าสุดแบบไดนามิก"""
     import subprocess
     import os
+    import json
+    from pathlib import Path
 
     commit_hash = os.environ.get("BOT_APP_VERSION", "Unknown")
     commit_date = os.environ.get("BOT_APP_DATE", "Unknown")
     commit_msg = os.environ.get("BOT_APP_MESSAGE", "Unknown")
     recent_logs = []
 
-    # 1. พยายามอ่านจาก Git โดยตรง
-    try:
-        git_cmd = [
-            "git", "log", "-n", "3",
-            "--format=%h|%ad|%s",
-            "--date=format:%d/%m/%Y %H:%M"
-        ]
-        res = subprocess.run(
-            git_cmd,
-            capture_output=True,
-            text=True,
-            timeout=3,
-            encoding="utf-8",
-        )
-        if res.returncode == 0 and res.stdout.strip():
-            lines = res.stdout.strip().split("\n")
-            if lines:
-                parts = lines[0].split("|", 2)
-                if len(parts) >= 3:
-                    commit_hash = parts[0]
-                    commit_date = parts[1]
-                    commit_msg = parts[2]
-                
-                for line in lines:
-                    p = line.split("|", 2)
-                    if len(p) >= 3:
-                        h, d, m = p[0], p[1], p[2]
-                        recent_logs.append(f"• <code>{h}</code>: {html.escape(m)} (<i>{d}</i>)")
-    except Exception:
-        pass
+    # 1. พยายามอ่านจาก bot/version.json (สร้างอัตโนมัติขณะ Deploy)
+    version_file = Path(__file__).parent.parent / "version.json"
+    if version_file.exists():
+        try:
+            with open(version_file, "r", encoding="utf-8") as f:
+                v_data = json.load(f)
+                commit_hash = v_data.get("commit", commit_hash)
+                commit_date = v_data.get("date", commit_date)
+                commit_msg = v_data.get("message", commit_msg)
+                recent_logs = v_data.get("recent_logs", [])
+        except Exception:
+            pass
 
-    # 2. ถ้าไม่มี recent_logs แต่มี ENV variables
+    # 2. พยายามอ่านจาก Git โดยตรงถ้ายังไม่มี recent_logs
+    if not recent_logs:
+        try:
+            git_cmd = [
+                "git", "log", "-n", "5",
+                "--format=%h|%ad|%s",
+                "--date=format:%d/%m/%Y %H:%M"
+            ]
+            res = subprocess.run(
+                git_cmd,
+                capture_output=True,
+                text=True,
+                timeout=3,
+                encoding="utf-8",
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                lines = res.stdout.strip().split("\n")
+                if lines:
+                    parts = lines[0].split("|", 2)
+                    if len(parts) >= 3:
+                        commit_hash = parts[0]
+                        commit_date = parts[1]
+                        commit_msg = parts[2]
+                    
+                    recent_logs = []
+                    for line in lines:
+                        p = line.split("|", 2)
+                        if len(p) >= 3:
+                            h, d, m = p[0], p[1], p[2]
+                            recent_logs.append(f"• <code>{h}</code>: {html.escape(m)} (<i>{d}</i>)")
+        except Exception:
+            pass
+
+    # 3. ถ้าไม่มี recent_logs แต่มี ENV variables
     if not recent_logs and commit_hash != "Unknown":
         recent_logs.append(f"• <code>{commit_hash}</code>: {html.escape(commit_msg)}")
 
-    # 3. จัดรูปแบบข้อความ
+    # 4. จัดรูปแบบข้อความ
     text = (
         "🤖 <b>Bot Version Info</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"

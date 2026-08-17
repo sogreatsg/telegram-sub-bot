@@ -1,0 +1,12 @@
+{
+  "commit": "0fbed47",
+  "date": "17/08/2026 22:11",
+  "message": "fix: resolve Telegram 4096 character limit in /summary by splitting chunks and embed discrepancy alert",
+  "recent_logs": [
+    "• <code>0fbed47</code>: fix: resolve Telegram 4096 character limit in /summary by splitting chunks and embed discrepancy alert (<i>17/08/2026 22:11</i>)",
+    "• <code>cd26f18</code>: fix: resolve variable naming in sync_pending_members exception logger (<i>17/08/2026 20:53</i>)",
+    "• <code>ef62d43</code>: fix: display pending members list in /summary and improve is_in_channel check in /add_vip (<i>17/08/2026 20:47</i>)",
+    "• <code>2259723</code>: fix: sync pending before summary, deduplicate active users, and track real-time channel presence (<i>17/08/2026 20:30</i>)",
+    "• <code>3f173da</code>: fix: standardize per-sub referral quota calculation across channel events, scheduler, and admin audit (<i>17/08/2026 20:17</i>)"
+  ]
+}
