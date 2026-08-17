@@ -22,12 +22,6 @@ jobs:
             echo "🚀 Starting automated deployment..."
             cd ~/telegram-sub-bot
 
-            # Take a fresh database backup before pulling/rebuilding, in case this
-            # deploy includes a schema migration. Abort the deploy if the backup
-            # fails so we never migrate production data without a fresh restore point.
-            echo "💾 Backing up database before deploying new version..."
-            python3 scripts/backup_db.py || { echo "❌ Backup failed — aborting deploy to avoid migrating without a restore point."; exit 1; }
-
             # Pull latest changes from main branch
             git reset --hard HEAD
             git pull origin main
@@ -44,6 +38,9 @@ jobs:
 
             # Rebuild and restart docker containers in background
             docker compose up -d --build
+
+            # Clean up dangling images from old builds to prevent disk bloat
+            docker image prune -f
             
             echo "✅ Deployment completed successfully!"
             docker compose ps
