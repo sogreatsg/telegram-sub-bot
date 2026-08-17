@@ -532,7 +532,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 Subscription.expires_at.is_not(None),
                 Subscription.expires_at > now,
             )
-            .order_by(Subscription.expires_at.asc())
+            .order_by(Subscription.joined_at.desc().nulls_last(), Subscription.created_at.desc())
         )
         unique_active_subs = (await session.execute(stmt)).scalars().all()
 
@@ -623,7 +623,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
         if total_active == 0:
             report += "ℹ️ <i>ขณะนี้ไม่มีสมาชิกที่อยู่ในสถานะ Active ในระบบ</i>\n\n"
         else:
-            report += "📋 <b>รายชื่อสมาชิก Active ปัจจุบัน:</b>\n\n"
+            report += "📋 <b>รายชื่อสมาชิก Active ปัจจุบัน (เรียงจากเข้าห้องล่าสุด ➔ เก่าสุด):</b>\n\n"
             for i, sub in enumerate(unique_active_subs, start=1):
                 user = sub.user
                 u_header = format_user_title(user.full_name if user else None, user.username if user else None, sub.user_id)
