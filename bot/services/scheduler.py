@@ -49,6 +49,31 @@ def format_remaining_time(expires_at: Optional[datetime]) -> str:
     return " ".join(parts)
 
 
+def get_plan_display_name(plan_type: str) -> tuple[str, str]:
+    """คืนค่า (plan_title, duration_str) สำหรับแสดงผล"""
+    if plan_type == PlanType.TRIAL_15M.value:
+        return f"ทดลองใช้งานฟรี {config.TRIAL_DURATION_MINUTES} นาที", f"{config.TRIAL_DURATION_MINUTES} นาที"
+    elif plan_type == PlanType.REFERRAL_VIP.value:
+        return "สมาชิก 🎁 VIP โบนัสชวนเพื่อน", "1 วัน"
+    elif plan_type in PLAN_DETAILS:
+        p_info = get_dynamic_plan_info(plan_type)
+        return f"สมาชิก {p_info['badge']}", f"{p_info['days']} วัน"
+    elif plan_type.startswith("PROMOTION_"):
+        try:
+            days = int(plan_type.replace("PROMOTION_", "").replace("D", ""))
+        except Exception:
+            days = 30
+        return f"สมาชิก 🔥 โปรโมชั่นพิเศษ {days} วัน", f"{days} วัน"
+    elif plan_type.startswith("MANUAL_VIP_"):
+        try:
+            days = int(plan_type.replace("MANUAL_VIP_", "").replace("D", ""))
+        except Exception:
+            days = 30
+        return f"สมาชิก VIP {days} วัน", f"{days} วัน"
+    else:
+        return f"สมาชิก {plan_type}", "30 วัน"
+
+
 async def sync_pending_members(bot: Bot) -> dict:
     """
     ตรวจสอบและซิงค์ผู้ใช้ที่มีสถานะ PENDING ในฐานข้อมูล:
@@ -165,6 +190,27 @@ async def sync_pending_members(bot: Bot) -> dict:
                         sub.status = SubStatus.KICKED.value
                         results["kicked_expired"] += 1
                         logger.info(f"[SYNC] User {user_id} was PENDING but already expired in channel. Kicked successfully.")
+
+                        # ส่งแจ้งเตือนเข้ากลุ่ม Admin
+                        start_time_thai = format_thai_datetime(joined_time)
+                        expires_at_thai = format_thai_datetime(sub.expires_at)
+                        user_handle_sync = f"@{user_obj.username}" if (user_obj and user_obj.username) else "ไม่มี Username"
+                        full_name_sync = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
+                        admin_kick_msg = (
+                            "🚪 <b>สมาชิกหมดอายุและถูกเตะออกจาก Channel แล้ว!</b>\n\n"
+                            f"👤 <b>ผู้ใช้งาน:</b> {full_name_sync} ({user_handle_sync})\n"
+                            f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+                            f"📦 <b>แพ็กเกจ:</b> <b>{plan_title}</b> ({duration_str})\n"
+                            f"🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_time_thai} น.</code>\n"
+                            f"🔴 <b>เวลาหมดอายุ (End):</b> <code>{expires_at_thai} น.</code>\n"
+                            f"🆔 <b>Subscription ID:</b> <code>#{sub.id}</code>\n"
+                            "━━━━━━━━━━━━━━━━━━━━\n"
+                            "ℹ️ <i>ตรวจพบสมาชิกหมดอายุในห้องและนำออกจาก Channel เรียบร้อย</i>"
+                        )
+                        try:
+                            await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_kick_msg, parse_mode="HTML")
+                        except Exception:
+                            pass
                     except Exception as e:
                         sub.status = SubStatus.KICK_FAILED.value
                         logger.warning(f"[SYNC] Failed to kick expired user {user_id}: {e}")
@@ -337,7 +383,7 @@ async def check_expired_subscriptions(bot: Bot) -> None:
                 sub.status = SubStatus.KICKED.value
                 session.add(sub)
 
-                # ส่งข้อความแจ้งเตือนทาง DM ให้ผู้ใช้
+                # 1. ส่งข้อความแจ้งเตือนทาง DM ให้ผู้ใช้
                 try:
                     if plan == PlanType.TRIAL_15M.value:
                         dm_text = (
@@ -364,6 +410,34 @@ async def check_expired_subscriptions(bot: Bot) -> None:
                     logger.info(f"Cannot send expiration DM: User ID={user_id} has blocked the bot.")
                 except Exception as e:
                     logger.warning(f"Failed to send expiration DM to User ID={user_id}: {e}")
+
+                # 2. ส่งข้อความแจ้งเตือนเข้ากลุ่ม Admin พร้อม Start/End และข้อมูลแพ็กเกจ
+                plan_title, duration_str = get_plan_display_name(plan)
+                start_time_thai = format_thai_datetime(sub.joined_at or sub.created_at)
+                expires_at_thai = format_thai_datetime(sub.expires_at)
+                user_handle_str = f"@{user_obj.username}" if (user_obj and user_obj.username) else "ไม่มี Username"
+                full_name_str = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
+
+                admin_kick_msg = (
+                    "🚪 <b>สมาชิกหมดอายุและถูกเตะออกจาก Channel แล้ว!</b>\n\n"
+                    f"👤 <b>ผู้ใช้งาน:</b> {full_name_str} ({user_handle_str})\n"
+                    f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+                    f"📦 <b>แพ็กเกจ:</b> <b>{plan_title}</b> ({duration_str})\n"
+                    f"🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_time_thai} น.</code>\n"
+                    f"🔴 <b>เวลาหมดอายุ (End):</b> <code>{expires_at_thai} น.</code>\n"
+                    f"🆔 <b>Subscription ID:</b> <code>#{sub_id}</code>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "ℹ️ <i>บอทได้นำผู้ใช้ออกจาก Channel และส่งข้อความแจ้งเตือนทาง DM เรียบร้อย</i>"
+                )
+                try:
+                    await bot.send_message(
+                        chat_id=config.ADMIN_GROUP_ID,
+                        text=admin_kick_msg,
+                        parse_mode="HTML",
+                    )
+                    logger.info(f"Sent expiration kick notification to Admin Group for User ID={user_id} (Sub #{sub_id}).")
+                except Exception as e:
+                    logger.warning(f"Failed to send expiration kick log to Admin Group: {e}")
             else:
                 # บันทึกสถานะ KICK_FAILED เพื่อให้รอบต่อไปลองเตะซ้ำ
                 sub.status = SubStatus.KICK_FAILED.value
