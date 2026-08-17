@@ -1320,8 +1320,6 @@ def get_subscription_quota_and_label(plan_type: str, user: Optional[User] = None
                 days = int(plan_type.replace("REFERRAL_VIP_", "").replace("D", ""))
             except Exception:
                 days = 1
-        elif user and user.referral_bonus_days > 0:
-            days = user.referral_bonus_days
         hours = days * 24
         return f"🎁 VIP โบนัสชวนเพื่อน {days} วัน", f"{days} วัน ({hours} ชั่วโมง)"
     elif plan_type in PLAN_DETAILS:

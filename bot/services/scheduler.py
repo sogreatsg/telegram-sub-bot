@@ -154,8 +154,6 @@ async def sync_pending_members(bot: Bot) -> dict:
                                 bonus_days = int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
                             except Exception:
                                 bonus_days = 1
-                        elif user_obj and user_obj.referral_bonus_days > 0:
-                            bonus_days = user_obj.referral_bonus_days
                         total_days += bonus_days
                         if not primary_plan_badge:
                             primary_plan_badge = f"สมาชิก 🎁 VIP โบนัสชวนเพื่อน ({bonus_days} วัน)"
