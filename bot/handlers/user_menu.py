@@ -431,7 +431,16 @@ async def handle_my_status(callback: CallbackQuery, state: FSMContext):
         status_text += "คุณสามารถเริ่มทดลองใช้ฟรี หรือสมัครสมาชิกได้จากเมนูด้านล่างครับ"
     elif sub.status == SubStatus.ACTIVE.value:
         status_text += "🟢 <b>สถานะ:</b> กำลังใช้งาน (ACTIVE)\n"
-        plan_label = f"ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที" if sub.plan_type == PlanType.TRIAL_15M.value else "สมาชิก VIP"
+        if sub.plan_type == PlanType.TRIAL_15M.value:
+            plan_label = f"⏱️ ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที"
+        elif sub.plan_type in PLAN_DETAILS:
+            plan_label = get_dynamic_plan_info(sub.plan_type)["badge"]
+        elif sub.plan_type.startswith("PROMOTION_"):
+            plan_label = sub.plan_type.replace("PROMOTION_", "🔥 โปรโมชั่นพิเศษ ").replace("D", " วัน")
+        elif sub.plan_type.startswith("MANUAL_VIP_"):
+            plan_label = sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
+        else:
+            plan_label = sub.plan_type
         status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"
         if sub.joined_at:
             status_text += f"📅 <b>เริ่มเข้าใช้งาน:</b> <code>{format_thai_datetime(sub.joined_at)} น.</code>\n"
@@ -440,16 +449,26 @@ async def handle_my_status(callback: CallbackQuery, state: FSMContext):
             status_text += f"⏰ <b>เวลาคงเหลือ:</b> {format_time_remaining(sub.expires_at)}\n"
     elif sub.status == SubStatus.PENDING.value:
         status_text += "🟡 <b>สถานะ:</b> รอกดเข้าร่วม Channel\n"
-        plan_label = "ทดลองใช้ฟรี" if sub.plan_type == PlanType.TRIAL_15M.value else "สมาชิก VIP"
+        if sub.plan_type == PlanType.TRIAL_15M.value:
+            plan_label = "⏱️ ทดลองใช้ฟรี"
+        elif sub.plan_type in PLAN_DETAILS:
+            plan_label = get_dynamic_plan_info(sub.plan_type)["badge"]
+        else:
+            plan_label = sub.plan_type
         status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"
         status_text += "ระบบได้สร้างลิงก์เชิญให้คุณแล้ว เวลาจะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel ครับ"
     elif sub.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value, SubStatus.KICK_FAILED.value):
         status_text += "🔴 <b>สถานะ:</b> หมดอายุแล้ว (EXPIRED)\n"
-        plan_label = "ทดลองใช้ฟรี" if sub.plan_type == PlanType.TRIAL_15M.value else "สมาชิก VIP"
+        if sub.plan_type == PlanType.TRIAL_15M.value:
+            plan_label = "⏱️ ทดลองใช้ฟรี"
+        elif sub.plan_type in PLAN_DETAILS:
+            plan_label = get_dynamic_plan_info(sub.plan_type)["badge"]
+        else:
+            plan_label = sub.plan_type
         status_text += f"📦 <b>แพ็กเกจล่าสุด:</b> {plan_label}\n"
         if sub.expires_at:
             status_text += f"📅 <b>หมดอายุเมื่อ:</b> <code>{format_thai_datetime(sub.expires_at)} น.</code>\n"
-        status_text += "\nต้องการเข้าใช้งานต่อ สามารถพิมพ์ /start และกดสมัครแพ็กเกจ 30 วันได้ทันทีครับ"
+        status_text += "\nต้องการเข้าใช้งานต่อ สามารถพิมพ์ /start และกดสมัครแพ็กเกจ VIP ได้ทันทีครับ"
     else:
         status_text += f"⚪ <b>สถานะ:</b> {sub.status}\n"
 
