@@ -15,7 +15,12 @@ logger = logging.getLogger(__name__)
 config = get_settings()
 router = Router(name="channel_events")
 
+import asyncio
+from collections import defaultdict
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
+
+# Dictionary สำหรับ Lock ป้องกัน concurrency (Event เบิ้ลจาก Telegram)
+user_locks = defaultdict(asyncio.Lock)
 
 def ensure_utc(dt):
     if dt is None:
@@ -28,10 +33,8 @@ def ensure_utc(dt):
 async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
     """
     ตรวจจับเหตุการณ์ ChatMemberUpdated เมื่อผู้ใช้กดเข้าร่วม Channel
-    - หากมี PENDING subscription: เริ่มต้นเปิดใช้งาน ACTIVE และเริ่มนับเวลาถอยหลัง
-    - หากไม่มี PENDING subscription และไม่ใช่ Admin: ทำการเตะออกทันที (Unauthorized join guard)
+    - ใช้ asyncio.Lock เพื่อป้องกัน Event ส่งเบิ้ลจาก Telegram
     """
-    # ตรวจจับเฉพาะ Event ใน Channel ที่กำหนดเท่านั้น
     if event.chat.id != config.CHANNEL_ID:
         return
 
@@ -39,16 +42,9 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
     new_status = event.new_chat_member.status
     user = event.new_chat_member.user
 
-    # ไม่สนใจ event ของบอท
     if user.is_bot:
         return
 
-    logger.info(
-        f"Channel {event.chat.id} member status update for User {user.id} ({user.full_name}): "
-        f"{old_status} -> {new_status}"
-    )
-
-    # ตรวจสอบการเข้าร่วม Channel (เปลี่ยนสถานะเป็น member หรือ administrator)
     is_joined = (
         old_status != new_status
         and new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR)
@@ -57,6 +53,11 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
     if not is_joined:
         return
 
+    user_id = user.id
+    async with user_locks[user_id]:
+        await _process_joined_member(event, bot, user, new_status)
+
+async def _process_joined_member(event: ChatMemberUpdated, bot: Bot, user, new_status):
     user_id = user.id
     now = datetime.now(timezone.utc)
 

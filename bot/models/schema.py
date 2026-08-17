@@ -31,6 +31,7 @@ class PlanType(str, enum.Enum):
     VIP_30D = "VIP_30D"
     REFERRAL_VIP = "REFERRAL_VIP"
     MONTHLY_30D = "MONTHLY_30D"  # Legacy support
+    PROMOTION = "PROMOTION"
 
 
 PLAN_DETAILS = {
@@ -69,7 +70,27 @@ PLAN_DETAILS = {
         "days": 30,
         "qr_filename": "qr_payment.png",
     },
+    PlanType.PROMOTION.value: {
+        "name": "โปรโมชั่นพิเศษ",
+        "badge": "🔥 โปรโมชั่นพิเศษ",
+        "price": 0,
+        "days": 0,
+        "qr_filename": "",
+    },
 }
+
+def get_dynamic_plan_info(plan_key: str) -> dict:
+    plan_info = PLAN_DETAILS.get(plan_key, PLAN_DETAILS.get(PlanType.VIP_30D.value, {})).copy()
+    if plan_key == PlanType.PROMOTION.value:
+        try:
+            from bot.services.promotion import get_promotion_settings
+            settings = get_promotion_settings()
+            plan_info["price"] = settings.get("price", 0)
+            plan_info["days"] = settings.get("days", 0)
+            plan_info["qr_filename"] = settings.get("qr_filename", "")
+        except Exception:
+            pass
+    return plan_info
 
 
 class SubStatus(str, enum.Enum):

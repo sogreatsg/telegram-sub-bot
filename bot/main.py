@@ -15,6 +15,8 @@ from bot.handlers import (
     payment_router,
     admin_router,
     channel_events_router,
+    promotion_admin_router,
+    promotion_user_router,
 )
 from bot.utils.time_utils import BANGKOK_TZ
 
@@ -77,6 +79,8 @@ async def main() -> None:
     dp.include_router(payment_router)
     dp.include_router(admin_router)
     dp.include_router(channel_events_router)
+    dp.include_router(promotion_admin_router)
+    dp.include_router(promotion_user_router)
     dp.include_router(user_menu_router)
 
     # 4. Initialize & Start APScheduler

@@ -11,7 +11,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
 
 from bot.config import get_settings
-from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS
+from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info
 from bot.services.database import get_session
 from bot.services.referral import award_referral_bonus
 
@@ -126,7 +126,7 @@ async def sync_pending_members(bot: Bot) -> dict:
                     bonus_days = user_obj.referral_bonus_days if (user_obj and user_obj.referral_bonus_days > 0) else 1
                     sub.expires_at = joined_time + timedelta(days=bonus_days)
                 elif sub.plan_type in PLAN_DETAILS:
-                    p_info = PLAN_DETAILS[sub.plan_type]
+                    p_info = get_dynamic_plan_info(sub.plan_type)
                     sub.expires_at = joined_time + timedelta(days=p_info["days"])
                 elif sub.plan_type.startswith("MANUAL_VIP_"):
                     try:
@@ -429,7 +429,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 if sub.plan_type == PlanType.TRIAL_15M.value:
                     plan_name = f"ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที"
                 elif sub.plan_type in PLAN_DETAILS:
-                    plan_name = PLAN_DETAILS[sub.plan_type]["badge"]
+                    plan_name = get_dynamic_plan_info(sub.plan_type)["badge"]
                 elif sub.plan_type.startswith("MANUAL_VIP_"):
                     plan_name = sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
                 else:

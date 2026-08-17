@@ -15,7 +15,7 @@ from aiogram.types import (
 from aiogram.filters import Command
 
 from bot.config import get_settings
-from bot.models.schema import PaymentSlip, SlipStatus, PlanType, PLAN_DETAILS
+from bot.models.schema import PaymentSlip, SlipStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
 
@@ -82,7 +82,7 @@ async def handle_subscribe_plan_button(callback: CallbackQuery, state: FSMContex
         elif callback.data == "menu:subscribe_30d":
             plan_key = PlanType.VIP_30D.value
 
-    plan_info = PLAN_DETAILS.get(plan_key, PLAN_DETAILS[PlanType.VIP_30D.value])
+    plan_info = get_dynamic_plan_info(plan_key)
 
     await state.set_state(PaymentStates.waiting_for_slip)
     await state.update_data(plan_type=plan_key)
@@ -172,7 +172,7 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
 
     fsm_data = await state.get_data()
     plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
-    plan_info = PLAN_DETAILS.get(plan_key, PLAN_DETAILS[PlanType.VIP_30D.value])
+    plan_info = get_dynamic_plan_info(plan_key)
 
     telegram_user = message.from_user
     photo = message.photo[-1]
@@ -259,7 +259,7 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
 
     fsm_data = await state.get_data()
     plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
-    plan_info = PLAN_DETAILS.get(plan_key, PLAN_DETAILS[PlanType.VIP_30D.value])
+    plan_info = get_dynamic_plan_info(plan_key)
 
     file_id = doc.file_id
     telegram_user = message.from_user

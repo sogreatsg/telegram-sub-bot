@@ -13,7 +13,7 @@ from sqlalchemy import select, func, delete
 from sqlalchemy.orm import selectinload
 
 from bot.config import get_settings
-from bot.models.schema import User, PaymentSlip, Subscription, ChatMessage, SlipStatus, SubStatus, PlanType, PLAN_DETAILS
+from bot.models.schema import User, PaymentSlip, Subscription, ChatMessage, SlipStatus, SubStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info
 from bot.services.database import get_session, get_or_create_user
 from bot.services.scheduler import build_active_members_report, sync_pending_members
 from bot.services.chat_logger import log_chat_message
@@ -123,7 +123,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
             target_user_id = slip.user_id
             requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
 
-            plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
+            plan_info = get_dynamic_plan_info(requested_plan)
             additional_days = plan_info["days"]
 
             # 2. ตรวจสอบว่าผู้ใช้อยู่ใน Channel และมี ACTIVE Subscription หรือไม่
@@ -169,7 +169,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 session.add(subscription)
                 await session.flush()
 
-        plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
+        plan_info = get_dynamic_plan_info(requested_plan)
         plan_badge = plan_info["badge"]
         plan_desc = f"{plan_info['days']} วัน"
         user_dm_sent = False
@@ -320,7 +320,7 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
             target_user_id = slip.user_id
             requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
 
-        plan_info = PLAN_DETAILS.get(requested_plan, PLAN_DETAILS[PlanType.VIP_30D.value])
+        plan_info = get_dynamic_plan_info(requested_plan)
         plan_price_str = f"{plan_info['price']:,} บาท"
 
         # 1. ส่งข้อความแจ้งผู้ใช้ทาง DM
@@ -1066,7 +1066,7 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
             if s.plan_type == PlanType.TRIAL_15M.value:
                 plan_label = "ทดลองใช้ 15 นาที"
             elif s.plan_type in PLAN_DETAILS:
-                plan_label = PLAN_DETAILS[s.plan_type]["badge"]
+                plan_label = get_dynamic_plan_info(s.plan_type)["badge"]
             elif s.plan_type.startswith("MANUAL_VIP_"):
                 plan_label = s.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
             else:
@@ -1419,7 +1419,7 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
         if s.plan_type == PlanType.TRIAL_15M.value:
             plan_label = "ทดลองใช้ 15 นาที"
         elif s.plan_type in PLAN_DETAILS:
-            plan_label = PLAN_DETAILS[s.plan_type]["badge"]
+            plan_label = get_dynamic_plan_info(s.plan_type)["badge"]
         elif s.plan_type.startswith("MANUAL_VIP_"):
             plan_label = s.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
         else:
@@ -1692,7 +1692,7 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
             if latest_sub.plan_type == PlanType.TRIAL_15M.value:
                 plan_label = "ทดลองใช้ 15 นาที"
             elif latest_sub.plan_type in PLAN_DETAILS:
-                plan_label = PLAN_DETAILS[latest_sub.plan_type]["badge"]
+                plan_label = get_dynamic_plan_info(latest_sub.plan_type)["badge"]
             elif latest_sub.plan_type.startswith("MANUAL_VIP_"):
                 plan_label = latest_sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
             else:

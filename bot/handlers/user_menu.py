@@ -14,7 +14,7 @@ from aiogram.types import (
 from sqlalchemy import select
 
 from bot.config import get_settings
-from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS
+from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
 from bot.services.referral import get_referral_link, get_share_url
@@ -531,7 +531,7 @@ async def handle_status_command(message: Message, state: FSMContext):
         if sub.plan_type == PlanType.TRIAL_15M.value:
             plan_label = f"ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที"
         elif sub.plan_type in PLAN_DETAILS:
-            plan_label = PLAN_DETAILS[sub.plan_type]["badge"]
+            plan_label = get_dynamic_plan_info(sub.plan_type)["badge"]
         elif sub.plan_type.startswith("MANUAL_VIP_"):
             plan_label = sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
         else:
