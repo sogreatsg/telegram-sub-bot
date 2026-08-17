@@ -32,6 +32,10 @@ data/*.json
 backups/
 *.log
 
+# Generated at deploy time by scripts/generate_version.py -- must never be a
+# committed snapshot, or /version keeps showing whatever commit it was frozen at
+bot/version.json
+
 # Environment variables
 .env
 

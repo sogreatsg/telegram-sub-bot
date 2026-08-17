@@ -67,15 +67,19 @@ def get_bot_version_info() -> str:
     recent_logs = []
 
     # 1. พยายามอ่านจาก bot/version.json (สร้างอัตโนมัติขณะ Deploy)
+    # ใช้ค่าจากไฟล์แทนที่ env var เฉพาะเมื่อไฟล์มีค่าจริง (ไม่ใช่ "Unknown")
+    # เพื่อกันไม่ให้ทับค่าที่ถูกต้องจาก env var ด้วยค่าว่างเปล่าหากสร้างไฟล์ไม่สำเร็จ
     version_file = Path(__file__).parent.parent / "version.json"
     if version_file.exists():
         try:
             with open(version_file, "r", encoding="utf-8") as f:
                 v_data = json.load(f)
-                commit_hash = v_data.get("commit", commit_hash)
-                commit_date = v_data.get("date", commit_date)
-                commit_msg = v_data.get("message", commit_msg)
-                recent_logs = v_data.get("recent_logs", [])
+                if v_data.get("commit", "Unknown") != "Unknown":
+                    commit_hash = v_data["commit"]
+                    commit_date = v_data.get("date", commit_date)
+                    commit_msg = v_data.get("message", commit_msg)
+                if v_data.get("recent_logs"):
+                    recent_logs = v_data["recent_logs"]
         except Exception:
             pass
 

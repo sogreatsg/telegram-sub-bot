@@ -31,11 +31,17 @@ jobs:
             # Pull latest changes from main branch
             git reset --hard HEAD
             git pull origin main
-            
+
+            # Regenerate bot/version.json from the commit we just pulled, so
+            # /version reflects this deploy instead of whatever was last committed
+            # (bot/version.json is gitignored and rebuilt fresh on every deploy).
+            python3 scripts/generate_version.py
+
             # Export environment variables for Docker Compose
             export BOT_APP_VERSION=$(git rev-parse --short HEAD)
             export BOT_APP_DATE=$(git log -1 --format=%cd --date=format:"%Y-%m-%d %H:%M:%S")
-            
+            export BOT_APP_MESSAGE=$(git log -1 --format=%s)
+
             # Rebuild and restart docker containers in background
             docker compose up -d --build
             
