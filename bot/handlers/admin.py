@@ -18,7 +18,7 @@ from bot.services.database import get_session, get_or_create_user
 from bot.services.scheduler import build_active_members_report, sync_pending_members
 from bot.services.chat_logger import log_chat_message
 from bot.handlers.user_menu import get_main_menu_keyboard
-from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -529,9 +529,11 @@ async def handle_admin_menu_summary_callback(callback: CallbackQuery, bot: Bot):
     if callback.message.chat.id != config.ADMIN_GROUP_ID:
         await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
+    await callback.answer("📊 กำลังโหลดรายงานสรุป...")
     report_text = await build_active_members_report(bot=bot)
-    await callback.message.answer(text=report_text, parse_mode="HTML")
-    await callback.answer()
+    chunks = split_text_chunks(report_text, max_chunk_size=3800)
+    for chunk in chunks:
+        await callback.message.answer(text=chunk, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "admin_menu:audit")
@@ -666,7 +668,9 @@ async def handle_admin_report_command(message: Message, bot: Bot):
         return
 
     report_text = await build_active_members_report(bot=bot)
-    await message.answer(text=report_text, parse_mode="HTML")
+    chunks = split_text_chunks(report_text, max_chunk_size=3800)
+    for chunk in chunks:
+        await message.answer(text=chunk, parse_mode="HTML")
 
 
 async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[InlineKeyboardMarkup]]:

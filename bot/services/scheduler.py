@@ -19,7 +19,7 @@ from bot.services.referral import award_referral_bonus
 logger = logging.getLogger(__name__)
 config = get_settings()
 
-from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks
 
 def format_remaining_time(expires_at: Optional[datetime]) -> str:
     """แปลงเวลาคงเหลือให้อ่านง่ายเป็นภาษาไทย"""
@@ -819,22 +819,22 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 )
 
         report += "━━━━━━━━━━━━━━━━━━━━\n"
-        report += "🤖 <i>ระบบจัดการสมาชิก BareLive Membership Bot</i>"
 
         if channel_member_count is not None and bot:
             expected_in_channel = total_in_channel + total_failed
             if channel_member_count > expected_in_channel:
-                alert_msg = (
+                diff_count = channel_member_count - expected_in_channel
+                report += (
                     "🚨 <b>แจ้งเตือนความผิดปกติของจำนวนสมาชิก!</b>\n\n"
                     f"👥 จำนวนคนใน Channel จริง (ไม่รวม Admin/Bot): <b>{channel_member_count} คน</b>\n"
                     f"📝 จำนวนคนที่ควรจะมี (Active ในห้อง + เตะไม่สำเร็จ): <b>{expected_in_channel} คน</b>\n\n"
-                    "⚠️ <i>จำนวนคนในห้องจริงมากกว่าในระบบ! อาจมีคนแอบอยู่ในห้องโดยไม่มีแพ็กเกจ หรือมีคนถูกดึงเข้าห้องโดยไม่ผ่านบอท แนะนำให้ใช้คำสั่ง <code>/deep_scan</code> เพื่อตรวจสอบครับ</i>"
+                    f"⚠️ <i>จำนวนคนในห้องจริงมากกว่าในระบบ {diff_count} คน! อาจมีคนแอบอยู่ในห้องโดยไม่มีแพ็กเกจ หรือมีคนถูกดึงเข้าห้องโดยไม่ผ่านบอท แนะนำให้ใช้คำสั่ง <code>/deep_scan</code> เพื่อตรวจสอบครับ</i>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
                 )
-                try:
-                    await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=alert_msg, parse_mode="HTML")
-                except Exception as e:
-                    logger.error(f"Failed to send discrepancy alert: {e}")
+            elif channel_member_count == expected_in_channel:
+                report += "✅ <i>จำนวนคนใน Channel ตรงกับสมาชิกที่มีสิทธิ์ในระบบ 100%</i>\n━━━━━━━━━━━━━━━━━━━━\n"
 
+        report += "🤖 <i>ระบบจัดการสมาชิก BareLive Membership Bot</i>"
         return report
 
 
@@ -843,12 +843,14 @@ async def send_daily_active_summary(bot: Bot) -> None:
     logger.info("Executing daily active members summary job (23:59 Bangkok time)...")
     try:
         report_text = await build_active_members_report(bot=bot)
-        await bot.send_message(
-            chat_id=config.ADMIN_GROUP_ID,
-            text=report_text,
-            parse_mode="HTML",
-        )
-        logger.info(f"Successfully sent daily active summary report to Admin Group {config.ADMIN_GROUP_ID}")
+        chunks = split_text_chunks(report_text, max_chunk_size=3800)
+        for chunk in chunks:
+            await bot.send_message(
+                chat_id=config.ADMIN_GROUP_ID,
+                text=chunk,
+                parse_mode="HTML",
+            )
+        logger.info(f"Successfully sent daily active summary report ({len(chunks)} chunks) to Admin Group {config.ADMIN_GROUP_ID}")
     except Exception as e:
         logger.error(f"Failed to send daily active summary report to Admin Group: {e}", exc_info=True)
 
