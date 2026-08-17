@@ -1051,6 +1051,44 @@ async def handle_admin_reset_trial_command(message: Message, bot: Bot):
         logger.error(f"Failed to notify user {target_uid} about trial reset: {e}")
 
 
+def get_subscription_quota_and_label(plan_type: str, user: Optional[User] = None) -> tuple[str, str]:
+    """คืนค่า (plan_label, quota_str) สำหรับแสดงผลในรายงานแอดมิน"""
+    if plan_type == PlanType.TRIAL_15M.value:
+        return f"⏱️ ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที", f"{config.TRIAL_DURATION_MINUTES} นาที"
+    elif plan_type.startswith("REFERRAL_VIP"):
+        days = 1
+        if "_" in plan_type and plan_type.endswith("D"):
+            try:
+                days = int(plan_type.replace("REFERRAL_VIP_", "").replace("D", ""))
+            except Exception:
+                days = 1
+        elif user and user.referral_bonus_days > 0:
+            days = user.referral_bonus_days
+        hours = days * 24
+        return f"🎁 VIP โบนัสชวนเพื่อน {days} วัน", f"{days} วัน ({hours} ชั่วโมง)"
+    elif plan_type in PLAN_DETAILS:
+        p_info = get_dynamic_plan_info(plan_type)
+        days = p_info["days"]
+        hours = days * 24
+        return p_info["badge"], f"{days} วัน ({hours} ชั่วโมง)"
+    elif plan_type.startswith("PROMOTION_"):
+        try:
+            days = int(plan_type.replace("PROMOTION_", "").replace("D", ""))
+        except Exception:
+            days = 30
+        hours = days * 24
+        return f"🔥 โปรโมชั่นพิเศษ {days} วัน", f"{days} วัน ({hours} ชั่วโมง)"
+    elif plan_type.startswith("MANUAL_VIP_"):
+        try:
+            days = int(plan_type.replace("MANUAL_VIP_", "").replace("D", ""))
+        except Exception:
+            days = 30
+        hours = days * 24
+        return f"VIP {days} วัน (Admin เพิ่ม)", f"{days} วัน ({hours} ชั่วโมง)"
+    else:
+        return f"สมาชิก {plan_type}", "30 วัน (720 ชั่วโมง)"
+
+
 @router.message(Command("user", "check_user", "info"))
 async def handle_admin_user_info_command(message: Message, bot: Bot):
     """คำสั่งแอดมินดูประวัติของผู้ใช้: /user <@username หรือ User ID>"""
@@ -1149,18 +1187,18 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
         resp.append("<i>ไม่มีประวัติการขอแพ็กเกจ</i>")
     else:
         for i, s in enumerate(subs, 1):
+            plan_label, quota_str = get_subscription_quota_and_label(s.plan_type, user)
             created_thai = format_thai_datetime(s.created_at)
-            joined_thai = format_thai_datetime(s.joined_at)
-            expired_thai = format_thai_datetime(s.expires_at)
-            
-            if s.plan_type == PlanType.TRIAL_15M.value:
-                plan_label = "ทดลองใช้ 15 นาที"
-            elif s.plan_type in PLAN_DETAILS:
-                plan_label = get_dynamic_plan_info(s.plan_type)["badge"]
-            elif s.plan_type.startswith("MANUAL_VIP_"):
-                plan_label = s.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
+
+            if s.joined_at:
+                joined_display = f"<code>{format_thai_datetime(s.joined_at)} น.</code>"
             else:
-                plan_label = s.plan_type
+                joined_display = "<i>ยังไม่เคยกดเข้าห้อง</i>"
+
+            if s.expires_at:
+                expired_display = f"<code>{format_thai_datetime(s.expires_at)} น.</code>"
+            else:
+                expired_display = f"<i>ยังไม่เริ่มนับ (โควต้า: <b>{quota_str}</b> จะเริ่มนับทันทีที่กดเข้าห้อง)</i>"
 
             status_badge = {
                 SubStatus.ACTIVE.value: "🟢 ACTIVE (กำลังใช้งาน)",
@@ -1173,8 +1211,9 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
             sub_info = (
                 f"\n<b>{i}. [#{s.id}] {plan_label}</b> — {status_badge}\n"
                 f"   • 🎟️ <b>เวลาออกลิงก์/สร้าง:</b> <code>{created_thai} น.</code>\n"
-                f"   • 🚪 <b>เวลากดเข้า Channel:</b> <code>{joined_thai} น.</code>\n"
-                f"   • ⏰ <b>เวลาหมดอายุ:</b> <code>{expired_thai} น.</code>"
+                f"   • ⏳ <b>โควต้าระยะเวลา:</b> <b>{quota_str}</b>\n"
+                f"   • 🚪 <b>เวลากดเข้า Channel:</b> {joined_display}\n"
+                f"   • ⏰ <b>เวลาหมดอายุ:</b> {expired_display}"
             )
             resp.append(sub_info)
 
@@ -1781,15 +1820,7 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
         # Subscription ล่าสุด
         latest_sub = u.subscriptions[0] if u.subscriptions else None
         if latest_sub:
-            if latest_sub.plan_type == PlanType.TRIAL_15M.value:
-                plan_label = "ทดลองใช้ 15 นาที"
-            elif latest_sub.plan_type in PLAN_DETAILS:
-                plan_label = get_dynamic_plan_info(latest_sub.plan_type)["badge"]
-            elif latest_sub.plan_type.startswith("MANUAL_VIP_"):
-                plan_label = latest_sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
-            else:
-                plan_label = latest_sub.plan_type
-
+            plan_label, quota_str = get_subscription_quota_and_label(latest_sub.plan_type, u)
             status_badge = {
                 SubStatus.ACTIVE.value: "🟢 ACTIVE",
                 SubStatus.PENDING.value: "🟡 PENDING (ออกลิงก์แล้ว-รอกดเข้า)",
@@ -1800,8 +1831,11 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
 
             user_block.append(f"   • 📦 <b>สถานะล่าสุด:</b> {plan_label} [{status_badge}]")
             user_block.append(f"   • 🎟️ <b>เวลาออกลิงก์ล่าสุด:</b> <code>{format_thai_datetime(latest_sub.created_at)} น.</code>")
+            user_block.append(f"   • ⏳ <b>โควต้าระยะเวลา:</b> <b>{quota_str}</b>")
             if latest_sub.expires_at:
                 user_block.append(f"   • ⏰ <b>เวลาหมดอายุ:</b> <code>{format_thai_datetime(latest_sub.expires_at)} น.</code>")
+            else:
+                user_block.append(f"   • ⏰ <b>เวลาหมดอายุ:</b> <i>ยังไม่เริ่มนับ (เริ่มนับเมื่อกดเข้าห้อง)</i>")
         else:
             user_block.append("   • 📦 <i>ยังไม่มีประวัติการขอแพ็กเกจ</i>")
 
@@ -1950,17 +1984,7 @@ async def build_users_latest_view(limit: int = 10) -> tuple[str, Optional[Inline
         # Subscription ล่าสุด
         latest_sub = u.subscriptions[0] if u.subscriptions else None
         if latest_sub:
-            if latest_sub.plan_type == PlanType.TRIAL_15M.value:
-                plan_label = "ทดลองใช้ 15 นาที"
-            elif latest_sub.plan_type in PLAN_DETAILS:
-                plan_label = get_dynamic_plan_info(latest_sub.plan_type)["badge"]
-            elif latest_sub.plan_type.startswith("PROMOTION_"):
-                plan_label = latest_sub.plan_type.replace("PROMOTION_", "🔥 โปร ").replace("D", " วัน")
-            elif latest_sub.plan_type.startswith("MANUAL_VIP_"):
-                plan_label = latest_sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
-            else:
-                plan_label = latest_sub.plan_type
-
+            plan_label, quota_str = get_subscription_quota_and_label(latest_sub.plan_type, u)
             status_badge = {
                 SubStatus.ACTIVE.value: "🟢 ACTIVE",
                 SubStatus.PENDING.value: "🟡 PENDING (รอกดเข้า)",
@@ -1971,8 +1995,11 @@ async def build_users_latest_view(limit: int = 10) -> tuple[str, Optional[Inline
 
             user_block.append(f"   • 📦 <b>สถานะล่าสุด:</b> {plan_label} [{status_badge}]")
             user_block.append(f"   • 🎟️ <b>ออกลิงก์ล่าสุด:</b> <code>{format_thai_datetime(latest_sub.created_at)} น.</code>")
+            user_block.append(f"   • ⏳ <b>โควต้าระยะเวลา:</b> <b>{quota_str}</b>")
             if latest_sub.expires_at:
                 user_block.append(f"   • ⏰ <b>หมดอายุ:</b> <code>{format_thai_datetime(latest_sub.expires_at)} น.</code>")
+            else:
+                user_block.append(f"   • ⏰ <b>หมดอายุ:</b> <i>ยังไม่เริ่มนับ (เริ่มนับเมื่อกดเข้าห้อง)</i>")
         else:
             user_block.append("   • 📦 <i>ยังไม่มีประวัติการขอแพ็กเกจ</i>")
 
