@@ -103,6 +103,8 @@ async def handle_channel_join_request(event: ChatJoinRequest, bot: Bot):
         try:
             await bot.approve_chat_join_request(chat_id=event.chat.id, user_id=user_id)
             logger.info(f"Approved ChatJoinRequest for User {user_id} (Sub #{sub.id})")
+            async with user_locks[user_id]:
+                await _process_joined_member(event, bot, user, ChatMemberStatus.MEMBER)
         except Exception as e:
             logger.error(f"Failed to approve ChatJoinRequest for User {user_id}: {e}")
     else:
@@ -121,25 +123,21 @@ async def handle_channel_join_request(event: ChatJoinRequest, bot: Bot):
             logger.error(f"Failed to decline ChatJoinRequest for User {user_id}: {e}")
 
 
-async def _process_joined_member(event: ChatMemberUpdated, bot: Bot, user, new_status):
+async def _process_joined_member(event, bot: Bot, user, new_status):
     user_id = user.id
     now = datetime.now(timezone.utc)
 
     # ทำลายลิงก์เชิญ (Revoke) ทันทีที่ถูกใช้งาน (ป้องกันการนำกลับมาใช้ซ้ำ 100%)
-    if event.invite_link and not event.invite_link.is_primary:
+    inv_link = getattr(event, "invite_link", None)
+    if inv_link and not getattr(inv_link, "is_primary", False):
         try:
             await bot.revoke_chat_invite_link(
                 chat_id=event.chat.id, 
-                invite_link=event.invite_link.invite_link
+                invite_link=inv_link.invite_link
             )
-            logger.info(f"Revoked invite link {event.invite_link.invite_link} after use by {user_id}")
+            logger.info(f"Revoked invite link {inv_link.invite_link} after use by {user_id}")
         except Exception as e:
             logger.warning(f"Could not revoke invite link: {e}")
-
-    # ตรวจสอบว่าเป็น Administrator หรือ Owner หรือไม่ (ถ้าใช่ ให้ข้าม ไม่ต้องเตะ)
-    if new_status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-        logger.info(f"User {user_id} joined/promoted as Administrator/Creator. Skipping subscription check.")
-        return
 
     sub_to_activate = None
     plan_title = "สมาชิก VIP"
@@ -347,6 +345,11 @@ async def _process_joined_member(event: ChatMemberUpdated, bot: Bot, user, new_s
             logger.warning(f"Could not send join log to Admin Group: {e}")
 
     else:
+        # === กรณีเป็น Admin/Creator ของ Channel แต่ไม่มี Subscription -> ข้ามการเตะ ===
+        if new_status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+            logger.info(f"User {user_id} ({user.full_name}) is Administrator/Creator in Channel with no active sub. Skipping soft-kick.")
+            return
+
         # === กรณีไม่มี Subscription ที่ถูกต้อง -> Soft-kick ===
         logger.warning(f"Unauthorized join detected: User {user_id} ({user.full_name}) has no valid subscription.")
         kicked = False

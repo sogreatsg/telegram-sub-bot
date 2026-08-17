@@ -203,8 +203,8 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
             except Exception:
                 is_in_channel = False
 
-            if active_sub and is_in_channel:
-                # === กรณีต่อเวลาสะสม (Day Stacking) ===
+            if active_sub and is_in_channel and active_sub.plan_type != PlanType.TRIAL_15M.value:
+                # === กรณีต่อเวลาสะสม (Day Stacking) เฉพาะสมาชิกที่มี VIP เสียเงินอยู่แล้ว ===
                 current_exp = ensure_utc(active_sub.expires_at)
                 base_time = max(current_exp, now) if current_exp else now
                 new_expires_at = base_time + timedelta(days=additional_days)
@@ -217,7 +217,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                     f"New expires_at: {new_expires_at}"
                 )
             else:
-                # === กรณีต้องส่งลิงก์เชิญใหม่ ===
+                # === กรณีต้องส่งลิงก์เชิญใหม่ หรืออัปเกรดจากสิทธิ์ทดลองฟรี (Trial) ===
                 save_plan = requested_plan
                 if requested_plan == PlanType.PROMOTION.value:
                     save_plan = f"PROMOTION_{additional_days}D"
@@ -805,7 +805,7 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         )
         active_sub = (await session.execute(active_stmt)).scalar_one_or_none()
 
-        if active_sub and is_in_channel:
+        if active_sub and is_in_channel and active_sub.plan_type != PlanType.TRIAL_15M.value:
             current_exp = ensure_utc(active_sub.expires_at)
             base_time = max(current_exp, now) if current_exp else now
             new_expires_at = base_time + timedelta(days=days)
