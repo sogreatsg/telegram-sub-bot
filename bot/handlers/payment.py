@@ -329,33 +329,25 @@ async def handle_cancel_command(message: Message, state: FSMContext):
     await message.answer("❌ ยกเลิกการทำรายการเรียบร้อยแล้ว พิมพ์ /start เพื่อเปิดเมนูหลัก", parse_mode="HTML")
 
 
-@router.message(PaymentStates.waiting_for_truemoney, F.text, ~F.text.startswith("/"))
-async def handle_truemoney_angpao_link(message: Message, state: FSMContext, bot: Bot):
-    """จัดการข้อความลิงก์ซองของขวัญ TrueMoney ที่ผู้ใช้ส่งเข้ามา และส่งต่อไปยังกลุ่ม Admin"""
-    if not message.from_user or not message.text:
+async def process_truemoney_submission(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    angpao_url: str,
+):
+    """ฟังก์ชันประมวลผลการส่งลิงก์ซองของขวัญ TrueMoney และส่งต่อไปยังกลุ่ม Admin (ทำงานได้ทุกสถานะ)"""
+    telegram_user = message.from_user
+    if not telegram_user:
         return
-
-    text_input = message.text.strip()
-    angpao_url = extract_truemoney_url(text_input)
 
     fsm_data = await state.get_data()
-    plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
+    plan_key = fsm_data.get("plan_type")
+
+    # หากส่งลิงก์มาโดยตรงนอกขั้นตอน FSM ให้ใช้ VIP_30D เป็นค่าเริ่มต้น
+    if not plan_key:
+        plan_key = PlanType.VIP_30D.value
+
     plan_info = get_dynamic_plan_info(plan_key)
-
-    if not angpao_url:
-        # กรณีส่งข้อความที่ไม่ใช่ลิงก์ TrueMoney เข้ามา
-        await log_chat_message(user_id=message.from_user.id, sender_role="USER", message_text=text_input)
-        await message.answer(
-            "⚠️ <b>ไม่พบลิงก์ซองของขวัญ TrueMoney ที่ถูกต้อง</b>\n\n"
-            "กรุณาส่งลิงก์ซองของขวัญ เช่น:\n"
-            "<code>https://gift.truemoney.com/campaign/?v=...</code>\n\n"
-            "💡 <i>คุณสามารถกดปุ่มด้านล่างเพื่อเปลี่ยนวิธีชำระเงิน หรือพิมพ์ /cancel เพื่อยกเลิกครับ</i>",
-            reply_markup=get_payment_cancel_keyboard(plan_key),
-            parse_mode="HTML",
-        )
-        return
-
-    telegram_user = message.from_user
 
     # 1. บันทึกลงฐานข้อมูล
     async with get_session() as session:
@@ -432,6 +424,42 @@ async def handle_truemoney_angpao_link(message: Message, state: FSMContext, bot:
             f"Failed to forward TrueMoney Angpao #{slip_id} to Admin Group {config.ADMIN_GROUP_ID}: {e}",
             exc_info=True,
         )
+
+
+@router.message(F.chat.type == "private", F.text.func(lambda t: bool(extract_truemoney_url(t))), ~F.text.startswith("/"))
+async def handle_any_truemoney_link(message: Message, state: FSMContext, bot: Bot):
+    """ตรวจจับลิงก์ซองของขวัญ TrueMoney อัตโนมัติทุกกรณีในแชทส่วนตัว (แม้ไม่ได้กดเลือกแพ็กเกจก่อน)"""
+    if not message.text:
+        return
+    angpao_url = extract_truemoney_url(message.text.strip())
+    if angpao_url:
+        await process_truemoney_submission(message=message, state=state, bot=bot, angpao_url=angpao_url)
+
+
+@router.message(PaymentStates.waiting_for_truemoney, F.text, ~F.text.startswith("/"))
+async def handle_invalid_truemoney_text(message: Message, state: FSMContext, bot: Bot):
+    """แจ้งเตือนเมื่อผู้ใช้อยู่ในหน้ารอส่งลิงก์ซองแดงแต่ส่งข้อความที่ไม่มีลิงก์ TrueMoney"""
+    if not message.from_user or not message.text:
+        return
+
+    text_input = message.text.strip()
+    angpao_url = extract_truemoney_url(text_input)
+    if angpao_url:
+        await process_truemoney_submission(message=message, state=state, bot=bot, angpao_url=angpao_url)
+        return
+
+    fsm_data = await state.get_data()
+    plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
+
+    await log_chat_message(user_id=message.from_user.id, sender_role="USER", message_text=text_input)
+    await message.answer(
+        "⚠️ <b>ไม่พบลิงก์ซองของขวัญ TrueMoney ที่ถูกต้อง</b>\n\n"
+        "กรุณาส่งลิงก์ซองของขวัญ เช่น:\n"
+        "<code>https://gift.truemoney.com/campaign/?v=...</code>\n\n"
+        "💡 <i>คุณสามารถกดปุ่มด้านล่างเพื่อเปลี่ยนวิธีชำระเงิน หรือพิมพ์ /cancel เพื่อยกเลิกครับ</i>",
+        reply_markup=get_payment_cancel_keyboard(plan_key),
+        parse_mode="HTML",
+    )
 
 
 @router.message(PaymentStates.waiting_for_slip, F.photo)
@@ -604,7 +632,7 @@ async def handle_slip_text_input(message: Message, state: FSMContext, bot: Bot):
 
     if angpao_url:
         # ผู้ใช้ส่งลิงก์ซองของขวัญ TrueMoney มาในหน้ารอสลิป -> ประมวลผลเป็นซองของขวัญทันที
-        await handle_truemoney_angpao_link(message=message, state=state, bot=bot)
+        await process_truemoney_submission(message=message, state=state, bot=bot, angpao_url=angpao_url)
         return
 
     telegram_user = message.from_user

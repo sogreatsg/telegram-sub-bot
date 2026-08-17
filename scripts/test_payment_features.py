@@ -20,6 +20,7 @@ async def run_tests():
     print("1. Testing TrueMoney URL Extraction...")
     urls = [
         ("https://gift.truemoney.com/campaign/?v=0123456789abcdef", "https://gift.truemoney.com/campaign/?v=0123456789abcdef"),
+        ("https://gift.truemoney.com/campaign/?v=01a00ed5059e79b66f980b60404587dcb99", "https://gift.truemoney.com/campaign/?v=01a00ed5059e79b66f980b60404587dcb99"),
         ("gift.truemoney.com/campaign/?v=0123456789abcdef", "https://gift.truemoney.com/campaign/?v=0123456789abcdef"),
         ("ส่งซองครับ https://gift.truemoney.com/campaign/?v=test12345 ขอบคุณครับ", "https://gift.truemoney.com/campaign/?v=test12345"),
         ("https://tmn.app.link/abcdef123", "https://tmn.app.link/abcdef123"),

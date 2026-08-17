@@ -555,9 +555,16 @@ async def handle_status_command(message: Message, state: FSMContext):
 
 
 @router.message(F.chat.type == "private", StateFilter(default_state), F.text, ~F.text.startswith("/"))
-async def handle_user_dm_message(message: Message, bot: Bot):
+async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
     """บันทึกข้อความที่ผู้ใช้พิมพ์คุยกับบอทในแชทส่วนตัว (DM) และส่งต่อเข้า Admin Group แบบ Real-time"""
     if not message.from_user:
+        return
+
+    # 0. ตรวจสอบว่าผู้ใช้ส่งลิงก์ซองของขวัญ TrueMoney เข้ามาหรือไม่
+    from bot.handlers.payment import extract_truemoney_url, process_truemoney_submission
+    angpao_url = extract_truemoney_url(message.text or "")
+    if angpao_url:
+        await process_truemoney_submission(message=message, state=state, bot=bot, angpao_url=angpao_url)
         return
 
     telegram_user = message.from_user
