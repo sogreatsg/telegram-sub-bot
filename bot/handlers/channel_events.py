@@ -165,7 +165,7 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
                 plan_title = sub_to_activate.source_label or "สมาชิก VIP"
                 duration_str = f"{grant.granted_days} วัน" if grant.granted_days > 0 else f"{grant.granted_minutes} นาที"
 
-                if not trial_already_used_before and user_obj and user_obj.trial_used and user_obj.referred_by_id:
+                if user_obj and user_obj.referred_by_id and not getattr(user_obj, "referral_rewarded", False):
                     referred_by_to_award = user_obj.referred_by_id
                     friend_user_snapshot = user_obj
 

@@ -150,6 +150,7 @@ async def grant_subscription(
     minutes: int = 0,
     source_label: str,
     grant_type: str = GrantType.PURCHASE.value,
+    referred_friend_id: Optional[int] = None,
     has_value: bool = True,
     is_trial: bool = False,
     is_in_channel: bool = False,
@@ -176,6 +177,7 @@ async def grant_subscription(
         minutes=minutes,
         source_label=source_label,
         grant_type=grant_type,
+        referred_friend_id=referred_friend_id,
         has_value=has_value,
     ))
 

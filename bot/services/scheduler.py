@@ -226,8 +226,8 @@ async def sync_pending_members(bot: Bot) -> dict:
             except Exception as e:
                 logger.warning(f"[SYNC] Could not send join notification to Admin Group: {e}")
 
-            # มอบรางวัล Referral Bonus หากเพิ่งใช้สิทธิ์ทดลองเป็นครั้งแรกและมีคนแนะนำ
-            if not trial_already_used_before and user_obj and user_obj.trial_used and user_obj.referred_by_id:
+            # มอบรางวัล Referral Bonus หากมีคนแนะนำและยังไม่เคยให้รางวัล
+            if user_obj and user_obj.referred_by_id and not getattr(user_obj, "referral_rewarded", False):
                 try:
                     await award_referral_bonus(bot=bot, referrer_id=user_obj.referred_by_id, friend_user=user_obj)
                 except Exception as e:

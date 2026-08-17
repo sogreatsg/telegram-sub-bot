@@ -17,6 +17,7 @@ from bot.models.schema import User, PaymentSlip, Subscription, SubscriptionGrant
 from bot.services.database import get_session, get_or_create_user
 from bot.services.scheduler import build_active_members_report, sync_pending_members
 from bot.services.subscription import grant_subscription, subscription_status_label
+from bot.services.reconciliation import reconcile_user, reconcile_all_users
 from bot.services.chat_logger import log_chat_message
 from bot.handlers.user_menu import get_main_menu_keyboard
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title, format_remaining_time
@@ -490,6 +491,7 @@ async def handle_admin_menu_command(message: Message):
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 <b>1. ตรวจสอบสมาชิก & รายงาน:</b>\n"
         "• <code>/top_referrals</code> หรือ <code>/top_refs</code> — 🏆 ดูอันดับผู้ใช้งานที่ชวนเพื่อนได้มากที่สุด (Leaderboard) เรียงจากมากไปน้อย\n"
+        "• <code>/reconcile_all</code> — ⚡ กระทบยอดและปรับวันหมดอายุของสมาชิกทุกคนทั้งระบบ (พร้อมลดสถิติโบนัสชวนเพื่อนที่ซ้ำซ้อน)\n"
         "• <code>/audit_user [User ID หรือ @username]</code> — 🔍 ตรวจสอบยอดและกระทบยอดเวลาสมาชิก (ยอดชวนเพื่อน, แพ็กเกจที่ซื้อ, โควต้ารวม, วันหมดอายุจริง)\n"
         "• <code>/summary</code> หรือ <code>/report</code> — ดูสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบยอดสมาชิกใน Channel จริง\n"
         "• <code>/users_lasted</code> หรือ <code>/users_latest</code> — ดูรายชื่อผู้ใช้ที่สมัครใหม่ล่าสุด 10 คนแบบรวดเร็ว\n"
@@ -906,6 +908,9 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
                 InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{user.telegram_id}"),
             ],
             [
+                InlineKeyboardButton(text="⚡ ปรับยอด & วันหมดอายุให้ตรง (Reconcile)", callback_data=f"admin:do_reconcile:{user.telegram_id}"),
+            ],
+            [
                 InlineKeyboardButton(text="🔄 ตรวจสอบใหม่ (Refresh)", callback_data=f"admin:audit_user:{user.telegram_id}"),
             ],
         ]
@@ -926,7 +931,8 @@ async def handle_admin_user_audit_command(message: Message, bot: Bot):
             "❌ <b>วิธีใช้งาน:</b> <code>/audit_user [User ID หรือ @username]</code>\n"
             "ตัวอย่าง:\n"
             "• <code>/audit_user 5146118889</code>\n"
-            "• <code>/audit_user @numiruuna</code>",
+            "• <code>/audit_user @numiruuna</code>\n\n"
+            "💡 <i>หรือใช้ <code>/reconcile_all</code> เพื่อ Reconcile สมาชิกทุกคนทั้งระบบ</i>",
             parse_mode="HTML",
         )
         return
@@ -949,6 +955,80 @@ async def handle_admin_audit_user_callback(callback: CallbackQuery, bot: Bot):
     resp_text, keyboard = await build_user_audit_report(query=uid_str, bot=bot)
     await callback.message.answer(text=resp_text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:do_reconcile:"))
+async def handle_admin_do_reconcile_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เมื่อแอดมินกดปุ่ม [⚡ ปรับยอด & วันหมดอายุให้ตรง (Reconcile)]"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    uid_str = callback.data.split(":")[-1]
+    try:
+        target_uid = int(uid_str)
+    except ValueError:
+        await callback.answer("❌ รหัสผู้ใช้ไม่ถูกต้อง", show_alert=True)
+        return
+
+    async with get_session() as session:
+        result = await reconcile_user(session, target_uid, commit=True)
+
+    if not result:
+        await callback.answer("❌ ไม่พบข้อมูลผู้ใช้", show_alert=True)
+        return
+
+    await callback.answer("✅ ปรับยอดข้อมูลและวันหมดอายุเรียบร้อยแล้ว!", show_alert=True)
+
+    resp_text, keyboard = await build_user_audit_report(query=uid_str, bot=bot)
+    notice = f"⚡ <b>[ดำเนินการ Reconcile สำเร็จ]</b>\n📝 <i>{html.escape(result.message)}</i>\n\n"
+    await callback.message.answer(text=notice + resp_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@router.message(Command("reconcile_all", "reconcile_users", "fix_all_expiry"))
+async def handle_admin_reconcile_all_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับ Reconcile สถิติการชวนเพื่อนและวันหมดอายุของสมาชิกทุกคนในระบบ: /reconcile_all"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    status_msg = await message.answer("⏳ <b>กำลังเริ่มตรวจสอบและ Reconcile ผู้ใช้ทุกคนในฐานข้อมูล...</b>", parse_mode="HTML")
+
+    async with get_session() as session:
+        results = await reconcile_all_users(session, only_active=False, commit=True)
+
+    changed_list = [r for r in results if r.ref_stats_changed or r.expiry_changed or r.status_changed or (r.excess_ref_grants_deleted > 0)]
+
+    summary_lines = [
+        "✅ <b>[Reconcile All Complete] กระทบยอดและปรับวันหมดอายุทั้งระบบเรียบร้อย</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"👥 <b>ผู้ใช้ที่ตรวจสอบทั้งหมด:</b> {len(results)} คน",
+        f"⚡ <b>ผู้ใช้ที่มีการปรับยอดแก้ไข:</b> <b>{len(changed_list)} คน</b>",
+        "",
+    ]
+
+    if changed_list:
+        summary_lines.append("📋 <b>รายชื่อผู้ใช้ที่ได้รับการปรับยอด:</b>")
+        for r in changed_list[:20]:
+            u_title = format_user_title(r.full_name, r.username, r.user_id)
+            summary_lines.append(f"• {u_title}\n  └ <i>{html.escape(r.message)}</i>")
+        if len(changed_list) > 20:
+            summary_lines.append(f"• <i>...และอีก {len(changed_list) - 20} คน</i>")
+    else:
+        summary_lines.append("✨ <i>ข้อมูลผู้ใช้และวันหมดอายุของทุกคนถูกต้องตรงตามเกณฑ์แล้ว 100%</i>")
+
+    summary_lines.append("━━━━━━━━━━━━━━━━━━━━")
+    report_text = "\n".join(summary_lines)
+
+    chunks = split_text_chunks(report_text, max_chunk_size=3800)
+    for chunk in chunks:
+        await message.answer(text=chunk, parse_mode="HTML")
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
 
 
 @router.message(Command("audit", "check"))

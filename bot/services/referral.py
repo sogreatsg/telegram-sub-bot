@@ -37,38 +37,52 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
     """
     มอบรางวัล VIP ฟรี 1 วัน (+24 ชม.) ให้แก่ผู้แนะนำเมื่อเพื่อนเข้า Channel สำเร็จครั้งแรก
     รองรับการสะสมวัน (Day Stacking) ต่อเนื่องตามจำนวนเพื่อนที่ชวนได้
+    ป้องกันการให้ซ้ำซ้อน (Idempotent): เพื่อน 1 คนให้โบนัสผู้แนะนำได้เพียง 1 ครั้งเท่านั้น
     """
     if not referrer_id or referrer_id == friend_user.telegram_id:
         return False
 
     now = datetime.now(timezone.utc)
-    friend_name = html.escape(friend_user.full_name or f"User {friend_user.telegram_id}")
-    friend_handle = f"@{friend_user.username}" if friend_user.username else f"ID: {friend_user.telegram_id}"
+    friend_id = friend_user.telegram_id
+    friend_name = html.escape(friend_user.full_name or f"User {friend_id}")
+    friend_handle = f"@{friend_user.username}" if friend_user.username else f"ID: {friend_id}"
 
     invite_url = None
 
     async with get_session() as session:
-        # 1. ค้นหาผู้แนะนำ
+        # 1. ตรวจสอบว่าเพื่อนคนนี้เคยให้รางวัลไปแล้วหรือไม่
+        friend_db = await session.get(User, friend_id)
+        if friend_db and getattr(friend_db, "referral_rewarded", False):
+            logger.warning(f"Referral reward already awarded for friend User {friend_id} -> Referrer {referrer_id}. Skipping.")
+            return False
+
+        # 2. ค้นหาผู้แนะนำ
         referrer = (await session.execute(
             select(User).where(User.telegram_id == referrer_id)
         )).scalar_one_or_none()
 
         if not referrer:
-            logger.warning(f"Referrer ID {referrer_id} not found in database for friend {friend_user.telegram_id}")
+            logger.warning(f"Referrer ID {referrer_id} not found in database for friend {friend_id}")
             return False
 
-        # 2. เพิ่มสถิติ Referral
-        referrer.referral_count += 1
-        referrer.referral_bonus_days += 1
+        # 3. มาร์กว่าเพื่อนคนนี้ให้รางวัลเรียบร้อยแล้ว
+        if friend_db:
+            friend_db.referral_rewarded = True
+            session.add(friend_db)
+
+        # 4. เพิ่มสถิติ Referral ให้ผู้แนะนำ
+        referrer.referral_count = (referrer.referral_count or 0) + 1
+        referrer.referral_bonus_days = (referrer.referral_bonus_days or 0) + 1
         session.add(referrer)
 
-        # 3. เติมวัน +1 วัน (24 ชม.) ให้ผู้แนะนำ -- บวกทันทีถ้ามี ACTIVE อยู่แล้ว มิเช่นนั้นสะสมเข้า pending
+        # 5. เติมวัน +1 วัน (24 ชม.) ให้ผู้แนะนำ -- บวกทันทีถ้ามี ACTIVE อยู่แล้ว มิเช่นนั้นสะสมเข้า pending
         grant = await grant_subscription(
             session,
             user_id=referrer_id,
             days=1,
-            source_label="🎁 VIP โบนัสชวนเพื่อน",
+            source_label=f"🎁 VIP โบนัสชวนเพื่อน (จาก User {friend_id})",
             grant_type=GrantType.REFERRAL_BONUS.value,
+            referred_friend_id=friend_id,
             has_value=False,
             is_in_channel=False,
         )

@@ -135,6 +135,7 @@ class User(Base):
     )
     referral_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     referral_bonus_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    referral_rewarded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
@@ -229,6 +230,7 @@ class SubscriptionGrant(Base):
     minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     source_label: Mapped[str] = mapped_column(String(128), default="", nullable=False)
     grant_type: Mapped[str] = mapped_column(String(32), default=GrantType.PURCHASE.value, nullable=False)
+    referred_friend_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, index=True)
     has_value: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True

@@ -278,6 +278,18 @@ async def init_db() -> None:
             except Exception:
                 pass
             try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN referral_rewarded BOOLEAN DEFAULT 0;"))
+            except Exception:
+                pass
+            try:
+                await conn.execute(text("ALTER TABLE subscription_grants ADD COLUMN referred_friend_id BIGINT;"))
+            except Exception:
+                pass
+            try:
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_subscription_grants_friend ON subscription_grants (referred_friend_id);"))
+            except Exception:
+                pass
+            try:
                 await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_created_at ON users (created_at DESC);"))
             except Exception:
                 pass
@@ -333,6 +345,7 @@ async def get_or_create_user(
         referred_by_id=valid_referrer,
         referral_count=0,
         referral_bonus_days=0,
+        referral_rewarded=False,
     )
     session.add(new_user)
     await session.flush()
