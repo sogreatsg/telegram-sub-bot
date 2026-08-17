@@ -110,31 +110,12 @@ if [ ! -f .env ]; then
 fi
 
 # 6. Build and start containers with Docker Compose
-log_info "Exporting Git commit metadata for version tracking..."
-git_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "Unknown")
-git_date=$(git log -1 --format="%ad" --date=format:"%d/%m/%Y %H:%M" 2>/dev/null || echo "Unknown")
-git_msg=$(git log -1 --format="%s" 2>/dev/null || echo "Unknown")
+log_info "Generating version metadata for Telegram bot..."
+python3 scripts/generate_version.py 2>/dev/null || python scripts/generate_version.py 2>/dev/null || true
 
-python3 -c "
-import json, subprocess
-try:
-    res = subprocess.run(['git', 'log', '-n', '5', '--format=%h|%ad|%s', '--date=format:%d/%m/%Y %H:%M'], capture_output=True, text=True)
-    lines = [l for l in res.stdout.strip().split('\n') if l]
-    recent = []
-    for l in lines:
-        p = l.split('|', 2)
-        if len(p) >= 3:
-            recent.append(f'• <code>{p[0]}</code>: {p[2]} (<i>{p[1]}</i>)')
-    data = {'commit': '$git_hash', 'date': '$git_date', 'message': '''$git_msg''', 'recent_logs': recent}
-    with open('bot/version.json', 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-except Exception:
-    pass
-" 2>/dev/null || true
-
-export BOT_APP_VERSION="$git_hash"
-export BOT_APP_DATE="$git_date"
-export BOT_APP_MESSAGE="$git_msg"
+export BOT_APP_VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo "Unknown")
+export BOT_APP_DATE=$(git log -1 --format="%ad" --date=format:"%d/%m/%Y %H:%M" 2>/dev/null || echo "Unknown")
+export BOT_APP_MESSAGE=$(git log -1 --format="%s" 2>/dev/null || echo "Unknown")
 log_info "Deploying Version: ${BOT_APP_VERSION} (${BOT_APP_MESSAGE}) - ${BOT_APP_DATE}"
 
 log_info "Building and launching Telegram Membership Bot via Docker Compose..."
