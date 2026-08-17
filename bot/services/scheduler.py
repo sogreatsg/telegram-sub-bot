@@ -113,8 +113,12 @@ async def sync_pending_members(bot: Bot) -> dict:
                     session.add(sub)
                     continue
 
+                plan_title = "สมาชิก VIP"
+                duration_str = "30 วัน"
                 if sub.plan_type == PlanType.TRIAL_15M.value:
                     sub.expires_at = joined_time + timedelta(minutes=config.TRIAL_DURATION_MINUTES)
+                    plan_title = f"ทดลองใช้งานฟรี {config.TRIAL_DURATION_MINUTES} นาที"
+                    duration_str = f"{config.TRIAL_DURATION_MINUTES} นาที"
                     if user_obj:
                         if not user_obj.trial_used and user_obj.referred_by_id:
                             referred_by_to_award = user_obj.referred_by_id
@@ -125,17 +129,33 @@ async def sync_pending_members(bot: Bot) -> dict:
                 elif sub.plan_type == PlanType.REFERRAL_VIP.value:
                     bonus_days = user_obj.referral_bonus_days if (user_obj and user_obj.referral_bonus_days > 0) else 1
                     sub.expires_at = joined_time + timedelta(days=bonus_days)
+                    plan_title = f"สมาชิก 🎁 VIP โบนัสชวนเพื่อน ({bonus_days} วัน)"
+                    duration_str = f"{bonus_days} วัน"
                 elif sub.plan_type in PLAN_DETAILS:
                     p_info = get_dynamic_plan_info(sub.plan_type)
                     sub.expires_at = joined_time + timedelta(days=p_info["days"])
+                    plan_title = f"สมาชิก {p_info['badge']}"
+                    duration_str = f"{p_info['days']} วัน"
+                elif sub.plan_type.startswith("PROMOTION_"):
+                    try:
+                        days = int(sub.plan_type.replace("PROMOTION_", "").replace("D", ""))
+                    except Exception:
+                        days = 30
+                    sub.expires_at = joined_time + timedelta(days=days)
+                    plan_title = f"สมาชิก 🔥 โปรโมชั่นพิเศษ {days} วัน"
+                    duration_str = f"{days} วัน"
                 elif sub.plan_type.startswith("MANUAL_VIP_"):
                     try:
                         days = int(sub.plan_type.replace("MANUAL_VIP_", "").replace("D", ""))
                     except Exception:
                         days = 30
                     sub.expires_at = joined_time + timedelta(days=days)
+                    plan_title = f"สมาชิก VIP {days} วัน"
+                    duration_str = f"{days} วัน"
                 else:
                     sub.expires_at = joined_time + timedelta(days=30)
+                    plan_title = f"สมาชิก {sub.plan_type}"
+                    duration_str = "30 วัน"
 
                 if sub.expires_at <= now:
                     # หมดอายุแล้ว -> เตะออกทันที
@@ -152,7 +172,44 @@ async def sync_pending_members(bot: Bot) -> dict:
                     # ยังไม่หมดอายุ -> เปิดใช้งาน ACTIVE
                     sub.status = SubStatus.ACTIVE.value
                     results["activated"] += 1
-                    logger.info(f"[SYNC] Activated PENDING sub for User {user_id}. Expires at {sub.expires_at}")
+                    sub_id = sub.id
+                    logger.info(f"[SYNC] Activated PENDING sub #{sub_id} for User {user_id}. Expires at {sub.expires_at}")
+
+                    # ส่ง DM ต้อนรับหาผู้ใช้
+                    start_time_thai = format_thai_datetime(joined_time)
+                    expires_at_thai = format_thai_datetime(sub.expires_at)
+                    try:
+                        welcome_dm = (
+                            f"🎉 <b>ยินดีต้อนรับเข้าสู่ VIP Channel!</b>\n\n"
+                            f"แพ็กเกจ <b>{plan_title}</b> ของคุณเปิดใช้งานเรียบร้อยแล้ว 🚀\n\n"
+                            f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
+                            f"⏰ <b>เวลาเริ่มต้น:</b> <code>{start_time_thai} น.</code>\n"
+                            f"📅 <b>หมดอายุวันที่:</b> <code>{expires_at_thai} น.</code>\n\n"
+                            f"ขอให้เพลิดเพลินกับเนื้อหาพิเศษของเราครับ!"
+                        )
+                        await bot.send_message(chat_id=user_id, text=welcome_dm, parse_mode="HTML")
+                    except Exception as e:
+                        logger.debug(f"[SYNC] Could not send welcome DM to User {user_id}: {e}")
+
+                    # ส่งแจ้งเตือนเข้ากลุ่ม Admin
+                    user_handle = f"@{user_obj.username}" if (user_obj and user_obj.username) else "ไม่มี Username"
+                    full_name_safe = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
+                    admin_log_msg = (
+                        "🚪 <b>มีสมาชิกกดเข้าร่วม Channel แล้ว!</b>\n\n"
+                        f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
+                        f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+                        f"📦 <b>แผนที่ใช้งาน:</b> <b>{plan_title}</b>\n"
+                        f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
+                        f"🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_time_thai} น.</code>\n"
+                        f"🔴 <b>เวลาหมดอายุ (End):</b> <code>{expires_at_thai} น.</code>\n"
+                        f"🆔 <b>Subscription ID:</b> <code>#{sub_id}</code>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        "ℹ️ <i>บันทึกประวัติการเข้าใช้งานลงฐานข้อมูลเรียบร้อย</i>"
+                    )
+                    try:
+                        await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_log_msg, parse_mode="HTML")
+                    except Exception as e:
+                        logger.warning(f"[SYNC] Could not send join notification to Admin Group: {e}")
 
                 session.add(sub)
 
