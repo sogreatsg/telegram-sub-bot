@@ -15,3 +15,9 @@
 ## 3. ☁️ Production Deployment Awareness (GCP GCE)
 * **Live Deployment:** Be aware that pushes to `main` immediately deploy to the live production VM on GCP via GitHub Actions.
 * **No Per-Deploy DB Backups:** Do not execute database backup scripts inside deployment workflows (database backups are handled via daily cron).
+
+## 4. 👑 Admin Commands Synchronization (`/admin` Menu)
+* **Always Update `/admin` Menu:** Whenever adding, renaming, or updating an admin command in `bot/handlers/admin.py`:
+  - Synchronize the command description in `handle_admin_menu_command` (`admin_menu_text`).
+  - If the command is a primary administrative tool, consider adding a quick-access Inline Keyboard button.
+  - Ensure syntax examples and descriptions in the `/admin` menu are 100% accurate.
