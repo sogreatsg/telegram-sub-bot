@@ -85,11 +85,12 @@ def get_dynamic_plan_info(plan_key: str) -> dict:
         try:
             from bot.services.promotion import get_promotion_settings
             settings = get_promotion_settings()
-            plan_info["price"] = settings.get("price", 0)
-            plan_info["days"] = settings.get("days", 0)
+            plan_info["price"] = int(settings.get("price", 0))
+            plan_info["days"] = int(settings.get("days", 0))
             plan_info["qr_filename"] = settings.get("qr_filename", "")
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Error loading dynamic plan info: {e}")
     return plan_info
 
 

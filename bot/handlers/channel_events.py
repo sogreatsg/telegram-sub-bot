@@ -105,14 +105,30 @@ async def _process_joined_member(event: ChatMemberUpdated, bot: Bot, user, new_s
                 .order_by(Subscription.id.desc())
             )
             pending_to_stack = (await session.execute(pending_stmt)).scalars().first()
-            if pending_to_stack and pending_to_stack.plan_type in PLAN_DETAILS:
-                add_days = PLAN_DETAILS[pending_to_stack.plan_type]["days"]
-                existing_active.expires_at = max(ensure_utc(existing_active.expires_at), now) + timedelta(days=add_days)
-                existing_active.plan_type = pending_to_stack.plan_type
-                pending_to_stack.status = SubStatus.ACTIVE.value
-                session.add(existing_active)
-                session.add(pending_to_stack)
-                logger.info(f"User {user_id} re-joined with pending sub #{pending_to_stack.id}. Stacked +{add_days} days to existing active sub #{existing_active.id}")
+            if pending_to_stack:
+                add_days = 0
+                if pending_to_stack.plan_type in PLAN_DETAILS:
+                    add_days = get_dynamic_plan_info(pending_to_stack.plan_type)["days"]
+                elif pending_to_stack.plan_type.startswith("PROMOTION_"):
+                    try:
+                        add_days = int(pending_to_stack.plan_type.replace("PROMOTION_", "").replace("D", ""))
+                    except Exception:
+                        add_days = 30
+                elif pending_to_stack.plan_type.startswith("MANUAL_VIP_"):
+                    try:
+                        add_days = int(pending_to_stack.plan_type.replace("MANUAL_VIP_", "").replace("D", ""))
+                    except Exception:
+                        add_days = 30
+                        
+                if add_days > 0:
+                    existing_active.expires_at = max(ensure_utc(existing_active.expires_at), now) + timedelta(days=add_days)
+                    existing_active.plan_type = pending_to_stack.plan_type
+                    pending_to_stack.status = SubStatus.ACTIVE.value
+                    session.add(existing_active)
+                    session.add(pending_to_stack)
+                    logger.info(f"User {user_id} re-joined with pending sub #{pending_to_stack.id}. Stacked +{add_days} days to existing active sub #{existing_active.id}")
+                else:
+                    logger.info(f"User {user_id} re-joined channel with already ACTIVE subscription ID={existing_active.id}, no valid pending days to stack")
             else:
                 logger.info(f"User {user_id} re-joined channel with already ACTIVE subscription ID={existing_active.id}")
             return
@@ -180,10 +196,19 @@ async def _process_joined_member(event: ChatMemberUpdated, bot: Bot, user, new_s
                 duration_str = f"{bonus_days} วัน"
 
             elif sub.plan_type in PLAN_DETAILS:
-                p_info = PLAN_DETAILS[sub.plan_type]
+                p_info = get_dynamic_plan_info(sub.plan_type)
                 sub.expires_at = now + timedelta(days=p_info["days"])
                 plan_title = f"สมาชิก {p_info['badge']}"
                 duration_str = f"{p_info['days']} วัน"
+
+            elif sub.plan_type.startswith("PROMOTION_"):
+                try:
+                    days = int(sub.plan_type.replace("PROMOTION_", "").replace("D", ""))
+                except Exception:
+                    days = 30
+                sub.expires_at = now + timedelta(days=days)
+                plan_title = f"สมาชิก 🔥 โปรโมชั่นพิเศษ {days} วัน"
+                duration_str = f"{days} วัน"
 
             elif sub.plan_type.startswith("MANUAL_VIP_"):
                 try:

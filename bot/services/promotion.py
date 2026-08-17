@@ -2,7 +2,9 @@ import json
 import os
 from typing import Dict, Any
 
-PROMOTION_FILE = "data/promotion.json"
+# ให้ใช้ Absolute Path เสมอเพื่อป้องกันปัญหา CWD
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PROMOTION_FILE = os.path.join(BASE_DIR, "data", "promotion.json")
 
 def get_promotion_settings() -> Dict[str, Any]:
     """Load promotion settings from file."""

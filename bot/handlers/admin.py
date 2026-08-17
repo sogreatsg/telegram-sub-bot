@@ -161,9 +161,13 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 )
             else:
                 # === กรณีต้องส่งลิงก์เชิญใหม่ ===
+                save_plan = requested_plan
+                if requested_plan == PlanType.PROMOTION.value:
+                    save_plan = f"PROMOTION_{additional_days}D"
+                    
                 subscription = Subscription(
                     user_id=target_user_id,
-                    plan_type=requested_plan,
+                    plan_type=save_plan,
                     status=SubStatus.PENDING.value,
                 )
                 session.add(subscription)
