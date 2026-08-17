@@ -2,7 +2,7 @@ import logging
 import html
 from datetime import datetime, timedelta, timezone
 from aiogram import Router, Bot
-from aiogram.types import ChatMemberUpdated
+from aiogram.types import ChatMemberUpdated, ChatJoinRequest
 from aiogram.enums import ChatMemberStatus
 from sqlalchemy import select
 
@@ -29,25 +29,44 @@ def ensure_utc(dt):
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
+def is_target_channel(chat_id: int) -> bool:
+    """ตรวจสอบว่าเป็น Channel VIP เป้าหมายหรือไม่ (รองรับทั้งรูปแบบมีและไม่มี -100)"""
+    target = config.CHANNEL_ID
+    if chat_id == target:
+        return True
+    str_chat = str(chat_id).replace("-100", "").replace("-", "")
+    str_target = str(target).replace("-100", "").replace("-", "")
+    return str_chat == str_target
+
 @router.chat_member()
 async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
     """
     ตรวจจับเหตุการณ์ ChatMemberUpdated เมื่อผู้ใช้กดเข้าร่วม Channel
     - ใช้ asyncio.Lock เพื่อป้องกัน Event ส่งเบิ้ลจาก Telegram
     """
-    if event.chat.id != config.CHANNEL_ID:
-        return
-
     old_status = event.old_chat_member.status
     new_status = event.new_chat_member.status
     user = event.new_chat_member.user
+
+    logger.info(
+        f"[ChatMemberUpdated] chat_id={event.chat.id}, user_id={user.id} ({user.full_name}), "
+        f"old_status={old_status}, new_status={new_status}, via_invite={bool(event.invite_link)}"
+    )
+
+    if not is_target_channel(event.chat.id):
+        return
 
     if user.is_bot:
         return
 
     is_joined = (
         old_status != new_status
-        and new_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR)
+        and new_status in (
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR,
+            ChatMemberStatus.RESTRICTED,
+        )
     )
 
     if not is_joined:
@@ -57,6 +76,51 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
     async with user_locks[user_id]:
         await _process_joined_member(event, bot, user, new_status)
 
+
+@router.chat_join_request()
+async def handle_channel_join_request(event: ChatJoinRequest, bot: Bot):
+    """จัดการเมื่อผู้ใช้กดขอเข้าร่วม Channel (Join Request)"""
+    if not is_target_channel(event.chat.id):
+        return
+
+    user = event.from_user
+    user_id = user.id
+    now = datetime.now(timezone.utc)
+    logger.info(f"[ChatJoinRequest] chat_id={event.chat.id}, user_id={user_id} ({user.full_name})")
+
+    async with get_session() as session:
+        stmt = (
+            select(Subscription)
+            .where(
+                Subscription.user_id == user_id,
+                Subscription.status.in_([SubStatus.PENDING.value, SubStatus.ACTIVE.value]),
+            )
+            .order_by(Subscription.id.desc())
+        )
+        sub = (await session.execute(stmt)).scalars().first()
+
+    if sub:
+        try:
+            await bot.approve_chat_join_request(chat_id=event.chat.id, user_id=user_id)
+            logger.info(f"Approved ChatJoinRequest for User {user_id} (Sub #{sub.id})")
+        except Exception as e:
+            logger.error(f"Failed to approve ChatJoinRequest for User {user_id}: {e}")
+    else:
+        try:
+            await bot.decline_chat_join_request(chat_id=event.chat.id, user_id=user_id)
+            logger.warning(f"Declined unauthorized ChatJoinRequest for User {user_id}")
+            try:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text="⚠️ <b>ไม่สามารถเข้าร่วม Channel VIP ได้</b>\n\nเนื่องจากคุณยังไม่มีแพ็กเกจสมาชิกที่เปิดใช้งาน กรุณาพิมพ์ /start เพื่อกดทดลองใช้ฟรี หรือสมัครสมาชิก VIP ครับ",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Failed to decline ChatJoinRequest for User {user_id}: {e}")
+
+
 async def _process_joined_member(event: ChatMemberUpdated, bot: Bot, user, new_status):
     user_id = user.id
     now = datetime.now(timezone.utc)
@@ -65,7 +129,7 @@ async def _process_joined_member(event: ChatMemberUpdated, bot: Bot, user, new_s
     if event.invite_link and not event.invite_link.is_primary:
         try:
             await bot.revoke_chat_invite_link(
-                chat_id=config.CHANNEL_ID, 
+                chat_id=event.chat.id, 
                 invite_link=event.invite_link.invite_link
             )
             logger.info(f"Revoked invite link {event.invite_link.invite_link} after use by {user_id}")
@@ -105,6 +169,9 @@ async def _process_joined_member(event: ChatMemberUpdated, bot: Bot, user, new_s
                 .order_by(Subscription.id.desc())
             )
             pending_to_stack = (await session.execute(pending_stmt)).scalars().first()
+            user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
+            full_name_safe = html.escape(user.full_name or "")
+
             if pending_to_stack:
                 add_days = 0
                 if pending_to_stack.plan_type in PLAN_DETAILS:
@@ -127,10 +194,41 @@ async def _process_joined_member(event: ChatMemberUpdated, bot: Bot, user, new_s
                     session.add(existing_active)
                     session.add(pending_to_stack)
                     logger.info(f"User {user_id} re-joined with pending sub #{pending_to_stack.id}. Stacked +{add_days} days to existing active sub #{existing_active.id}")
+
+                    # แจ้งเตือนเข้า Admin Group สำหรับการต่อเวลาสะสม
+                    new_exp_thai = format_thai_datetime(existing_active.expires_at)
+                    admin_rejoin_msg = (
+                        "🚪 <b>สมาชิกเข้าสู่ Channel พร้อมต่อเวลาสะสม!</b>\n\n"
+                        f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
+                        f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+                        f"📦 <b>แพ็กเกจที่เพิ่ม:</b> +{add_days} วัน\n"
+                        f"📅 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        "ℹ️ <i>ระบบได้ต่อเวลาสะสมและบันทึกประวัติเรียบร้อย</i>"
+                    )
+                    try:
+                        await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_rejoin_msg, parse_mode="HTML")
+                    except Exception:
+                        pass
                 else:
                     logger.info(f"User {user_id} re-joined channel with already ACTIVE subscription ID={existing_active.id}, no valid pending days to stack")
             else:
                 logger.info(f"User {user_id} re-joined channel with already ACTIVE subscription ID={existing_active.id}")
+                # แจ้งเตือนเข้า Admin Group สำหรับการ Re-join ที่มี VIP อยู่แล้ว
+                exp_thai = format_thai_datetime(existing_active.expires_at)
+                admin_rejoin_msg = (
+                    "🚪 <b>สมาชิกเข้าสู่ Channel (มีสถานะ VIP ใช้งานอยู่แล้ว)</b>\n\n"
+                    f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
+                    f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+                    f"📦 <b>แพ็กเกจ:</b> <b>{existing_active.plan_type}</b>\n"
+                    f"📅 <b>หมดอายุวันที่:</b> <code>{exp_thai} น.</code>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "ℹ️ <i>ผู้ใช้มีสถานะสมาชิกที่ยังไม่หมดอายุในระบบ</i>"
+                )
+                try:
+                    await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_rejoin_msg, parse_mode="HTML")
+                except Exception:
+                    pass
             return
 
         # 3. ค้นหา Subscription ล่าสุดที่มีสถานะ PENDING ของผู้ใช้คนนี้

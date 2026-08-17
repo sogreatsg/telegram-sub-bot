@@ -88,12 +88,24 @@ async def main() -> None:
     scheduler.start()
     logger.info("Background Expiry Scheduler started (Thai Timezone UTC+7).")
 
-    # 5. Fetch bot metadata
+    # 5. Fetch bot metadata & verify permissions
     try:
         bot_user = await bot.get_me()
         logger.info(f"Connected to Telegram Bot API as @{bot_user.username} (ID: {bot_user.id})")
         logger.info(f"Target Channel ID: {config.CHANNEL_ID}")
         logger.info(f"Admin Group ID: {config.ADMIN_GROUP_ID}")
+
+        # ตรวจสอบสิทธิ์ของบอทใน Target Channel
+        try:
+            bot_chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=bot_user.id)
+            logger.info(f"Bot status in Channel {config.CHANNEL_ID}: {bot_chat_member.status}")
+            if bot_chat_member.status not in ("administrator", "creator"):
+                logger.warning(
+                    f"⚠️ [WARNING] Bot @{bot_user.username} is NOT an Administrator in Channel {config.CHANNEL_ID}! "
+                    f"Telegram requires the bot to be an Admin in the Channel to receive member join events!"
+                )
+        except Exception as e:
+            logger.warning(f"Could not verify Bot status in Channel {config.CHANNEL_ID}: {e}")
 
         # Delete any pending webhook if previously configured
         await bot.delete_webhook(drop_pending_updates=False)
@@ -104,6 +116,7 @@ async def main() -> None:
             "callback_query",
             "chat_member",
             "my_chat_member",
+            "chat_join_request",
         ]
         logger.info(f"Starting long polling with allowed_updates: {allowed_updates}")
 
