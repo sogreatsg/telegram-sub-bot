@@ -92,3 +92,32 @@ def format_user_title(full_name: Optional[str], username: Optional[str], user_id
     if include_id:
         return f"<b>{name_display}</b> {handle_display} | ID: <code>{user_id}</code>"
     return f"<b>{name_display}</b> {handle_display}"
+
+
+def format_remaining_time(expires_at: Optional[datetime]) -> str:
+    """แปลงเวลาคงเหลือให้อ่านง่ายเป็นภาษาไทย (ตรงกับใน /summary ทุกประการ)"""
+    if expires_at is None:
+        return "ไม่มีกำหนด / ยังไม่เริ่มนับ"
+    now = datetime.now(timezone.utc)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+        
+    diff = expires_at - now
+    if diff.total_seconds() <= 0:
+        return "หมดอายุแล้ว (0 วัน)"
+    
+    days = diff.days
+    hours, remainder = divmod(diff.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    parts = []
+    if days > 0:
+        parts.append(f"{days} วัน")
+    if hours > 0:
+        parts.append(f"{hours} ชม.")
+    if minutes > 0 or (days == 0 and hours == 0):
+        parts.append(f"{minutes} นาที")
+    if days == 0 and hours == 0 and minutes < 5:
+        parts.append(f"{seconds} วินาที")
+    
+    return " ".join(parts)

@@ -15,10 +15,10 @@ from sqlalchemy.orm import selectinload
 from bot.config import get_settings
 from bot.models.schema import User, PaymentSlip, Subscription, ChatMessage, SlipStatus, SubStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info
 from bot.services.database import get_session, get_or_create_user
-from bot.services.scheduler import build_active_members_report, sync_pending_members
+from bot.services.scheduler import build_active_members_report, sync_pending_members, get_plan_display_name
 from bot.services.chat_logger import log_chat_message
 from bot.handlers.user_menu import get_main_menu_keyboard
-from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title, format_remaining_time
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -1566,21 +1566,66 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
         if total_p_minutes > 0:
             parts.append(f"<b>{total_p_minutes} นาที</b>")
         summary_str = " + ".join(parts) if parts else "0 วัน"
-        pending_quota_line = f"⏳ <b>โควต้ารอกดเข้าห้องสะสมรวม:</b> {summary_str} <i>(จาก {len(pending_subs)} รายการรอกดเข้า)</i>"
 
     user_header = format_user_title(user.full_name, user.username, user.telegram_id)
 
+    # คำนวณสรุปยอดสิทธิ์และเวลาคงเหลือปัจจุบัน (ตรงกับ /summary ทุกประการ)
+    active_subs = [
+        s for s in subs 
+        if s.status == SubStatus.ACTIVE.value and s.expires_at and ensure_utc(s.expires_at) > now
+    ]
+    latest_active_sub = max(active_subs, key=lambda s: ensure_utc(s.expires_at)) if active_subs else None
+
     resp = [
         f"👤 <b>ข้อมูลผู้ใช้งาน:</b> {user_header}",
+        f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> {channel_status_str}",
         f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
         f"🎁 <b>สถิติ Referral:</b> ชวนสำเร็จ {user.referral_count or 0} คน | โบนัสสะสม {user.referral_bonus_days or 0} วัน",
         f"🔗 <b>สมัครผ่านผู้แนะนำ (Referred By):</b> {ref_by_str}",
-        f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> {channel_status_str}",
         f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
         join_str,
+        "\n━━━━━━━━━━━━━━━━━━━━",
+        "📊 <b>สรุปยอดสิทธิ์และเวลาคงเหลือปัจจุบัน (Active Summary):</b>",
     ]
-    if pending_quota_line:
-        resp.append(pending_quota_line)
+
+    if latest_active_sub:
+        plan_title, _ = get_plan_display_name(latest_active_sub.plan_type)
+        start_str = format_thai_datetime(latest_active_sub.joined_at)
+        end_str = format_thai_datetime(latest_active_sub.expires_at)
+        rem_str = format_remaining_time(latest_active_sub.expires_at)
+        
+        resp.extend([
+            "• 🟢 <b>สถานะสิทธิ์:</b> <b>ACTIVE (กำลังใช้งาน)</b>",
+            f"• 🏷️ <b>แพ็กเกจปัจจุบัน:</b> <b>{plan_title}</b>",
+            f"• 🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_str} น.</code>",
+            f"• 🔴 <b>เวลาหมดอายุ (End):</b> <code>{end_str} น.</code>",
+            f"• ⏳ <b>เวลาคงเหลือสุทธิ (Remaining):</b> <b>{rem_str}</b>",
+            f"• 🆔 <b>Active Sub ID:</b> <code>#{latest_active_sub.id}</code>",
+        ])
+    elif pending_subs:
+        resp.extend([
+            "• 🟡 <b>สถานะสิทธิ์:</b> <b>PENDING (ออกลิงก์แล้ว-รอกดเข้าห้อง)</b>",
+            f"• ⏳ <b>โควต้ารอใช้งานรวม:</b> <b>{summary_str}</b>",
+            "• 💡 <i>(เวลาจะเริ่มนับถอยหลังทันทีที่ผู้ใช้กดลิงก์เข้าห้อง)</i>",
+        ])
+    else:
+        if subs:
+            last_sub = subs[0]
+            last_exp = format_thai_datetime(last_sub.expires_at) if last_sub.expires_at else "-"
+            resp.extend([
+                "• ⚪ <b>สถานะสิทธิ์:</b> <b>EXPIRED (หมดอายุการใช้งานแล้ว)</b>",
+                f"• ⏰ <b>หมดอายุไปเมื่อ:</b> <code>{last_exp} น.</code>",
+                "• ⏳ <b>เวลาคงเหลือ:</b> <b>0 วัน</b>",
+            ])
+        else:
+            resp.extend([
+                "• ⚪ <b>สถานะสิทธิ์:</b> <i>ยังไม่มีประวัติการขอแพ็กเกจ</i>",
+                "• ⏳ <b>เวลาคงเหลือ:</b> <b>0 วัน</b>",
+            ])
+
+    if pending_subs and latest_active_sub:
+        resp.append(f"• ➕ <b>มีโควต้ารอกดเข้าสะสมเพิ่ม:</b> {summary_str} <i>(จาก {len(pending_subs)} รายการ)</i>")
+
     resp.extend([
         "\n━━━━━━━━━━━━━━━━━━━━",
         "📦 <b>ประวัติการขอแพ็กเกจ/สิทธิ์ (Subscriptions):</b>",
@@ -1599,7 +1644,11 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
                 joined_display = "<i>ยังไม่เคยกดเข้าห้อง</i>"
 
             if s.expires_at:
-                expired_display = f"<code>{format_thai_datetime(s.expires_at)} น.</code>"
+                exp_time_thai = format_thai_datetime(s.expires_at)
+                if s.status == SubStatus.ACTIVE.value and ensure_utc(s.expires_at) > now:
+                    expired_display = f"<code>{exp_time_thai} น.</code> (⏳ คงเหลือ: <b>{format_remaining_time(s.expires_at)}</b>)"
+                else:
+                    expired_display = f"<code>{exp_time_thai} น.</code>"
             else:
                 expired_display = f"<i>ยังไม่เริ่มนับ (โควต้า: <b>{quota_str}</b> จะเริ่มนับทันทีที่กดเข้าห้อง)</i>"
 
