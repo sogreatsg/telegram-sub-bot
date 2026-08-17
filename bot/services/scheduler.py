@@ -639,6 +639,12 @@ async def check_expired_subscriptions(bot: Bot) -> None:
 
 async def build_active_members_report(bot: Optional[Bot] = None) -> str:
     """สร้างรายงานสรุปรายชื่อสมาชิกที่กำลัง Active อยู่ในระบบ พร้อมเปรียบเทียบกับจำนวนใน Channel จริง"""
+    if bot:
+        try:
+            await sync_pending_members(bot)
+        except Exception as e:
+            logger.warning(f"Failed to sync pending members before report: {e}")
+
     now = datetime.now(timezone.utc)
     now_thai = format_thai_datetime(now)
 
@@ -684,7 +690,42 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
         )
         pending_subs = (await session.execute(stmt_pending)).scalars().all()
 
-        total_active = len(active_subs)
+        # Deduplicate active subscriptions by user_id
+        user_active_map = {}
+        for sub in active_subs:
+            user_active_map.setdefault(sub.user_id, []).append(sub)
+
+        unique_active_subs = []
+        for uid, u_subs in user_active_map.items():
+            best_sub = max(u_subs, key=lambda s: ensure_utc(s.expires_at))
+            unique_active_subs.append(best_sub)
+
+        unique_active_subs.sort(key=lambda s: ensure_utc(s.expires_at))
+
+        # ตรวจสอบสถานะว่าอยู่ในห้อง Channel จริงหรือไม่
+        in_channel_active_subs = []
+        left_channel_active_subs = []
+
+        if bot:
+            for sub in unique_active_subs:
+                is_in = False
+                try:
+                    cm = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=sub.user_id)
+                    if cm.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+                        is_in = True
+                except Exception:
+                    is_in = False
+
+                if is_in:
+                    in_channel_active_subs.append(sub)
+                else:
+                    left_channel_active_subs.append(sub)
+        else:
+            in_channel_active_subs = unique_active_subs
+
+        total_active = len(unique_active_subs)
+        total_in_channel = len(in_channel_active_subs)
+        total_left = len(left_channel_active_subs)
         total_failed = len(failed_subs)
         total_pending = len(pending_subs)
 
@@ -692,7 +733,8 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
             f"📊 <b>รายงานสรุปสถานะสมาชิก Channel VIP</b>\n"
             f"📅 <b>ข้อมูล ณ วันที่:</b> <code>{now_thai} น.</code>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"🟢 <b>สมาชิก Active ในระบบบอท:</b> <b>{total_active} คน</b>\n"
+            f"🟢 <b>สมาชิก Active ในระบบบอท:</b> <b>{total_active} คน</b> "
+            f"<i>(อยู่ในห้อง {total_in_channel} คน | ออกจากห้อง {total_left} คน)</i>\n"
         )
 
         if channel_member_count is not None:
@@ -724,7 +766,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
             report += "ℹ️ <i>ขณะนี้ไม่มีสมาชิกที่อยู่ในสถานะ Active ในระบบ</i>\n\n"
         else:
             report += "📋 <b>รายชื่อสมาชิก Active ปัจจุบัน:</b>\n\n"
-            for i, sub in enumerate(active_subs, start=1):
+            for i, sub in enumerate(unique_active_subs, start=1):
                 user = sub.user
                 user_handle = f"@{user.username}" if (user and user.username) else "ไม่มี Username"
                 full_name = html.escape(user.full_name) if (user and user.full_name) else "ไม่ระบุชื่อ"
@@ -741,9 +783,15 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 start_time = format_thai_datetime(sub.joined_at)
                 end_time = format_thai_datetime(sub.expires_at)
                 remaining = format_remaining_time(sub.expires_at)
+                
+                # แสดงสถานะการอยู่ในห้อง
+                if bot:
+                    channel_badge = "🟢 ใน Channel" if sub in in_channel_active_subs else "⚪ ออกจากห้องแล้ว"
+                else:
+                    channel_badge = "🟢 ACTIVE"
 
                 report += (
-                    f"<b>{i}. {full_name}</b> ({user_handle})\n"
+                    f"<b>{i}. {full_name}</b> ({user_handle}) — {channel_badge}\n"
                     f"   • <b>User ID:</b> <code>{sub.user_id}</code>\n"
                     f"   • <b>แพ็กเกจ:</b> {plan_name}\n"
                     f"   • 🟢 <b>เริ่ม (Start):</b> <code>{start_time} น.</code>\n"
@@ -756,13 +804,13 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
         report += "🤖 <i>ระบบจัดการสมาชิก BareLive Membership Bot</i>"
 
         if channel_member_count is not None and bot:
-            expected_count = total_active + total_failed
-            if channel_member_count != expected_count:
+            expected_in_channel = total_in_channel + total_failed
+            if channel_member_count > expected_in_channel:
                 alert_msg = (
                     "🚨 <b>แจ้งเตือนความผิดปกติของจำนวนสมาชิก!</b>\n\n"
                     f"👥 จำนวนคนใน Channel จริง (ไม่รวม Admin/Bot): <b>{channel_member_count} คน</b>\n"
-                    f"📝 จำนวนคนที่ควรจะมี (Active + เตะไม่สำเร็จ): <b>{expected_count} คน</b>\n\n"
-                    "⚠️ <i>จำนวนคนไม่ตรงกับในระบบ! อาจมีคนแอบอยู่ในห้องโดยไม่มีแพ็กเกจ หรือมีคนถูกดึงเข้าห้องโดยไม่ผ่านบอท กรุณาตรวจสอบด่วนครับ!</i>"
+                    f"📝 จำนวนคนที่ควรจะมี (Active ในห้อง + เตะไม่สำเร็จ): <b>{expected_in_channel} คน</b>\n\n"
+                    "⚠️ <i>จำนวนคนในห้องจริงมากกว่าในระบบ! อาจมีคนแอบอยู่ในห้องโดยไม่มีแพ็กเกจ หรือมีคนถูกดึงเข้าห้องโดยไม่ผ่านบอท แนะนำให้ใช้คำสั่ง <code>/deep_scan</code> เพื่อตรวจสอบครับ</i>"
                 )
                 try:
                     await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=alert_msg, parse_mode="HTML")
