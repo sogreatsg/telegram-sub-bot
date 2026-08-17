@@ -185,7 +185,7 @@ class Subscription(Base):
 
 
 class PaymentSlip(Base):
-    """Payment Slip submission model."""
+    """Payment Slip submission model (Supports PromptPay slips & TrueMoney Angpao links)."""
 
     __tablename__ = "payment_slips"
 
@@ -193,9 +193,12 @@ class PaymentSlip(Base):
     user_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True
     )
-    file_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_id: Mapped[str] = mapped_column(String(500), nullable=False)
     plan_type: Mapped[str] = mapped_column(
         String(32), default=PlanType.VIP_30D.value, nullable=True
+    )
+    payment_method: Mapped[str] = mapped_column(
+        String(32), default="PROMPTPAY", nullable=False
     )
     status: Mapped[str] = mapped_column(
         String(32), default=SlipStatus.PENDING.value, nullable=False, index=True
@@ -211,7 +214,7 @@ class PaymentSlip(Base):
     def __repr__(self) -> str:
         return (
             f"<PaymentSlip(id={self.id}, user_id={self.user_id}, "
-            f"plan_type={self.plan_type}, status={self.status}, admin_id={self.admin_id})>"
+            f"plan_type={self.plan_type}, payment_method={self.payment_method}, status={self.status}, admin_id={self.admin_id})>"
         )
 
 

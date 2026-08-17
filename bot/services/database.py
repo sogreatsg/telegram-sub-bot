@@ -69,6 +69,10 @@ async def init_db() -> None:
             except Exception:
                 pass
             try:
+                await conn.execute(text("ALTER TABLE payment_slips ADD COLUMN payment_method VARCHAR(32) DEFAULT 'PROMPTPAY';"))
+            except Exception:
+                pass
+            try:
                 await conn.execute(text("ALTER TABLE users ADD COLUMN referred_by_id BIGINT;"))
             except Exception:
                 pass

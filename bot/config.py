@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     PROMPT_PAYMENT_INFO: str = Field(
         default=(
             "💳 <b>สมัครสมาชิก VIP 30 วัน (ราคา 300 บาท)</b>\n\n"
-            "📲 <b>สแกน QR Code พร้อมเพย์เพื่อชำระเงิน</b>\n"
+            "📲 <b>สแกน QR Code เพื่อชำระเงิน</b>\n"
             "• ยอดชำระ: <b>300 บาท</b>\n"
             "• สแกนจ่ายผ่านแอปธนาคารได้ทันที\n\n"
             "📸 <b>ขั้นตอนถัดไป:</b>\n"

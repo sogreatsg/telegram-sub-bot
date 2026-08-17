@@ -251,13 +251,13 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
         # อัปเดตข้อความในกลุ่ม Admin
         admin_name = f"@{admin_user.username}" if admin_user.username else html.escape(admin_user.full_name)
         timestamp_thai = format_thai_datetime(now)
-        current_caption = callback.message.caption or "" if callback.message else ""
+        base_text = callback.message.caption or callback.message.text or ""
 
         action_label = f"✅ <b>อนุมัติแล้ว (ต่อเวลาสะสม +{plan_desc})</b>" if is_stack_extension else f"✅ <b>อนุมัติแล้ว (ออกลิงก์เชิญใหม่)</b>"
         expiry_note = f"\n⏳ หมดอายุใหม่: <code>{format_thai_datetime(new_expires_at)} น.</code>" if is_stack_extension and new_expires_at else ""
 
-        updated_caption = (
-            f"{current_caption}\n\n"
+        updated_text = (
+            f"{base_text}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"{action_label} โดย {admin_name} (<code>{admin_user.id}</code>){expiry_note}\n"
             f"📅 <code>{timestamp_thai} น.</code>\n"
@@ -266,15 +266,23 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
 
         try:
             if callback.message:
-                await callback.message.edit_caption(
-                    caption=updated_caption,
-                    reply_markup=None,
-                    parse_mode="HTML",
-                )
+                if callback.message.caption is not None:
+                    await callback.message.edit_caption(
+                        caption=updated_text,
+                        reply_markup=None,
+                        parse_mode="HTML",
+                    )
+                else:
+                    await callback.message.edit_text(
+                        text=updated_text,
+                        reply_markup=None,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
         except Exception as e:
-            logger.error(f"Failed to update admin message caption: {e}")
+            logger.error(f"Failed to update admin message caption/text: {e}")
 
-        await callback.answer(f"✅ อนุมัติสลิปเรียบร้อย ({'ต่อเวลาสะสม' if is_stack_extension else 'ส่งลิงก์เชิญ'})")
+        await callback.answer(f"✅ อนุมัติการชำระเงินเรียบร้อย ({'ต่อเวลาสะสม' if is_stack_extension else 'ส่งลิงก์เชิญ'})")
     except Exception as e:
         logger.error(f"Failed to approve slip #{slip_id}: {e}", exc_info=True)
         await callback.answer(f"❌ เกิดข้อผิดพลาด: {e}", show_alert=True)
@@ -330,13 +338,14 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
         # 1. ส่งข้อความแจ้งผู้ใช้ทาง DM
         try:
             rejection_message = (
-                "❌ <b>แจ้งเตือนผลการตรวจสอบสลิปโอนเงิน</b>\n\n"
-                "ทีมงานไม่สามารถยืนยันสลิปการโอนเงินสำหรับสมาชิก VIP ของคุณได้ครับ\n\n"
+                "❌ <b>แจ้งเตือนผลการตรวจสอบการชำระเงิน</b>\n\n"
+                "ทีมงานไม่สามารถยืนยันการชำระเงินสำหรับสมาชิก VIP ของคุณได้ครับ\n\n"
                 "สาเหตุที่เป็นไปได้:\n"
-                f"• ยอดเงินที่โอนไม่ตรงกับค่าบริการ ({plan_price_str})\n"
-                "• รูปภาพสลิปไม่ชัดเจนหรือไม่สามารถอ่านข้อมูลได้\n"
+                f"• ยอดเงินไม่ตรงกับค่าบริการ ({plan_price_str})\n"
+                "• ลิงก์ซองของขวัญ TrueMoney ไม่ถูกต้อง หรือถูกกดรับไปแล้ว\n"
+                "• รูปภาพสลิปไม่ชัดเจน หรือไม่สามารถตรวจสอบได้\n"
                 "• วันที่หรือเวลาในสลิปไม่ถูกต้อง\n\n"
-                "👉 กรุณาพิมพ์ /start เพื่อส่งสลิปใหม่อีกครั้ง หรือติดต่อแอดมินหากมีข้อสงสัยครับ"
+                "👉 กรุณาพิมพ์ /start เพื่อทำรายการใหม่อีกครั้ง หรือติดต่อแอดมินหากมีข้อสงสัยครับ"
             )
             await bot.send_message(
                 chat_id=target_user_id,
@@ -351,9 +360,9 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
         admin_name = f"@{admin_user.username}" if admin_user.username else html.escape(admin_user.full_name)
         timestamp_thai = format_thai_datetime(datetime.now(timezone.utc))
 
-        current_caption = callback.message.caption or "" if callback.message else ""
-        updated_caption = (
-            f"{current_caption}\n\n"
+        base_text = callback.message.caption or callback.message.text or ""
+        updated_text = (
+            f"{base_text}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"❌ <b>ปฏิเสธแล้ว</b> โดย {admin_name} (<code>{admin_user.id}</code>)\n"
             f"📅 <code>{timestamp_thai} น.</code>"
@@ -361,15 +370,23 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
 
         try:
             if callback.message:
-                await callback.message.edit_caption(
-                    caption=updated_caption,
-                    reply_markup=None,
-                    parse_mode="HTML",
-                )
+                if callback.message.caption is not None:
+                    await callback.message.edit_caption(
+                        caption=updated_text,
+                        reply_markup=None,
+                        parse_mode="HTML",
+                    )
+                else:
+                    await callback.message.edit_text(
+                        text=updated_text,
+                        reply_markup=None,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
         except Exception as e:
-            logger.error(f"Failed to update admin message caption: {e}")
+            logger.error(f"Failed to update admin message caption/text: {e}")
 
-        await callback.answer("❌ ปฏิเสธสลิปเรียบร้อยแล้ว")
+        await callback.answer("❌ ปฏิเสธการชำระเงินเรียบร้อยแล้ว")
     except Exception as e:
         logger.error(f"Failed to reject slip #{slip_id}: {e}", exc_info=True)
         await callback.answer(f"❌ เกิดข้อผิดพลาด: {e}", show_alert=True)
@@ -1100,10 +1117,11 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
 
     if slips:
         resp.append("\n━━━━━━━━━━━━━━━━━━━━")
-        resp.append(f"💳 <b>ประวัติส่งสลิปโอนเงิน ({len(slips)} รายการ):</b>")
+        resp.append(f"💳 <b>ประวัติการชำระเงิน ({len(slips)} รายการ):</b>")
         for sl in slips:
             sl_created = format_thai_datetime(sl.created_at)
-            resp.append(f"• สลิป #{sl.id} | สถานะ: <b>{sl.status}</b> | เวลาส่ง: <code>{sl_created} น.</code>")
+            method_badge = "🧧 ซอง TrueMoney" if getattr(sl, "payment_method", None) == "TRUEMONEY_ANGPAO" or (sl.file_id and str(sl.file_id).startswith("http")) else "💳 สแกน QR Code"
+            resp.append(f"• #{sl.id} [{method_badge}] | สถานะ: <b>{sl.status}</b> | เวลาส่ง: <code>{sl_created} น.</code>")
 
     resp.append("\n━━━━━━━━━━━━━━━━━━━━")
     resp.append(f"📋 <b>คำสั่งด่วน (แตะเพื่อคัดลอก):</b>")
@@ -1437,7 +1455,8 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
         resp.append(f"• [#{s.id}] <b>{plan_label}</b> ({s.status}) | หมดอายุ: <code>{expired_thai} น.</code>")
 
     if slips:
-        resp.append(f"\n💳 <b>สลิปล่าสุด:</b> #{slips[0].id} ({slips[0].status})")
+        method_badge = "🧧 ซอง TrueMoney" if getattr(slips[0], "payment_method", None) == "TRUEMONEY_ANGPAO" or (slips[0].file_id and str(slips[0].file_id).startswith("http")) else "💳 สแกน QR Code"
+        resp.append(f"\n💳 <b>รายการชำระล่าสุด:</b> #{slips[0].id} [{method_badge}] ({slips[0].status})")
 
     resp.append("\n━━━━━━━━━━━━━━━━━━━━")
     resp.append("\n━━━━━━━━━━━━━━━━━━━━")
