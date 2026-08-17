@@ -517,8 +517,10 @@ async def handle_admin_menu_command(message: Message):
         "• <code>/revoke_link [Link]</code> — สั่งเพิกถอนลิงก์เชิญ (Invite Link) เฉพาะเจาะจง\n"
         "• <code>/version</code> — ตรวจสอบเวอร์ชันและ Uptime ของบอท\n\n"
         "🛠️ <b>6. จัดการสมาชิกใน Channel:</b>\n"
-        "• <code>/kick [User ID]</code> — สั่งเตะ (Soft-Kick) ผู้ใช้ออกจาก Channel VIP ทันที พร้อมอัปเดตสถานะในระบบ\n"
-        "• <code>/add_vip [User ID] [จำนวนวัน เช่น 30]</code> — เพิ่ม/ต่อเวลาสะสม VIP ให้ผู้ใช้ด้วยตนเอง\n\n"
+        "• <code>/add_vip [User ID หรือ @username] [จำนวนวัน เช่น 30]</code> — ➕ เพิ่ม/ต่อเวลาสะสม VIP ให้ผู้ใช้ด้วยตนเอง (ส่ง DM แจ้งเตือนผู้ใช้)\n"
+        "• <code>/deduct_vip [User ID หรือ @username] [จำนวนวันที่ลด]</code> — ➖ ลดวันสมาชิก VIP ตามจำนวนที่ระบุ (🔇 ไม่ส่ง DM บอก User)\n"
+        "• <code>/set_vip [User ID หรือ @username] [จำนวนวัน]</code> — 🎯 ปรับตั้งค่าจำนวนวันคงเหลือใหม่ตามต้องการโดยตรง (🔇 ไม่ส่ง DM บอก User)\n"
+        "• <code>/kick [User ID]</code> — สั่งเตะ (Soft-Kick) ผู้ใช้ออกจาก Channel VIP ทันที พร้อมอัปเดตสถานะในระบบ\n\n"
         "🗑️ <b>7. รีเซ็ต & ลบประวัติผู้ใช้ (สำหรับทดสอบระบบ):</b>\n"
         "• <code>/reset_user [User ID หรือ @username]</code> — ลบประวัติแชท สลิป สิทธิ์ และบัญชีผู้ใช้ทั้งหมด พร้อมเตะออกจากห้อง VIP เพื่อให้เริ่มใหม่เป็นผู้ใช้ใหม่ 100%\n"
         "• <code>/reset_trial [User ID หรือ @username]</code> — รีเซ็ตเฉพาะสิทธิ์ทดลองใช้ฟรี 15 นาที ให้ผู้ใช้กดรับสิทธิ์ใหม่ได้ทันที\n\n"
@@ -1287,48 +1289,76 @@ async def handle_admin_kick_command(message: Message, bot: Bot):
 
 @router.message(Command("add_vip"))
 async def handle_admin_add_vip_command(message: Message, bot: Bot):
-    """คำสั่งแอดมินสำหรับเพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง (รองรับสะสมวัน): /add_vip <user_id> [จำนวนวัน]"""
+    """คำสั่งแอดมินสำหรับเพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง (รองรับสะสมวัน): /add_vip <User ID หรือ @username> [จำนวนวัน]"""
     if message.chat.id != config.ADMIN_GROUP_ID:
         return
 
     args = (message.text or "").split()
     if len(args) < 2:
-        await message.answer("❌ <b>วิธีใช้งาน:</b> <code>/add_vip [User ID] [จำนวนวัน เช่น 30]</code>\nตัวอย่าง: <code>/add_vip 5125375696 30</code>", parse_mode="HTML")
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/add_vip [User ID หรือ @username] [จำนวนวัน เช่น 30]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/add_vip 5125375696 30</code>\n"
+            "• <code>/add_vip @numiruuna 30</code>",
+            parse_mode="HTML",
+        )
         return
 
-    try:
-        target_uid = int(args[1])
-        days = int(args[2]) if len(args) >= 3 else 30
-    except ValueError:
-        await message.answer("❌ User ID และจำนวนวันต้องเป็นตัวเลขเท่านั้น", parse_mode="HTML")
-        return
+    query = args[1].strip().lstrip("@")
+    days = 30
+    if len(args) >= 3:
+        try:
+            days = int(args[2])
+            if days <= 0:
+                await message.answer("❌ จำนวนวันต้องมากกว่า 0 วัน", parse_mode="HTML")
+                return
+        except ValueError:
+            await message.answer("❌ จำนวนวันต้องเป็นตัวเลขเท่านั้น", parse_mode="HTML")
+            return
 
     now = datetime.now(timezone.utc)
     is_stack_extension = False
     new_expires_at = None
 
-    # ตรวจสอบสถานะจริงใน Channel
-    is_in_channel = False
-    tg_user = None
-    try:
-        chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid)
-        is_in_channel = chat_member.status in (
-            ChatMemberStatus.MEMBER,
-            ChatMemberStatus.RESTRICTED,
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.CREATOR,
-        )
-        tg_user = getattr(chat_member, "user", None)
-    except Exception:
-        is_in_channel = False
-
     async with get_session() as session:
-        user, _ = await get_or_create_user(
-            session=session,
-            telegram_id=target_uid,
-            username=tg_user.username if tg_user else None,
-            full_name=tg_user.full_name if tg_user else f"User {target_uid}",
-        )
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+
+        if not user:
+            if query.isdigit():
+                target_uid = int(query)
+                user, _ = await get_or_create_user(
+                    session=session,
+                    telegram_id=target_uid,
+                    full_name=f"User {target_uid}",
+                )
+            else:
+                await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+                return
+        else:
+            target_uid = user.telegram_id
+
+        # ตรวจสอบสถานะจริงใน Channel
+        is_in_channel = False
+        try:
+            chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid)
+            is_in_channel = chat_member.status in (
+                ChatMemberStatus.MEMBER,
+                ChatMemberStatus.RESTRICTED,
+                ChatMemberStatus.ADMINISTRATOR,
+                ChatMemberStatus.CREATOR,
+            )
+            if chat_member.user:
+                if chat_member.user.username:
+                    user.username = chat_member.user.username
+                if chat_member.user.full_name:
+                    user.full_name = chat_member.user.full_name
+                session.add(user)
+        except Exception:
+            is_in_channel = False
 
         grant = await grant_subscription(
             session,
@@ -1344,9 +1374,10 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         if is_stack_extension:
             logger.info(f"Admin add_vip: Extended active sub for User {target_uid} by +{days} days. New expires_at: {new_expires_at}")
 
+        await session.commit()
+
     invite_url = "-"
     if not is_in_channel:
-        # สร้าง invite link ให้ (ผู้ใช้ยังไม่อยู่ใน Channel ไม่ว่าจะเป็นการต่อเวลาสะสมหรือให้สิทธิ์ใหม่)
         try:
             invite_link_obj = await bot.create_chat_invite_link(
                 chat_id=config.CHANNEL_ID,
@@ -1358,7 +1389,7 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         except Exception as e:
             logger.warning(f"Could not generate invite link: {e}")
 
-    # ส่ง DM หาผู้ใช้
+    # ส่ง DM หาผู้ใช้ (สำหรับ /add_vip)
     exp_thai = format_thai_datetime(new_expires_at) if new_expires_at else "-"
     time_rem = format_time_remaining(new_expires_at) if new_expires_at else f"{days} วัน"
 
@@ -1415,6 +1446,211 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
             f"📅 <b>ระยะเวลา:</b> {days} วัน (หมดอายุ: <code>{exp_thai} น.</code>)\n"
             f"🔗 <b>Invite Link:</b> <code>{invite_url}</code>"
         )
+    await message.answer(resp, parse_mode="HTML")
+
+
+@router.message(Command("deduct_vip", "reduce_vip", "minus_vip", "del_days", "remove_vip"))
+async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับลดวันสมาชิก VIP โดยไม่มีการส่งข้อความหาผู้ใช้: /deduct_vip <User ID หรือ @username> <จำนวนวันที่ลด>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split()
+    if len(args) < 3:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/deduct_vip [User ID หรือ @username] [จำนวนวันที่ต้องการลด]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/deduct_vip 5125375696 7</code>\n"
+            "• <code>/deduct_vip @numiruuna 5</code>\n\n"
+            "🔇 <i>คำสั่งนี้จะปรับลดยอดวันในระบบทันที โดย<b>ไม่มีการส่งข้อความ DM ไปหาผู้ใช้</b></i>",
+            parse_mode="HTML",
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    try:
+        days_to_deduct = int(args[2])
+        if days_to_deduct <= 0:
+            await message.answer("❌ จำนวนวันที่ต้องการลดต้องมากกว่า 0 วัน", parse_mode="HTML")
+            return
+    except ValueError:
+        await message.answer("❌ จำนวนวันที่ต้องการลดต้องเป็นตัวเลขจำนวนเต็มบวกเท่านั้น", parse_mode="HTML")
+        return
+
+    now = datetime.now(timezone.utc)
+
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+
+        if not user:
+            await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+            return
+
+        target_uid = user.telegram_id
+        sub = await session.get(Subscription, target_uid)
+        if not sub or not sub.expires_at:
+            await message.answer(
+                f"❌ ผู้ใช้ {format_user_title(user.full_name, user.username, target_uid)} ยังไม่มีแพ็กเกจหรือวันหมดอายุในระบบ",
+                parse_mode="HTML",
+            )
+            return
+
+        old_expires_at = ensure_utc(sub.expires_at)
+        new_expires_at = old_expires_at - timedelta(days=days_to_deduct)
+
+        if new_expires_at <= now:
+            sub_status_new = SubStatus.EXPIRED.value
+        else:
+            sub_status_new = SubStatus.ACTIVE.value
+
+        sub.expires_at = new_expires_at
+        sub.status = sub_status_new
+        session.add(sub)
+
+        # บันทึก Grant ประวัติการลดวัน
+        session.add(SubscriptionGrant(
+            user_id=target_uid,
+            days=-days_to_deduct,
+            minutes=0,
+            source_label=f"Admin ลดวัน (-{days_to_deduct} วัน)",
+            grant_type=GrantType.ADMIN_GRANT.value,
+            has_value=False,
+        ))
+
+        await session.commit()
+
+    old_exp_thai = format_thai_datetime(old_expires_at)
+    new_exp_thai = format_thai_datetime(new_expires_at)
+    time_rem = format_time_remaining(new_expires_at)
+    user_header = format_user_title(user.full_name, user.username, target_uid)
+    status_label = subscription_status_label(sub_status_new)
+
+    resp = (
+        "➖ <b>ลดวันสมาชิก VIP สำเร็จ!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
+        f"➖ <b>จำนวนวันที่ลด:</b> <b>-{days_to_deduct} วัน</b>\n"
+        f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
+        f"🎯 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
+        f"📊 <b>สถานะแพ็กเกจ:</b> <b>{status_label}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🔇 <i>หมายเหตุ: ไม่มีการส่งข้อความ DM แจ้งเตือนไปยังผู้ใช้</i>"
+    )
+    await message.answer(resp, parse_mode="HTML")
+
+
+@router.message(Command("set_vip", "set_days", "set_expiry", "override_vip"))
+async def handle_admin_set_vip_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับปรับตั้งค่าจำนวนวันคงเหลือของสมาชิก VIP โดยตรง (ไม่มีการส่ง DM หาผู้ใช้): /set_vip <User ID หรือ @username> <จำนวนวัน>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split()
+    if len(args) < 3:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/set_vip [User ID หรือ @username] [จำนวนวัน เช่น 30]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/set_vip 5125375696 30</code> (ตั้งให้เหลือ 30 วันนับจากตอนนี้)\n"
+            "• <code>/set_vip @numiruuna 0</code> (ตั้งให้หมดอายุทันที)\n\n"
+            "🔇 <i>คำสั่งนี้จะปรับตั้งค่ายอดวันในระบบทันที โดย<b>ไม่มีการส่งข้อความ DM ไปหาผู้ใช้</b></i>",
+            parse_mode="HTML",
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    try:
+        exact_days = int(args[2])
+    except ValueError:
+        await message.answer("❌ จำนวนวันต้องเป็นตัวเลขจำนวนเต็มเท่านั้น", parse_mode="HTML")
+        return
+
+    now = datetime.now(timezone.utc)
+
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+
+        if not user:
+            if query.isdigit():
+                target_uid = int(query)
+                user, _ = await get_or_create_user(
+                    session=session,
+                    telegram_id=target_uid,
+                    full_name=f"User {target_uid}",
+                )
+            else:
+                await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+                return
+        else:
+            target_uid = user.telegram_id
+
+        sub = await session.get(Subscription, target_uid)
+        if not sub:
+            sub = Subscription(
+                user_id=target_uid,
+                status=SubStatus.ACTIVE.value if exact_days > 0 else SubStatus.EXPIRED.value,
+                joined_at=now,
+                expires_at=now + timedelta(days=exact_days) if exact_days > 0 else now,
+                created_at=now,
+            )
+            session.add(sub)
+            old_expires_at = None
+        else:
+            old_expires_at = ensure_utc(sub.expires_at) if sub.expires_at else None
+
+        if exact_days > 0:
+            new_expires_at = now + timedelta(days=exact_days)
+            sub_status_new = SubStatus.ACTIVE.value
+            if not sub.joined_at:
+                sub.joined_at = now
+        else:
+            new_expires_at = now
+            sub_status_new = SubStatus.EXPIRED.value
+
+        sub.expires_at = new_expires_at
+        sub.status = sub_status_new
+        sub.pending_days = 0
+        sub.pending_minutes = 0
+        sub.pending_has_value = False
+        sub.pending_since = None
+        session.add(sub)
+
+        # บันทึก Grant ประวัติการกำหนดวัน
+        session.add(SubscriptionGrant(
+            user_id=target_uid,
+            days=exact_days,
+            minutes=0,
+            source_label=f"Admin กำหนดวันตรง ({exact_days} วัน)",
+            grant_type=GrantType.ADMIN_GRANT.value,
+            has_value=True if exact_days > 0 else False,
+        ))
+
+        await session.commit()
+
+    old_exp_thai = format_thai_datetime(old_expires_at) if old_expires_at else "ไม่มี"
+    new_exp_thai = format_thai_datetime(new_expires_at)
+    time_rem = format_time_remaining(new_expires_at)
+    user_header = format_user_title(user.full_name, user.username, target_uid)
+    status_label = subscription_status_label(sub_status_new)
+
+    resp = (
+        "🎯 <b>ปรับตั้งค่าวันสมาชิก VIP สำเร็จ!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
+        f"📅 <b>กำหนดเวลาคงเหลือ:</b> <b>{exact_days} วัน</b> (นับจากปัจจุบัน)\n"
+        f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
+        f"🎯 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
+        f"📊 <b>สถานะแพ็กเกจ:</b> <b>{status_label}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🔇 <i>หมายเหตุ: ไม่มีการส่งข้อความ DM แจ้งเตือนไปยังผู้ใช้</i>"
+    )
     await message.answer(resp, parse_mode="HTML")
 
 
