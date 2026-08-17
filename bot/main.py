@@ -57,6 +57,28 @@ def setup_logging(log_level: str = "INFO") -> None:
     logging.getLogger("apscheduler").setLevel(logging.INFO)
 
 
+async def send_startup_notification(bot: Bot, admin_group_id: int) -> None:
+    """ส่งข้อความแจ้งเตือนเมื่อระบบ Deploy / Service Start เสร็จสมบูรณ์ไปยังกลุ่มแอดมิน"""
+    from bot.handlers.admin import get_bot_version_info
+    logger = logging.getLogger("bot.main")
+    try:
+        version_text = get_bot_version_info()
+        startup_msg = (
+            "🚀 <b>[Deploy Completed] บอทเริ่มการทำงานใหม่เรียบร้อยแล้ว</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🟢 <b>Service Status:</b> Online & พร้อมให้บริการ\n\n"
+            f"{version_text}"
+        )
+        await bot.send_message(
+            chat_id=admin_group_id,
+            text=startup_msg,
+            parse_mode="HTML",
+        )
+        logger.info(f"Sent startup deployment notification to Admin Group {admin_group_id}")
+    except Exception as e:
+        logger.warning(f"Could not send startup deployment notification to Admin Group: {e}")
+
+
 async def main() -> None:
     """Application entry point."""
     config = get_settings()
@@ -110,7 +132,11 @@ async def main() -> None:
         # Delete any pending webhook if previously configured
         await bot.delete_webhook(drop_pending_updates=False)
 
-        # 6. Start Polling with required allowed_updates
+        # 6. Send startup deployment notification to Admin Group
+        if config.ADMIN_GROUP_ID:
+            await send_startup_notification(bot=bot, admin_group_id=config.ADMIN_GROUP_ID)
+
+        # 7. Start Polling with required allowed_updates
         allowed_updates = [
             "message",
             "callback_query",
