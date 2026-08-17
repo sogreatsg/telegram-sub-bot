@@ -686,6 +686,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
         # 4. ดึงรายการ PENDING (รอผู้ใช้กดลิงก์เข้า Channel)
         stmt_pending = (
             select(Subscription)
+            .options(selectinload(Subscription.user))
             .where(Subscription.status == SubStatus.PENDING.value)
         )
         pending_subs = (await session.execute(stmt_pending)).scalars().all()
@@ -723,11 +724,16 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
         else:
             in_channel_active_subs = unique_active_subs
 
+        # จัดกลุ่ม PENDING รายบุคคล
+        user_pending_map = {}
+        for psub in pending_subs:
+            user_pending_map.setdefault(psub.user_id, []).append(psub)
+
         total_active = len(unique_active_subs)
         total_in_channel = len(in_channel_active_subs)
         total_left = len(left_channel_active_subs)
         total_failed = len(failed_subs)
-        total_pending = len(pending_subs)
+        total_pending = len(user_pending_map)
 
         report = (
             f"📊 <b>รายงานสรุปสถานะสมาชิก Channel VIP</b>\n"
@@ -762,6 +768,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 )
             report += "\n"
 
+        # แสดงรายการสมาชิก Active
         if total_active == 0:
             report += "ℹ️ <i>ขณะนี้ไม่มีสมาชิกที่อยู่ในสถานะ Active ในระบบ</i>\n\n"
         else:
@@ -771,15 +778,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 user_handle = f"@{user.username}" if (user and user.username) else "ไม่มี Username"
                 full_name = html.escape(user.full_name) if (user and user.full_name) else "ไม่ระบุชื่อ"
                 
-                if sub.plan_type == PlanType.TRIAL_15M.value:
-                    plan_name = f"ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที"
-                elif sub.plan_type in PLAN_DETAILS:
-                    plan_name = get_dynamic_plan_info(sub.plan_type)["badge"]
-                elif sub.plan_type.startswith("MANUAL_VIP_"):
-                    plan_name = sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
-                else:
-                    plan_name = sub.plan_type
-
+                plan_name, _ = get_plan_display_name(sub.plan_type)
                 start_time = format_thai_datetime(sub.joined_at)
                 end_time = format_thai_datetime(sub.expires_at)
                 remaining = format_remaining_time(sub.expires_at)
@@ -798,6 +797,25 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                     f"   • 🔴 <b>หมดอายุ (End):</b> <code>{end_time} น.</code>\n"
                     f"   • ⏳ <b>เวลาคงเหลือ:</b> {remaining}\n"
                     f"   • 🆔 <b>Sub ID:</b> <code>#{sub.id}</code>\n\n"
+                )
+
+        # แสดงรายการสมาชิกรอกดเข้าร่วม (Pending)
+        if total_pending > 0:
+            report += "🟡 <b>รายชื่อสมาชิกรอกดเข้าร่วม (Pending):</b>\n\n"
+            for p_idx, (p_uid, p_list) in enumerate(user_pending_map.items(), start=1):
+                p_user = p_list[0].user
+                p_user_handle = f"@{p_user.username}" if (p_user and p_user.username) else "ไม่มี Username"
+                p_user_name = html.escape(p_user.full_name) if (p_user and p_user.full_name) else f"User {p_uid}"
+                p_plan_names = []
+                for s in p_list:
+                    p_title, _ = get_plan_display_name(s.plan_type)
+                    p_plan_names.append(p_title)
+                p_plans_str = ", ".join(p_plan_names)
+                report += (
+                    f"<b>{p_idx}. {p_user_name}</b> ({p_user_handle})\n"
+                    f"   • <b>User ID:</b> <code>{p_uid}</code>\n"
+                    f"   • <b>โควต้ารอใช้งาน:</b> {p_plans_str}\n"
+                    f"   • 🟡 <b>สถานะ:</b> ออกลิงก์แล้ว-รอกดเข้าห้อง\n\n"
                 )
 
         report += "━━━━━━━━━━━━━━━━━━━━\n"

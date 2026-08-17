@@ -1045,7 +1045,12 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
     is_in_channel = False
     try:
         chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid)
-        is_in_channel = chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+        is_in_channel = chat_member.status in (
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.RESTRICTED,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR,
+        )
     except Exception:
         is_in_channel = False
 
