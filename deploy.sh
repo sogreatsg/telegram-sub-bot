@@ -110,6 +110,12 @@ if [ ! -f .env ]; then
 fi
 
 # 6. Build and start containers with Docker Compose
+log_info "Exporting Git commit metadata for version tracking..."
+export BOT_APP_VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo "Unknown")
+export BOT_APP_DATE=$(git log -1 --format="%ad" --date=format:"%d/%m/%Y %H:%M" 2>/dev/null || echo "Unknown")
+export BOT_APP_MESSAGE=$(git log -1 --format="%s" 2>/dev/null || echo "Unknown")
+log_info "Deploying Version: ${BOT_APP_VERSION} (${BOT_APP_MESSAGE}) - ${BOT_APP_DATE}"
+
 log_info "Building and launching Telegram Membership Bot via Docker Compose..."
 if docker compose version &> /dev/null; then
     COMPOSE_CMD="docker compose"
@@ -120,8 +126,8 @@ else
     exit 1
 fi
 
-sudo $COMPOSE_CMD down --remove-orphans || true
-sudo $COMPOSE_CMD up -d --build
+sudo -E $COMPOSE_CMD down --remove-orphans || true
+sudo -E $COMPOSE_CMD up -d --build
 
 log_success "Telegram Membership Bot container is running!"
 echo ""

@@ -6,6 +6,7 @@ services:
       args:
         APP_VERSION: ${BOT_APP_VERSION:-Unknown}
         APP_DATE: ${BOT_APP_DATE:-Unknown}
+        APP_MESSAGE: ${BOT_APP_MESSAGE:-Unknown}
     container_name: telegram_sub_bot
     restart: always
     env_file:

@@ -53,24 +53,81 @@ def format_time_remaining(expires_at: datetime) -> str:
     return " ".join(parts)
 
 
+def get_bot_version_info() -> str:
+    """ดึงข้อมูลเวอร์ชันและประวัติ Commit ล่าสุดแบบไดนามิก"""
+    import subprocess
+    import os
+
+    commit_hash = os.environ.get("BOT_APP_VERSION", "Unknown")
+    commit_date = os.environ.get("BOT_APP_DATE", "Unknown")
+    commit_msg = os.environ.get("BOT_APP_MESSAGE", "Unknown")
+    recent_logs = []
+
+    # 1. พยายามอ่านจาก Git โดยตรง
+    try:
+        git_cmd = [
+            "git", "log", "-n", "3",
+            "--format=%h|%ad|%s",
+            "--date=format:%d/%m/%Y %H:%M"
+        ]
+        res = subprocess.run(
+            git_cmd,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            encoding="utf-8",
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            lines = res.stdout.strip().split("\n")
+            if lines:
+                parts = lines[0].split("|", 2)
+                if len(parts) >= 3:
+                    commit_hash = parts[0]
+                    commit_date = parts[1]
+                    commit_msg = parts[2]
+                
+                for line in lines:
+                    p = line.split("|", 2)
+                    if len(p) >= 3:
+                        h, d, m = p[0], p[1], p[2]
+                        recent_logs.append(f"• <code>{h}</code>: {html.escape(m)} (<i>{d}</i>)")
+    except Exception:
+        pass
+
+    # 2. ถ้าไม่มี recent_logs แต่มี ENV variables
+    if not recent_logs and commit_hash != "Unknown":
+        recent_logs.append(f"• <code>{commit_hash}</code>: {html.escape(commit_msg)}")
+
+    # 3. จัดรูปแบบข้อความ
+    text = (
+        "🤖 <b>Bot Version Info</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>Commit:</b> <code>{commit_hash}</code>\n"
+        f"📅 <b>Date:</b> <code>{commit_date}</code>\n"
+        f"📝 <b>Message:</b> <i>{html.escape(commit_msg)}</i>\n"
+    )
+
+    if recent_logs:
+        text += (
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "📜 <b>ประวัติการอัปเดตล่าสุด:</b>\n"
+            + "\n".join(recent_logs)
+        )
+
+    return text
+
+
 @router.message(Command("version"))
 async def handle_admin_version_command(message: Message):
     """(Admin) เช็คเวอร์ชันปัจจุบันของบอท"""
-    import os
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
     try:
-        commit_hash = os.environ.get("BOT_APP_VERSION", "Unknown")
-        commit_date = os.environ.get("BOT_APP_DATE", "Unknown")
-            
-        text = (
-            f"🤖 <b>Bot Version Info</b>\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"📌 <b>Commit:</b> <code>{commit_hash}</code>\n"
-            f"📅 <b>Date:</b> {commit_date}\n\n"
-            f"<i>อัปเดตล่าสุด: ฟีเจอร์ Swipe to Reply & เมนู Inline Users</i>"
-        )
+        text = get_bot_version_info()
     except Exception as e:
-        text = f"🤖 <b>Bot Version Info</b>\nไม่สามารถอ่านเวอร์ชันได้: <code>{str(e)}</code>"
-        
+        text = f"🤖 <b>Bot Version Info</b>\nไม่สามารถอ่านเวอร์ชันได้: <code>{html.escape(str(e))}</code>"
+
     await message.answer(text, parse_mode="HTML")
 
 
