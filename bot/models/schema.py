@@ -127,7 +127,7 @@ class User(Base):
     referral_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     referral_bonus_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )
 
     # Relationships

@@ -88,6 +88,10 @@ async def init_db() -> None:
                 await conn.execute(text("ALTER TABLE subscriptions ADD COLUMN warned_1d BOOLEAN DEFAULT 0;"))
             except Exception:
                 pass
+            try:
+                await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_created_at ON users (created_at DESC);"))
+            except Exception:
+                pass
     logger.info("Database initialized successfully with WAL mode enabled.")
 
 

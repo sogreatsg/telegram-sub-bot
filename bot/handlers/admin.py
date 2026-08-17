@@ -461,6 +461,7 @@ async def handle_admin_menu_command(message: Message):
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 <b>1. ตรวจสอบสมาชิก & รายงาน:</b>\n"
         "• <code>/summary</code> หรือ <code>/report</code> — ดูสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบยอดสมาชิกใน Channel จริง\n"
+        "• <code>/users_lasted</code> หรือ <code>/users_latest</code> — ดูรายชื่อผู้ใช้ที่สมัครใหม่ล่าสุด 10 คนแบบรวดเร็ว\n"
         "• <code>/users</code> หรือ <code>/users [หน้า]</code> — ดูประวัติผู้ใช้งานย้อนหลังทั้งหมดในระบบ พร้อมปุ่มเลื่อนหน้า\n"
         "• <code>/user [User ID หรือ @username]</code> — ดูประวัติเจาะลึกเฉพาะราย (เวลาออกลิงก์ 15m, เวลากดเข้าห้อง, เวลาหมดอายุ, สลิปโอนเงิน)\n\n"
         "💬 <b>2. ดูประวัติการคุย & ตอบกลับผู้ใช้:</b>\n"
@@ -505,7 +506,10 @@ async def handle_admin_menu_command(message: Message):
                 InlineKeyboardButton(text="🔍 Audit สิทธิ์บอท", callback_data="admin_menu:audit"),
             ],
             [
-                InlineKeyboardButton(text="📑 ประวัติผู้ใช้ทั้งหมด (/users)", callback_data="admin:users_page:1"),
+                InlineKeyboardButton(text="⚡ 10 ผู้ใช้ล่าสุด (/users_lasted)", callback_data="admin_menu:users_latest"),
+                InlineKeyboardButton(text="📑 ผู้ใช้ทั้งหมด (/users)", callback_data="admin:users_page:1"),
+            ],
+            [
                 InlineKeyboardButton(text="🎁 ตั้งค่าโปรโมชั่น", callback_data="admin_menu:promotion"),
             ],
         ]
@@ -1873,6 +1877,149 @@ async def handle_admin_users_page_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "admin:noop")
 async def handle_admin_noop(callback: CallbackQuery):
     """Callback เปล่าสำหรับปุ่มแสดงเลขหน้า"""
+    await callback.answer()
+
+
+async def build_users_latest_view(limit: int = 10) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+    """สร้างรายงานสรุปรายชื่อผู้ใช้งานใหม่ล่าสุด N คน (Default 10 คน) แบบรวดเร็วและประหยัด Query"""
+    now = datetime.now(timezone.utc)
+    
+    async with get_session() as session:
+        # 1. ดึงสถิติจำนวนรวม
+        total_users = (await session.execute(select(func.count(User.telegram_id)))).scalar() or 0
+        total_active = (await session.execute(
+            select(func.count(Subscription.id)).where(
+                Subscription.status == SubStatus.ACTIVE.value,
+                Subscription.expires_at > now,
+            )
+        )).scalar() or 0
+        total_trial_used = (await session.execute(
+            select(func.count(User.telegram_id)).where(User.trial_used == True)
+        )).scalar() or 0
+
+        if total_users == 0:
+            return "ℹ️ <i>ขณะนี้ยังไม่มีข้อมูลผู้ใช้งานในระบบฐานข้อมูล</i>", None
+
+        # 2. ดึงข้อมูล User ล่าสุด 10 คน (เรียงจากใหม่สุดไปเก่า)
+        stmt = (
+            select(User)
+            .options(
+                selectinload(User.subscriptions),
+                selectinload(User.payment_slips),
+            )
+            .order_by(User.created_at.desc())
+            .limit(limit)
+        )
+        users = (await session.execute(stmt)).scalars().all()
+
+    now_thai = format_thai_datetime(now)
+    lines = [
+        f"⚡ <b>รายงานผู้ใช้งานสมัครใหม่ล่าสุด {len(users)} คน (Latest Users)</b>",
+        f"📅 <b>ข้อมูล ณ วันที่:</b> <code>{now_thai} น.</code>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"👥 <b>ผู้ใช้ทั้งหมดในระบบ:</b> <b>{total_users} คน</b> | 🟢 <b>Active:</b> <b>{total_active} คน</b>",
+        f"⏱️ <b>ใช้สิทธิ์ฟรี 15m แล้ว:</b> {total_trial_used} คน",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+    ]
+
+    buttons = []
+    for i, u in enumerate(users, start=1):
+        user_handle = f"@{u.username}" if u.username else "ไม่มี Username"
+        full_name_safe = html.escape(u.full_name or "ไม่ระบุชื่อ")
+        trial_str = "เคยใช้แล้ว ✅" if u.trial_used else "ยังไม่เคยใช้ ⏱️"
+        
+        user_block = [
+            f"<b>{i}. {full_name_safe}</b> ({user_handle})",
+            f"   • 🔢 <b>User ID:</b> <code>{u.telegram_id}</code> | สิทธิ์ฟรี: {trial_str}",
+            f"   • 📅 <b>เข้าใช้บอทครั้งแรก:</b> <code>{format_thai_datetime(u.created_at)} น.</code>",
+        ]
+
+        # ตรวจสอบประวัติการกดเข้า Channel ทั้งหมด
+        joined_times = [s.joined_at for s in u.subscriptions if s.joined_at is not None]
+        if joined_times:
+            earliest_join = min(joined_times)
+            latest_join = max(joined_times)
+            if earliest_join != latest_join:
+                user_block.append(f"   • 🚪 <b>เข้า Channel ครั้งแรก:</b> <code>{format_thai_datetime(earliest_join)} น.</code>")
+                user_block.append(f"   • 🚪 <b>เข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(latest_join)} น.</code>")
+            else:
+                user_block.append(f"   • 🚪 <b>เวลากดเข้า Channel:</b> <code>{format_thai_datetime(latest_join)} น.</code>")
+        else:
+            user_block.append("   • 🚪 <b>เวลากดเข้า Channel:</b> <i>ยังไม่เคยกดเข้าห้อง</i>")
+
+        # Subscription ล่าสุด
+        latest_sub = u.subscriptions[0] if u.subscriptions else None
+        if latest_sub:
+            if latest_sub.plan_type == PlanType.TRIAL_15M.value:
+                plan_label = "ทดลองใช้ 15 นาที"
+            elif latest_sub.plan_type in PLAN_DETAILS:
+                plan_label = get_dynamic_plan_info(latest_sub.plan_type)["badge"]
+            elif latest_sub.plan_type.startswith("PROMOTION_"):
+                plan_label = latest_sub.plan_type.replace("PROMOTION_", "🔥 โปร ").replace("D", " วัน")
+            elif latest_sub.plan_type.startswith("MANUAL_VIP_"):
+                plan_label = latest_sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
+            else:
+                plan_label = latest_sub.plan_type
+
+            status_badge = {
+                SubStatus.ACTIVE.value: "🟢 ACTIVE",
+                SubStatus.PENDING.value: "🟡 PENDING (รอกดเข้า)",
+                SubStatus.EXPIRED.value: "⚪ EXPIRED",
+                SubStatus.KICKED.value: "🔴 KICKED",
+                SubStatus.KICK_FAILED.value: "⚠️ KICK_FAILED",
+            }.get(latest_sub.status, latest_sub.status)
+
+            user_block.append(f"   • 📦 <b>สถานะล่าสุด:</b> {plan_label} [{status_badge}]")
+            user_block.append(f"   • 🎟️ <b>ออกลิงก์ล่าสุด:</b> <code>{format_thai_datetime(latest_sub.created_at)} น.</code>")
+            if latest_sub.expires_at:
+                user_block.append(f"   • ⏰ <b>หมดอายุ:</b> <code>{format_thai_datetime(latest_sub.expires_at)} น.</code>")
+        else:
+            user_block.append("   • 📦 <i>ยังไม่มีประวัติการขอแพ็กเกจ</i>")
+
+        if u.payment_slips:
+            user_block.append(f"   • 💳 สลิปชำระเงิน: {len(u.payment_slips)} รายการ (ล่าสุด: <b>{u.payment_slips[0].status}</b>)")
+
+        user_block.append("")
+        lines.extend(user_block)
+        
+        buttons.append([InlineKeyboardButton(text=f"👤 {i}. จัดการ {full_name_safe}", callback_data=f"admin:view_user:{u.telegram_id}")])
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("⚡ <i>แสดงเฉพาะ 10 สมาชิกใหม่ล่าสุดแบบรวดเร็ว | ดูทั้งหมดพร้อมเลื่อนหน้าใช้ /users</i>")
+
+    buttons.append([
+        InlineKeyboardButton(text="🔄 รีเฟรช", callback_data="admin_menu:users_latest"),
+        InlineKeyboardButton(text="📑 ดูทั้งหมด (/users)", callback_data="admin:users_page:1"),
+    ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    return "\n".join(lines), keyboard
+
+
+@router.message(Command("users_lasted", "users_latest", "latest_users", "lasted_users"))
+async def handle_admin_users_latest_command(message: Message):
+    """คำสั่งดูรายชื่อผู้ใช้งานที่สมัครใหม่ล่าสุด 10 คน: /users_lasted หรือ /users_latest"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    text, markup = await build_users_latest_view(limit=10)
+    await message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin_menu:users_latest")
+async def handle_admin_users_latest_callback(callback: CallbackQuery):
+    """จัดการการกดดูหรือรีเฟรช 10 สมาชิกใหม่ล่าสุดผ่าน Inline Keyboard"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    text, markup = await build_users_latest_view(limit=10)
+    try:
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        pass
     await callback.answer()
 
 
