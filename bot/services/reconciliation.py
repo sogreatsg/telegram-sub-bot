@@ -18,7 +18,7 @@ from bot.models.schema import (
     PlanType,
     PLAN_DETAILS,
 )
-from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, format_user_title
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -58,6 +58,52 @@ class UserReconcileResult:
     status_changed: bool
     is_active: bool
     message: str
+
+
+def format_reconcile_formula(r: UserReconcileResult) -> str:
+    """
+    จัดรูปแบบข้อความแจกแจงตามสูตรชัดเจน:
+    วันหมดอายุใหม่ = วันที่เข้าครั้งแรก (joined_at) + วันซื้อ + วันแอดมินให้ + วันโบนัสเพื่อน (หลัง Reconcile) + ทดลองฟรี
+    """
+    u_title = format_user_title(r.full_name, r.username, r.user_id)
+    join_str = format_thai_datetime(r.joined_at) if r.joined_at else "ไม่ระบุ (ใช้วันสร้างบัญชี)"
+    old_exp = format_thai_datetime(r.expires_at_old) if r.expires_at_old else "ไม่มี"
+    new_exp = format_thai_datetime(r.expires_at_new) if r.expires_at_new else "ไม่มี"
+
+    # คำนวณส่วนต่างวันหมดอายุ
+    diff_text = "ตรงกันอยู่แล้ว ✅"
+    if r.expires_at_old and r.expires_at_new:
+        sec_diff = (ensure_utc(r.expires_at_new) - ensure_utc(r.expires_at_old)).total_seconds()
+        days_diff = round(sec_diff / 86400.0, 1)
+        if days_diff > 0:
+            diff_text = f"➕ ขยายเพิ่ม {days_diff} วัน"
+        elif days_diff < 0:
+            diff_text = f"➖ ปรับลด {abs(days_diff)} วัน ⚠️"
+    elif not r.expires_at_old and r.expires_at_new:
+        diff_text = "🆕 กำหนดวันหมดอายุใหม่"
+
+    ref_note = f"+{r.referral_days} วัน"
+    if r.ref_stats_changed or r.excess_ref_grants_deleted > 0:
+        ref_note += f" (ลดจากเดิม {r.ref_bonus_days_old} วัน ⚠️)"
+
+    trial_str = f"+{r.trial_minutes} นาที" if r.trial_minutes > 0 else "0 นาที"
+
+    status_note = ""
+    if r.status_changed:
+        status_note = f" (สถานะเปลี่ยน {r.status_old} -> {r.status_new} ⚠️)"
+
+    lines = [
+        f"👤 <b>{u_title}</b>",
+        f"├ 📅 <b>วันที่เข้าครั้งแรก (joined_at):</b> <code>{join_str} น.</code>",
+        f"├ 💳 <b>วันซื้อ (Purchase):</b> <b>+{r.purchase_days} วัน</b>",
+        f"├ 👑 <b>วันแอดมินให้ (Admin):</b> <b>+{r.admin_days} วัน</b>",
+        f"├ 🎁 <b>วันโบนัสเพื่อนจริง:</b> <b>{ref_note}</b>",
+        f"├ ⏱️ <b>สิทธิ์ทดลองฟรี (Trial):</b> <b>{trial_str}</b>",
+        f"├ 📦 <b>รวมสิทธิ์สุทธิ:</b> <b>{r.total_days} วัน {r.total_minutes} นาที</b>",
+        f"├ ⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp} น.</code>",
+        f"└ 🎯 <b>วันหมดอายุใหม่ (ตามสูตร):</b> <code>{new_exp} น.</code> [<i>{diff_text}</i>]{status_note}",
+    ]
+    return "\n".join(lines)
 
 
 async def reconcile_user(

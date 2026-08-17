@@ -66,6 +66,8 @@ async def main():
     ref_fixed_count = 0
     expiry_fixed_count = 0
 
+    print(f"📐 Formula: วันหมดอายุใหม่ = วันที่เข้าครั้งแรก + วันซื้อ + วันแอดมิน + วันโบนัสเพื่อนจริง (หลังหักซ้ำ) + ทดลองฟรี\n")
+
     for r in results:
         is_changed = r.ref_stats_changed or r.expiry_changed or r.status_changed or (r.excess_ref_grants_deleted > 0)
         if is_changed:
@@ -75,18 +77,23 @@ async def main():
             if r.expiry_changed or r.status_changed:
                 expiry_fixed_count += 1
 
-            uname = f"@{r.username}" if r.username else f"ID: {r.user_id}"
-            print(f"👤 User: {r.full_name} ({uname}) [ID: {r.user_id}]")
-            print(f"   • Joined / First Active: {format_thai_datetime(r.joined_at) if r.joined_at else 'N/A'}")
-            print(f"   • Breakdown: Purchase={r.purchase_days}d, Admin={r.admin_days}d, Ref={r.referral_days}d, Trial={r.trial_minutes}m -> Total={r.total_days}d {r.total_minutes}m")
-            if r.ref_stats_changed or r.excess_ref_grants_deleted > 0:
-                print(f"   • 🎁 Referral: Friends {r.ref_count_old}->{r.ref_count_new} people | Bonus Days {r.ref_bonus_days_old}->{r.ref_bonus_days_new}d (Pruned {r.excess_ref_grants_deleted} excess grants)")
-            if r.expiry_changed or r.status_changed:
-                old_exp_str = format_thai_datetime(r.expires_at_old) if r.expires_at_old else "None"
-                new_exp_str = format_thai_datetime(r.expires_at_new) if r.expires_at_new else "None"
-                print(f"   • ⏳ Status: {r.status_old}->{r.status_new} | Expiry: {old_exp_str} -> {new_exp_str}")
-            print(f"   • 📝 Action: {r.message}")
-            print("   " + "-" * 50)
+        uname = f"@{r.username}" if r.username else f"ID: {r.user_id}"
+        join_str = format_thai_datetime(r.joined_at) if r.joined_at else "N/A"
+        old_exp_str = format_thai_datetime(r.expires_at_old) if r.expires_at_old else "None"
+        new_exp_str = format_thai_datetime(r.expires_at_new) if r.expires_at_new else "None"
+
+        print(f"👤 [{r.full_name}] ({uname}) [ID: {r.user_id}]")
+        print(f"   ├ 📅 วันที่เข้าครั้งแรก (joined_at): {join_str} น.")
+        print(f"   ├ 💳 วันซื้อ (Purchase):           +{r.purchase_days} วัน")
+        print(f"   ├ 👑 วันแอดมินให้ (Admin):          +{r.admin_days} วัน")
+        print(f"   ├ 🎁 โบนัสเพื่อนจริง (Ref):          +{r.referral_days} วัน (เพื่อนจริง {r.ref_count_new} คน / เดิมนับ {r.ref_count_old})")
+        print(f"   ├ ⏱️ ทดลองฟรี (Trial):             +{r.trial_minutes} นาที")
+        print(f"   ├ 📦 รวมสิทธิ์สุทธิ:                 {r.total_days} วัน {r.total_minutes} นาที")
+        print(f"   ├ ⏳ วันหมดอายุเดิม:                 {old_exp_str} น. (สถานะ: {r.status_old})")
+        print(f"   └ 🎯 วันหมดอายุใหม่ (ตามสูตร):       {new_exp_str} น. (สถานะ: {r.status_new})")
+        if is_changed:
+            print(f"   📝 Action Needed: {r.message}")
+        print("   " + "-" * 55)
 
     print(f"\n========================================================")
     print(f"  Total Scanned:            {len(results)}")

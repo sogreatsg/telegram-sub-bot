@@ -17,7 +17,7 @@ from bot.models.schema import User, PaymentSlip, Subscription, SubscriptionGrant
 from bot.services.database import get_session, get_or_create_user
 from bot.services.scheduler import build_active_members_report, sync_pending_members
 from bot.services.subscription import grant_subscription, subscription_status_label
-from bot.services.reconciliation import reconcile_user, reconcile_all_users
+from bot.services.reconciliation import reconcile_user, reconcile_all_users, format_reconcile_formula
 from bot.services.chat_logger import log_chat_message
 from bot.handlers.user_menu import get_main_menu_keyboard
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title, format_remaining_time
@@ -919,22 +919,126 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
     return "\n".join(lines), keyboard
 
 
+async def build_reconcile_preview_report(session: AsyncSession) -> tuple[str, InlineKeyboardMarkup]:
+    """สร้างรายงานพรีวิวก่อนปรับยอด ตามสูตร: วันหมดอายุใหม่ = joined_at + วันซื้อ + วันแอดมิน + วันโบนัสเพื่อน + ทดลองฟรี"""
+    results = await reconcile_all_users(session, only_active=False, commit=False)
+
+    changed_list = [r for r in results if r.ref_stats_changed or r.expiry_changed or r.status_changed or (r.excess_ref_grants_deleted > 0)]
+    active_list = [r for r in results if r.is_active or (r.status_old == SubStatus.ACTIVE.value)]
+
+    lines = [
+        "🔍 <b>[พรีวิวสรุปยอดก่อนปรับ] คำนวณวันหมดอายุตามเกณฑ์จริง</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "📐 <b>สูตรการคำนวณมาตรฐาน:</b>",
+        "<code>วันหมดอายุใหม่ = วันที่เข้าครั้งแรก (joined_at) + วันซื้อ + วันแอดมินให้ + วันโบนัสเพื่อนจริง (หลังหักซ้ำ) + ทดลองฟรี</code>",
+        "",
+        "📊 <b>สถิติภาพรวม:</b>",
+        f"• 👥 สมาชิกทั้งหมดที่สแกน: <b>{len(results)} คน</b>",
+        f"• 🟢 สมาชิก Active: <b>{len(active_list)} คน</b>",
+        f"• ⚠️ สมาชิกที่ตัวเลข<b>ไม่ตรงและต้องปรับแก้:</b> <b>{len(changed_list)} คน</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+
+    display_targets = changed_list if changed_list else results
+    if display_targets:
+        lines.append("📋 <b>รายละเอียดแจกแจงตามสูตรรายบุคคล:</b>\n")
+        for r in display_targets[:10]:
+            lines.append(format_reconcile_formula(r))
+            lines.append("")
+
+        if len(display_targets) > 10:
+            lines.append(f"<i>...และมีผู้ใช้อีก {len(display_targets) - 10} คน</i>\n")
+    else:
+        lines.append("✨ <i>ไม่พบข้อมูลผู้ใช้ในระบบ</i>\n")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("💡 <i>สามารถเลือกกดปุ่มด้านล่างเพื่อ 'ปรับเฉพาะบุคคล' หรือ 'ปรับทุกคนพร้อมกัน' ได้ทันทีครับ</i>")
+
+    keyboard_buttons = []
+    # สร้างปุ่มสำหรับปรับทีละคน (เฉพาะคนที่ตัวเลขไม่ตรง สูงสุด 5 คนแรก)
+    for r in changed_list[:5]:
+        u_label = f"⚡ ปรับ: {r.full_name[:12]} (ID: {r.user_id})"
+        keyboard_buttons.append([
+            InlineKeyboardButton(text=u_label, callback_data=f"admin:do_reconcile:{r.user_id}")
+        ])
+
+    if changed_list:
+        keyboard_buttons.append([
+            InlineKeyboardButton(text=f"🚀 ปรับยอดทุกคนที่พบปัญหา ({len(changed_list)} คน)", callback_data="admin:confirm_reconcile_all")
+        ])
+    else:
+        keyboard_buttons.append([
+            InlineKeyboardButton(text="🚀 ยืนยัน Reconcile ทั้งระบบอีกครั้ง", callback_data="admin:confirm_reconcile_all")
+        ])
+
+    keyboard_buttons.append([
+        InlineKeyboardButton(text="🔄 ตรวจสอบและรีเฟรชพรีวิวใหม่", callback_data="admin:refresh_reconcile_preview")
+    ])
+
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
+
+
+@router.message(Command("reconcile_preview", "reconcile_check", "reconcile_report"))
+async def handle_admin_reconcile_preview_command(message: Message):
+    """คำสั่งแอดมินสำหรับดูรายงานสรุปพรีวิวการคำนวณตามสูตรก่อนปรับยอด: /reconcile_preview"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    status_msg = await message.answer("⏳ <b>กำลังคำนวณและจัดทำรายงานพรีวิวตามสูตร...</b>", parse_mode="HTML")
+    async with get_session() as session:
+        resp_text, keyboard = await build_reconcile_preview_report(session)
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    chunks = split_text_chunks(resp_text, max_chunk_size=3800)
+    for i, chunk in enumerate(chunks):
+        reply_kb = keyboard if i == len(chunks) - 1 else None
+        await message.answer(text=chunk, reply_markup=reply_kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:refresh_reconcile_preview")
+async def handle_admin_refresh_reconcile_preview_callback(callback: CallbackQuery):
+    """Callback รีเฟรชหน้าพรีวิว Reconcile"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    await callback.answer("🔄 กำลังคำนวณพรีวิวใหม่...")
+    async with get_session() as session:
+        resp_text, keyboard = await build_reconcile_preview_report(session)
+
+    chunks = split_text_chunks(resp_text, max_chunk_size=3800)
+    for i, chunk in enumerate(chunks):
+        reply_kb = keyboard if i == len(chunks) - 1 else None
+        await callback.message.answer(text=chunk, reply_markup=reply_kb, parse_mode="HTML")
+
+
 @router.message(Command("audit_user", "verify_user", "reconcile", "audit_sub"))
 async def handle_admin_user_audit_command(message: Message, bot: Bot):
-    """คำสั่งแอดมินตรวจสอบยอดและกระทบยอดเวลาสมาชิก: /audit_user <User ID หรือ @username>"""
+    """คำสั่งแอดมินตรวจสอบยอดและกระทบยอดเวลาสมาชิก: /audit_user <User ID หรือ @username> หรือ /reconcile เพื่อดูพรีวิวทุกคน"""
     if message.chat.id != config.ADMIN_GROUP_ID:
         return
 
     args = (message.text or "").split(maxsplit=1)
     if len(args) < 2:
-        await message.answer(
-            "❌ <b>วิธีใช้งาน:</b> <code>/audit_user [User ID หรือ @username]</code>\n"
-            "ตัวอย่าง:\n"
-            "• <code>/audit_user 5146118889</code>\n"
-            "• <code>/audit_user @numiruuna</code>\n\n"
-            "💡 <i>หรือใช้ <code>/reconcile_all</code> เพื่อ Reconcile สมาชิกทุกคนทั้งระบบ</i>",
-            parse_mode="HTML",
-        )
+        # หากไม่ระบุ User ID -> แสดงหน้ารายงานสรุปพรีวิวทุกคนทั้งระบบ
+        status_msg = await message.answer("⏳ <b>กำลังคำนวณและจัดทำรายงานพรีวิวตามสูตร...</b>", parse_mode="HTML")
+        async with get_session() as session:
+            resp_text, keyboard = await build_reconcile_preview_report(session)
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+        chunks = split_text_chunks(resp_text, max_chunk_size=3800)
+        for i, chunk in enumerate(chunks):
+            reply_kb = keyboard if i == len(chunks) - 1 else None
+            await message.answer(text=chunk, reply_markup=reply_kb, parse_mode="HTML")
         return
 
     query = args[1].strip()
@@ -959,7 +1063,7 @@ async def handle_admin_audit_user_callback(callback: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("admin:do_reconcile:"))
 async def handle_admin_do_reconcile_callback(callback: CallbackQuery, bot: Bot):
-    """Callback เมื่อแอดมินกดปุ่ม [⚡ ปรับยอด & วันหมดอายุให้ตรง (Reconcile)]"""
+    """Callback เมื่อแอดมินกดปุ่ม [⚡ ปรับยอด & วันหมดอายุให้ตรง (Reconcile)] รายบุคคล"""
     if not callback.from_user or not callback.message:
         return
     if callback.message.chat.id != config.ADMIN_GROUP_ID:
@@ -982,9 +1086,52 @@ async def handle_admin_do_reconcile_callback(callback: CallbackQuery, bot: Bot):
 
     await callback.answer("✅ ปรับยอดข้อมูลและวันหมดอายุเรียบร้อยแล้ว!", show_alert=True)
 
+    # ส่งรายงานอัปเดตใหม่
     resp_text, keyboard = await build_user_audit_report(query=uid_str, bot=bot)
-    notice = f"⚡ <b>[ดำเนินการ Reconcile สำเร็จ]</b>\n📝 <i>{html.escape(result.message)}</i>\n\n"
+    notice = f"⚡ <b>[ดำเนินการ Reconcile สำเร็จสำหรับ User {target_uid}]</b>\n📝 <i>{html.escape(result.message)}</i>\n\n"
     await callback.message.answer(text=notice + resp_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:confirm_reconcile_all")
+async def handle_admin_confirm_reconcile_all_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เมื่อแอดมินกดปุ่มยืนยันปรับยอดทุกคนพร้อมกัน"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    await callback.answer("⏳ กำลังดำเนินการปรับยอดทุกคน...", show_alert=False)
+
+    async with get_session() as session:
+        results = await reconcile_all_users(session, only_active=False, commit=True)
+
+    changed_list = [r for r in results if r.ref_stats_changed or r.expiry_changed or r.status_changed or (r.excess_ref_grants_deleted > 0)]
+
+    summary_lines = [
+        "✅ <b>[Reconcile All Complete] กระทบยอดและปรับวันหมดอายุทั้งระบบเรียบร้อย</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"👥 <b>ผู้ใช้ที่ตรวจสอบทั้งหมด:</b> {len(results)} คน",
+        f"⚡ <b>ผู้ใช้ที่มีการปรับยอดแก้ไข:</b> <b>{len(changed_list)} คน</b>",
+        "",
+    ]
+
+    if changed_list:
+        summary_lines.append("📋 <b>รายชื่อผู้ใช้ที่ได้รับการปรับยอด:</b>")
+        for r in changed_list[:20]:
+            u_title = format_user_title(r.full_name, r.username, r.user_id)
+            summary_lines.append(f"• {u_title}\n  └ <i>{html.escape(r.message)}</i>")
+        if len(changed_list) > 20:
+            summary_lines.append(f"• <i>...และอีก {len(changed_list) - 20} คน</i>")
+    else:
+        summary_lines.append("✨ <i>ข้อมูลผู้ใช้และวันหมดอายุของทุกคนถูกต้องตรงตามเกณฑ์แล้ว 100%</i>")
+
+    summary_lines.append("━━━━━━━━━━━━━━━━━━━━")
+    report_text = "\n".join(summary_lines)
+
+    chunks = split_text_chunks(report_text, max_chunk_size=3800)
+    for chunk in chunks:
+        await callback.message.answer(text=chunk, parse_mode="HTML")
 
 
 @router.message(Command("reconcile_all", "reconcile_users", "fix_all_expiry"))
