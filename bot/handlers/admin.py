@@ -940,6 +940,26 @@ async def handle_admin_reset_trial_command(message: Message, bot: Bot):
     )
     await message.answer(resp, parse_mode="HTML")
 
+    # ส่งข้อความแจ้งเตือนผู้ใช้พร้อมปุ่มทดลองใช้ใหม่
+    user_notify_text = (
+        "🔄 <b>แอดมินได้ทำการรีเซ็ตสิทธิ์ทดลองใช้งานให้คุณแล้ว</b>\n\n"
+        "คุณสามารถกดปุ่ม <b>'ทดลองใหม่'</b> ด้านล่างนี้เพื่อรับสิทธิ์และออกลิงก์ทดลองใช้ฟรี 15 นาทีได้เลยค่ะ"
+    )
+    trial_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⏱️ ทดลองใช้ฟรี 15 นาที (ทดลองใหม่)",
+                    callback_data="menu:trial"
+                )
+            ]
+        ]
+    )
+    try:
+        await bot.send_message(chat_id=target_uid, text=user_notify_text, reply_markup=trial_keyboard, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Failed to notify user {target_uid} about trial reset: {e}")
+
 
 @router.message(Command("user", "check_user", "info"))
 async def handle_admin_user_info_command(message: Message, bot: Bot):
