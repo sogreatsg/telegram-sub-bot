@@ -491,9 +491,10 @@ async def handle_admin_menu_command(message: Message):
         "👑 <b>เมนูคำสั่งผู้ดูแลระบบ (Admin Panel & Commands)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 <b>1. ตรวจสอบสมาชิก & รายงาน:</b>\n"
+        "• <code>/reconcile</code> หรือ <code>/reconcile_preview</code> — 🔍 พรีวิวสรุปยอดและสูตรคำนวณวันหมดอายุจริง (พร้อมเลือกปรับรายบุคคล/ปรับทั้งหมด)\n"
+        "• <code>/reconcile_all</code> — ⚡ กระทบยอดและปรับวันหมดอายุของสมาชิกทุกคนทั้งระบบทันที (ลดสถิติโบนัสเพื่อนซ้ำซ้อน)\n"
+        "• <code>/audit_user [User ID หรือ @username]</code> — 🔍 ตรวจสอบยอดและกระทบยอดเวลาสมาชิกรายบุคคล (พร้อมปุ่มกด Reconcile)\n"
         "• <code>/top_referrals</code> หรือ <code>/top_refs</code> — 🏆 ดูอันดับผู้ใช้งานที่ชวนเพื่อนได้มากที่สุด (Leaderboard) เรียงจากมากไปน้อย\n"
-        "• <code>/reconcile_all</code> — ⚡ กระทบยอดและปรับวันหมดอายุของสมาชิกทุกคนทั้งระบบ (พร้อมลดสถิติโบนัสชวนเพื่อนที่ซ้ำซ้อน)\n"
-        "• <code>/audit_user [User ID หรือ @username]</code> — 🔍 ตรวจสอบยอดและกระทบยอดเวลาสมาชิก (ยอดชวนเพื่อน, แพ็กเกจที่ซื้อ, โควต้ารวม, วันหมดอายุจริง)\n"
         "• <code>/summary</code> หรือ <code>/report</code> — ดูสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบยอดสมาชิกใน Channel จริง\n"
         "• <code>/users_lasted</code> หรือ <code>/users_latest</code> — ดูรายชื่อผู้ใช้ที่สมัครใหม่ล่าสุด 10 คนแบบรวดเร็ว\n"
         "• <code>/users</code> หรือ <code>/users [หน้า]</code> — ดูประวัติผู้ใช้งานย้อนหลังทั้งหมดในระบบ พร้อมปุ่มเลื่อนหน้า\n"
@@ -510,6 +511,7 @@ async def handle_admin_menu_command(message: Message):
         "• <code>/sync</code> หรือ <code>/sync_channel</code> — ตรวจเช็คผู้ใช้ที่ค้าง PENDING ทั้งหมด หากพบว่าอยู่ใน Channel แล้วจะเปิดใช้งาน ACTIVE และเริ่มนับเวลาให้ทันที (พร้อมเตะคนที่หมดเวลาแล้ว)\n"
         "• <code>/deep_scan</code> — สแกนผู้ใช้ทั้งหมดในระบบแบบเจาะลึก หากพบว่ามีคนหมดอายุแต่ยังค้างอยู่ในห้องจะกวาดล้างเตะออกทันที\n\n"
         "⚙️ <b>5. ตรวจสอบระบบ & สิทธิ์บอท:</b>\n"
+        "• <code>/admin</code> หรือ <code>/admin_help</code> — 👑 แสดงหน้ารวมเมนูคำสั่งแอดมินและปุ่มลัดทั้งหมดนี้\n"
         "• <code>/audit</code> หรือ <code>/check</code> — ตรวจสอบสิทธิ์ของ Bot ใน Channel VIP (สิทธิ์ Ban Users, สิทธิ์สร้าง Invite Links) และสถานะการเชื่อมต่อ\n"
         "• <code>/revoke_primary</code> — สั่งเพิกถอนและสร้าง Primary Link ใหม่ของ Channel\n"
         "• <code>/revoke_link [Link]</code> — สั่งเพิกถอนลิงก์เชิญ (Invite Link) เฉพาะเจาะจง\n"
@@ -532,19 +534,22 @@ async def handle_admin_menu_command(message: Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🏆 อันดับชวนเพื่อน (/top_refs)", callback_data="admin_menu:top_referrals"),
+                InlineKeyboardButton(text="🔍 พรีวิว Reconcile ยอด", callback_data="admin:refresh_reconcile_preview"),
                 InlineKeyboardButton(text="📊 สรุปสมาชิก Active", callback_data="admin_menu:summary"),
             ],
             [
+                InlineKeyboardButton(text="🏆 อันดับชวนเพื่อน (/top_refs)", callback_data="admin_menu:top_referrals"),
                 InlineKeyboardButton(text="🔄 ซิงค์สมาชิกค้าง (/sync)", callback_data="admin_menu:sync"),
-                InlineKeyboardButton(text="📢 ยอด Broadcast", callback_data="admin_menu:broadcast_count"),
             ],
             [
                 InlineKeyboardButton(text="⚡ 10 ผู้ใช้ล่าสุด (/users_lasted)", callback_data="admin_menu:users_latest"),
                 InlineKeyboardButton(text="📑 ผู้ใช้ทั้งหมด (/users)", callback_data="admin:users_page:1"),
             ],
             [
+                InlineKeyboardButton(text="📢 ยอด Broadcast", callback_data="admin_menu:broadcast_count"),
                 InlineKeyboardButton(text="🔍 Audit สิทธิ์บอท", callback_data="admin_menu:audit"),
+            ],
+            [
                 InlineKeyboardButton(text="🎁 ตั้งค่าโปรโมชั่น", callback_data="admin_menu:promotion"),
             ],
         ]
