@@ -2366,15 +2366,15 @@ async def build_top_referrals_view(page: int = 1, page_size: int = 10) -> tuple[
     async with get_session() as session:
         # 1. สถิติภาพรวม Referral
         total_referrers = (await session.execute(
-            select(func.count(User.telegram_id)).where(User.referral_count > 0)
+            select(func.count(User.telegram_id)).where(func.coalesce(User.referral_count, 0) > 0)
         )).scalar() or 0
 
         total_invited = (await session.execute(
-            select(func.sum(User.referral_count)).where(User.referral_count > 0)
+            select(func.coalesce(func.sum(User.referral_count), 0)).where(func.coalesce(User.referral_count, 0) > 0)
         )).scalar() or 0
 
         total_bonus_days = (await session.execute(
-            select(func.sum(User.referral_bonus_days)).where(User.referral_bonus_days > 0)
+            select(func.coalesce(func.sum(User.referral_bonus_days), 0)).where(func.coalesce(User.referral_bonus_days, 0) > 0)
         )).scalar() or 0
 
         if total_referrers == 0:
@@ -2394,12 +2394,69 @@ async def build_top_referrals_view(page: int = 1, page_size: int = 10) -> tuple[
         stmt = (
             select(User)
             .options(selectinload(User.subscriptions))
-            .where(User.referral_count > 0)
+            .where(func.coalesce(User.referral_count, 0) > 0)
             .order_by(User.referral_count.desc(), User.referral_bonus_days.desc(), User.created_at.asc())
             .offset(offset)
             .limit(page_size)
         )
         users = (await session.execute(stmt)).scalars().all()
+
+        # แปลงข้อมูลผู้ใช้ภายใน Session ให้เสร็จสมบูรณ์ 100% ป้องกัน DetachedInstanceError
+        user_rows = []
+        for idx, u in enumerate(users, start=offset + 1):
+            user_handle = f"@{u.username}" if u.username else "ไม่มี Username"
+            full_name_safe = html.escape(u.full_name or f"User {u.telegram_id}")
+            ref_count = u.referral_count or 0
+            bonus_days = u.referral_bonus_days or 0
+            u_id = u.telegram_id
+
+            # ตรวจสอบสถานะ VIP
+            user_subs = list(u.subscriptions or [])
+            active_subs = [s for s in user_subs if s.status == SubStatus.ACTIVE.value and s.expires_at and ensure_utc(s.expires_at) > now]
+            pending_subs = [s for s in user_subs if s.status == SubStatus.PENDING.value]
+
+            if active_subs:
+                exp_thai = format_thai_datetime(active_subs[0].expires_at)
+                rem_str = format_time_remaining(active_subs[0].expires_at)
+                vip_status_str = f"🟢 ACTIVE (หมดอายุ: <code>{exp_thai} น.</code> - เหลือ {rem_str})"
+            elif pending_subs:
+                pending_days = 0
+                for ps in pending_subs:
+                    p_type = ps.plan_type
+                    if p_type.startswith("REFERRAL_VIP"):
+                        if "_" in p_type and p_type.endswith("D"):
+                            try:
+                                pending_days += int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
+                            except Exception:
+                                pending_days += 1
+                        elif bonus_days > 0:
+                            pending_days += bonus_days
+                        else:
+                            pending_days += 1
+                    elif p_type in PLAN_DETAILS:
+                        pending_days += PLAN_DETAILS[p_type]["days"]
+                    elif p_type.startswith("PROMOTION_") or p_type.startswith("MANUAL_VIP_"):
+                        try:
+                            pending_days += int(p_type.replace("PROMOTION_", "").replace("MANUAL_VIP_", "").replace("D", ""))
+                        except Exception:
+                            pending_days += 30
+                    elif p_type == PlanType.TRIAL_15M.value:
+                        pass
+                    else:
+                        pending_days += 30
+                vip_status_str = f"🟡 PENDING (มีโควต้ารอกดเข้าสะสม <b>{pending_days} วัน</b>)"
+            else:
+                vip_status_str = "⚪ EXPIRED (ไม่อยู่ในห้อง)"
+
+            user_rows.append({
+                "idx": idx,
+                "uid": u_id,
+                "name": full_name_safe,
+                "handle": user_handle,
+                "ref_count": ref_count,
+                "bonus_days": bonus_days,
+                "vip_status": vip_status_str,
+            })
 
     now_thai = format_thai_datetime(now)
     lines = [
@@ -2417,58 +2474,19 @@ async def build_top_referrals_view(page: int = 1, page_size: int = 10) -> tuple[
     buttons = []
     medals = ["🥇", "🥈", "🥉"]
 
-    for idx, u in enumerate(users, start=offset + 1):
+    for row in user_rows:
+        idx = row["idx"]
         medal = medals[idx - 1] if idx <= 3 else f"<b>#{idx}</b>"
-        user_handle = f"@{u.username}" if u.username else "ไม่มี Username"
-        full_name_safe = html.escape(u.full_name or f"User {u.telegram_id}")
-
-        # ตรวจสอบสถานะ VIP ล่าสุด
-        active_subs = [s for s in u.subscriptions if s.status == SubStatus.ACTIVE.value and s.expires_at and s.expires_at > now]
-        pending_subs = [s for s in u.subscriptions if s.status == SubStatus.PENDING.value]
-
-        if active_subs:
-            exp_thai = format_thai_datetime(active_subs[0].expires_at)
-            rem_str = format_time_remaining(active_subs[0].expires_at)
-            vip_status_str = f"🟢 ACTIVE (หมดอายุ: <code>{exp_thai} น.</code> - เหลือ {rem_str})"
-        elif pending_subs:
-            pending_days = 0
-            for ps in pending_subs:
-                p_type = ps.plan_type
-                if p_type.startswith("REFERRAL_VIP"):
-                    if "_" in p_type and p_type.endswith("D"):
-                        try:
-                            pending_days += int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
-                        except Exception:
-                            pending_days += 1
-                    elif u.referral_bonus_days > 0:
-                        pending_days += u.referral_bonus_days
-                    else:
-                        pending_days += 1
-                elif p_type in PLAN_DETAILS:
-                    pending_days += PLAN_DETAILS[p_type]["days"]
-                elif p_type.startswith("PROMOTION_") or p_type.startswith("MANUAL_VIP_"):
-                    try:
-                        pending_days += int(p_type.replace("PROMOTION_", "").replace("MANUAL_VIP_", "").replace("D", ""))
-                    except Exception:
-                        pending_days += 30
-                elif p_type == PlanType.TRIAL_15M.value:
-                    pass
-                else:
-                    pending_days += 30
-            vip_status_str = f"🟡 PENDING (มีโควต้ารอกดเข้าสะสม <b>{pending_days} วัน</b>)"
-        else:
-            vip_status_str = "⚪ EXPIRED (ไม่อยู่ในห้อง)"
-
         user_block = [
-            f"{medal} <b>อันดับ {idx}. {full_name_safe}</b> ({user_handle})",
-            f"   • 🔢 <b>User ID:</b> <code>{u.telegram_id}</code>",
-            f"   • 👥 <b>ชวนเพื่อนสำเร็จ:</b> <b>{u.referral_count} คน</b> | 🎁 <b>โบนัสสะสม:</b> <b>{u.referral_bonus_days} วัน</b>",
-            f"   • 📦 <b>สถานะ VIP:</b> {vip_status_str}",
+            f"{medal} <b>อันดับ {idx}. {row['name']}</b> ({row['handle']})",
+            f"   • 🔢 <b>User ID:</b> <code>{row['uid']}</code>",
+            f"   • 👥 <b>ชวนเพื่อนสำเร็จ:</b> <b>{row['ref_count']} คน</b> | 🎁 <b>โบนัสสะสม:</b> <b>{row['bonus_days']} วัน</b>",
+            f"   • 📦 <b>สถานะ VIP:</b> {row['vip_status']}",
             "",
         ]
         lines.extend(user_block)
 
-        buttons.append([InlineKeyboardButton(text=f"👤 {idx}. จัดการ {full_name_safe} ({u.referral_count} คน)", callback_data=f"admin:view_user:{u.telegram_id}")])
+        buttons.append([InlineKeyboardButton(text=f"👤 {idx}. จัดการ {row['name']} ({row['ref_count']} คน)", callback_data=f"admin:view_user:{row['uid']}")])
 
     # ปุ่มเปลี่ยนหน้า
     nav_row = []
@@ -2501,8 +2519,12 @@ async def handle_admin_top_referrals_command(message: Message):
     if len(args) >= 2 and args[1].isdigit():
         page = int(args[1])
 
-    text, markup = await build_top_referrals_view(page=page)
-    await message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+    try:
+        text, markup = await build_top_referrals_view(page=page)
+        await message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error in top_referrals command: {e}", exc_info=True)
+        await message.answer(f"❌ <b>เกิดข้อผิดพลาด:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("admin:top_refs_page:"))
@@ -2514,18 +2536,18 @@ async def handle_admin_top_refs_page_callback(callback: CallbackQuery):
         await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
 
+    await callback.answer()
     page_str = callback.data.split(":")[-1]
     try:
         page = int(page_str)
     except ValueError:
         page = 1
 
-    text, markup = await build_top_referrals_view(page=page)
     try:
+        text, markup = await build_top_referrals_view(page=page)
         await callback.message.edit_text(text=text, reply_markup=markup, parse_mode="HTML")
-    except Exception:
-        pass
-    await callback.answer()
+    except Exception as e:
+        logger.error(f"Error editing top_referrals page: {e}", exc_info=True)
 
 
 @router.callback_query(F.data == "admin_menu:top_referrals")
@@ -2537,9 +2559,13 @@ async def handle_admin_menu_top_referrals_callback(callback: CallbackQuery):
         await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
 
-    text, markup = await build_top_referrals_view(page=1)
-    await callback.message.answer(text=text, reply_markup=markup, parse_mode="HTML")
     await callback.answer()
+    try:
+        text, markup = await build_top_referrals_view(page=1)
+        await callback.message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error handling admin_menu:top_referrals: {e}", exc_info=True)
+        await callback.message.answer(f"❌ <b>เกิดข้อผิดพลาดในการโหลดอันดับชวนเพื่อน:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
 
 
 @router.message(Command("revoke_primary", "reset_primary_link", "revoke_channel_link"))
