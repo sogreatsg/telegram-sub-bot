@@ -13,9 +13,10 @@ from sqlalchemy import select, func, delete
 from sqlalchemy.orm import selectinload
 
 from bot.config import get_settings
-from bot.models.schema import User, PaymentSlip, Subscription, ChatMessage, SlipStatus, SubStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info
+from bot.models.schema import User, PaymentSlip, Subscription, SubscriptionGrant, ChatMessage, SlipStatus, SubStatus, PlanType, GrantType, PLAN_DETAILS, get_dynamic_plan_info
 from bot.services.database import get_session, get_or_create_user
-from bot.services.scheduler import build_active_members_report, sync_pending_members, get_plan_display_name
+from bot.services.scheduler import build_active_members_report, sync_pending_members
+from bot.services.subscription import grant_subscription, subscription_status_label
 from bot.services.chat_logger import log_chat_message
 from bot.handlers.user_menu import get_main_menu_keyboard
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title, format_remaining_time
@@ -199,20 +200,11 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
 
             plan_info = get_dynamic_plan_info(requested_plan)
             additional_days = plan_info["days"]
+            grant_type_value = GrantType.PROMOTION.value if requested_plan == PlanType.PROMOTION.value else GrantType.PURCHASE.value
 
-            # 2. ตรวจสอบว่าผู้ใช้อยู่ใน Channel และมี ACTIVE Subscription หรือไม่
-            active_stmt = (
-                select(Subscription)
-                .where(
-                    Subscription.user_id == target_user_id,
-                    Subscription.status == SubStatus.ACTIVE.value,
-                    Subscription.expires_at > now,
-                )
-                .order_by(Subscription.id.desc())
-            )
-            active_sub = (await session.execute(active_stmt)).scalar_one_or_none()
-
-            # ตรวจสอบสถานะจริงใน Channel
+            # ตรวจสอบสถานะจริงใน Channel (ใช้แค่ตัดสินใจว่าต้องออก invite link ใหม่ให้หรือไม่
+            # ไม่ใช้ตัดสินว่าจะบวกวันให้หรือไม่ — grant_subscription() จะบวกวันทันทีถ้ามี ACTIVE
+            # subscription ที่ยังไม่หมดอายุอยู่แล้วในฐานข้อมูล โดยไม่ต้องรอผู้ใช้กดเข้า Channel)
             is_in_channel = False
             try:
                 chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_user_id)
@@ -220,33 +212,23 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
             except Exception:
                 is_in_channel = False
 
-            if active_sub and is_in_channel and active_sub.plan_type != PlanType.TRIAL_15M.value:
-                # === กรณีต่อเวลาสะสม (Day Stacking) เฉพาะสมาชิกที่มี VIP เสียเงินอยู่แล้ว ===
-                current_exp = ensure_utc(active_sub.expires_at)
-                base_time = max(current_exp, now) if current_exp else now
-                new_expires_at = base_time + timedelta(days=additional_days)
-                active_sub.expires_at = new_expires_at
-                active_sub.plan_type = requested_plan
-                active_sub.warned_1d = False
-                session.add(active_sub)
-                is_stack_extension = True
+            grant = await grant_subscription(
+                session,
+                user_id=target_user_id,
+                days=additional_days,
+                source_label=f"สมาชิก {plan_info['badge']}",
+                grant_type=grant_type_value,
+                has_value=True,
+                is_in_channel=is_in_channel,
+            )
+            is_stack_extension = grant.is_stack_extension
+            new_expires_at = grant.new_expires_at
+
+            if is_stack_extension:
                 logger.info(
-                    f"Approve slip #{slip_id}: Extended active sub #{active_sub.id} for User {target_user_id} by +{additional_days} days. "
+                    f"Approve slip #{slip_id}: Extended active sub for User {target_user_id} by +{additional_days} days. "
                     f"New expires_at: {new_expires_at}"
                 )
-            else:
-                # === กรณีต้องส่งลิงก์เชิญใหม่ หรืออัปเกรดจากสิทธิ์ทดลองฟรี (Trial) ===
-                save_plan = requested_plan
-                if requested_plan == PlanType.PROMOTION.value:
-                    save_plan = f"PROMOTION_{additional_days}D"
-                    
-                subscription = Subscription(
-                    user_id=target_user_id,
-                    plan_type=save_plan,
-                    status=SubStatus.PENDING.value,
-                )
-                session.add(subscription)
-                await session.flush()
 
         plan_info = get_dynamic_plan_info(requested_plan)
         plan_badge = plan_info["badge"]
@@ -276,6 +258,27 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 user_dm_sent = True
             except Exception as e:
                 logger.warning(f"Could not send stacked extension DM to User ID={target_user_id}: {e}")
+
+        elif is_in_channel:
+            # กรณีไม่มี ACTIVE เดิม แต่ผู้ใช้อยู่ใน Channel อยู่แล้ว -> เปิดใช้งานให้ทันที ไม่ต้องออก invite link ใหม่
+            exp_thai = format_thai_datetime(new_expires_at) if new_expires_at else "-"
+            user_message = (
+                "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"📦 <b>แพ็กเกจ:</b> <b>{plan_badge} ({plan_desc})</b> เปิดใช้งานให้ทันทีแล้วครับ\n"
+                f"📅 <b>วันหมดอายุ:</b> <code>{exp_thai} น.</code>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 <i>คุณอยู่ใน Channel VIP อยู่แล้ว สามารถใช้งานต่อได้ทันทีโดยไม่ต้องกดลิงก์ใหม่ครับ! 🚀</i>"
+            )
+            try:
+                await bot.send_message(
+                    chat_id=target_user_id,
+                    text=user_message,
+                    parse_mode="HTML",
+                )
+                user_dm_sent = True
+            except Exception as e:
+                logger.warning(f"Could not send instant-activate DM to User ID={target_user_id}: {e}")
 
         else:
             # สร้างลิงก์เชิญแบบ 1 ครั้งให้ผู้ใช้
@@ -328,8 +331,13 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
         timestamp_thai = format_thai_datetime(now)
         base_text = callback.message.caption or callback.message.text or ""
 
-        action_label = f"✅ <b>อนุมัติแล้ว (ต่อเวลาสะสม +{plan_desc})</b>" if is_stack_extension else f"✅ <b>อนุมัติแล้ว (ออกลิงก์เชิญใหม่)</b>"
-        expiry_note = f"\n⏳ หมดอายุใหม่: <code>{format_thai_datetime(new_expires_at)} น.</code>" if is_stack_extension and new_expires_at else ""
+        if is_stack_extension:
+            action_label = f"✅ <b>อนุมัติแล้ว (ต่อเวลาสะสม +{plan_desc})</b>"
+        elif is_in_channel:
+            action_label = f"✅ <b>อนุมัติแล้ว (เปิดใช้งานทันที อยู่ใน Channel อยู่แล้ว)</b>"
+        else:
+            action_label = f"✅ <b>อนุมัติแล้ว (ออกลิงก์เชิญใหม่)</b>"
+        expiry_note = f"\n⏳ หมดอายุใหม่: <code>{format_thai_datetime(new_expires_at)} น.</code>" if new_expires_at else ""
 
         updated_text = (
             f"{base_text}\n\n"
@@ -603,7 +611,7 @@ async def handle_admin_menu_broadcast_count_callback(callback: CallbackQuery):
     async with get_session() as session:
         total_users = (await session.execute(select(func.count(User.telegram_id)))).scalar() or 0
         active_users = (await session.execute(
-            select(func.count(Subscription.id)).where(
+            select(func.count(Subscription.user_id)).where(
                 Subscription.status == SubStatus.ACTIVE.value,
                 Subscription.expires_at > now,
             )
@@ -728,13 +736,14 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
         ref_stmt = select(User).where(User.referred_by_id == user.telegram_id)
         referred_users = (await session.execute(ref_stmt)).scalars().all()
 
-        # 2. ข้อมูล Subscriptions ทั้งหมดของผู้ใช้นี้
-        subs_stmt = (
-            select(Subscription)
-            .where(Subscription.user_id == user.telegram_id)
-            .order_by(Subscription.id.asc())
+        # 2. สถานะสมาชิกปัจจุบัน (1 แถวเดียว) + ประวัติการเติมวันทั้งหมด (ledger)
+        sub = await session.get(Subscription, user.telegram_id)
+        grants_stmt = (
+            select(SubscriptionGrant)
+            .where(SubscriptionGrant.user_id == user.telegram_id)
+            .order_by(SubscriptionGrant.id.asc())
         )
-        subs = (await session.execute(subs_stmt)).scalars().all()
+        grants = (await session.execute(grants_stmt)).scalars().all()
 
         # 3. ข้อมูล PaymentSlips
         slips_stmt = (
@@ -791,71 +800,31 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
     ref_match = (user.referral_count == total_referred_count)
     ref_match_str = "✅ ตรงกัน 100%" if ref_match else f"⚠️ ไม่ตรง (ในตาราง {total_referred_count} คน, บันทึก {user.referral_count} คน)"
 
-    # --- คำนวณหมวดที่ 2: แพ็กเกจที่ชำระเงิน & Admin มอบให้ ---
+    # --- คำนวณหมวดที่ 2: แพ็กเกจที่ชำระเงิน & Admin มอบให้ (จาก ledger การเติมวันทั้งหมด) ---
     approved_slips = [s for s in slips if s.status == SlipStatus.APPROVED.value or s.status == "APPROVED"]
     total_paid_thb = sum(s.amount or 0 for s in approved_slips)
 
-    admin_grant_days = 0
-    package_bought_days = 0
-    for s in subs:
-        if s.plan_type.startswith("MANUAL_VIP_"):
-            try:
-                admin_grant_days += int(s.plan_type.replace("MANUAL_VIP_", "").replace("D", ""))
-            except Exception:
-                admin_grant_days += 30
-        elif s.plan_type in PLAN_DETAILS:
-            package_bought_days += PLAN_DETAILS[s.plan_type]["days"]
-        elif s.plan_type.startswith("PROMOTION_"):
-            try:
-                package_bought_days += int(s.plan_type.replace("PROMOTION_", "").replace("D", ""))
-            except Exception:
-                package_bought_days += 30
+    admin_grant_days = sum(g.days for g in grants if g.grant_type == GrantType.ADMIN_GRANT.value)
+    package_bought_days = sum(g.days for g in grants if g.grant_type in (GrantType.PURCHASE.value, GrantType.PROMOTION.value))
+    referral_grant_days = sum(g.days for g in grants if g.grant_type == GrantType.REFERRAL_BONUS.value)
 
-    # --- คำนวณหมวดที่ 3: รวมสิทธิ์และเวลาทั้งหมด ---
-    total_entitled_days = earned_ref_bonus_days + package_bought_days + admin_grant_days
+    # --- คำนวณหมวดที่ 3: รวมสิทธิ์และเวลาทั้งหมด (ผลรวมจาก ledger จุดเดียว ไม่แยกแหล่งข้อมูลอีกต่อไป) ---
+    total_entitled_days = sum(g.days for g in grants)
 
-    # คำนวณเวลาที่เคยใช้งานในอดีต (Consumed)
-    past_used_subs = [s for s in subs if s.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value) and s.joined_at and s.expires_at]
-    consumed_days = 0.0
-    for s in past_used_subs:
-        s_dur = (s.expires_at - s.joined_at).total_seconds() / 86400.0
-        consumed_days += max(s_dur, 0.0)
+    # โควต้า PENDING / ACTIVE ปัจจุบัน (จากแถว Subscription แถวเดียว)
+    has_pending = bool(sub and sub.status == SubStatus.PENDING.value and ((sub.pending_days or 0) > 0 or (sub.pending_minutes or 0) > 0))
+    pending_days = sub.pending_days if has_pending else 0
+    pending_minutes = sub.pending_minutes if has_pending else 0
 
-    # คำนวณโควต้า PENDING ปัจจุบัน
-    pending_subs = [s for s in subs if s.status == SubStatus.PENDING.value]
-    pending_days = 0
-    for ps in pending_subs:
-        p_type = ps.plan_type
-        if p_type.startswith("REFERRAL_VIP"):
-            if "_" in p_type and p_type.endswith("D"):
-                try:
-                    pending_days += int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
-                except Exception:
-                    pending_days += 1
-            elif user.referral_bonus_days > 0:
-                pending_days += user.referral_bonus_days
-            else:
-                pending_days += 1
-        elif p_type in PLAN_DETAILS:
-            pending_days += PLAN_DETAILS[p_type]["days"]
-        elif p_type.startswith("PROMOTION_"):
-            try:
-                pending_days += int(p_type.replace("PROMOTION_", "").replace("D", ""))
-            except Exception:
-                pending_days += 30
-        elif p_type.startswith("MANUAL_VIP_"):
-            try:
-                pending_days += int(p_type.replace("MANUAL_VIP_", "").replace("D", ""))
-            except Exception:
-                pending_days += 30
-        elif p_type == PlanType.TRIAL_15M.value:
-            pass
-        else:
-            pending_days += 30
+    current_active_sub = sub if (sub and sub.status == SubStatus.ACTIVE.value and sub.expires_at and ensure_utc(sub.expires_at) > now) else None
 
-    # Active sub ปัจจุบัน
-    active_subs = [s for s in subs if s.status == SubStatus.ACTIVE.value and s.expires_at and s.expires_at > now]
-    current_active_sub = active_subs[0] if active_subs else None
+    # ประมาณเวลาที่ใช้ไปแล้วในอดีต = สิทธิ์ตลอดชีพทั้งหมด - เวลาที่ยังเหลืออยู่ตอนนี้ (ACTIVE + PENDING)
+    remaining_days_now = 0.0
+    if current_active_sub:
+        remaining_days_now = (ensure_utc(current_active_sub.expires_at) - now).total_seconds() / 86400.0
+    elif has_pending:
+        remaining_days_now = pending_days + (pending_minutes / 1440.0)
+    consumed_days = max(total_entitled_days - remaining_days_now, 0.0)
 
     # --- คำนวณหมวดที่ 4: การประเมินผล Audit ---
     verdict_lines = []
@@ -865,7 +834,7 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
         else:
             verdict_lines.append("• ⚠️ <b>สถานะใน Channel:</b> ผิดปกติ! (อยู่ในห้อง VIP แต่ไม่มีสิทธิ์ ACTIVE ในระบบ ❌)")
     else:
-        if pending_subs:
+        if has_pending:
             verdict_lines.append("• 📢 <b>สถานะใน Channel:</b> ปกติ (อยู่นอกห้อง สอดคล้องกับมีโควต้า PENDING รอกดเข้า ✅)")
         elif current_active_sub:
             verdict_lines.append("• ℹ️ <b>สถานะใน Channel:</b> สมาชิกมีสิทธิ์ VIP ACTIVE แต่ยังไม่ได้กดเข้าห้อง")
@@ -877,8 +846,8 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
         rem_str = format_time_remaining(current_active_sub.expires_at)
         verdict_lines.append(f"• ⏳ <b>วันหมดอายุสมาชิกปัจจุบัน:</b> <code>{exp_thai} น.</code> (คงเหลือ {rem_str})")
         verdict_lines.append("• 🎯 <b>ผลการกระทบยอด:</b> ถูกต้อง 100% สอดคล้องกับประวัติสะสม ✅")
-    elif pending_subs:
-        verdict_lines.append(f"• ⏳ <b>โควต้ารอกดเข้าห้อง:</b> รวม <b>{pending_days} วัน ({pending_days * 24} ชม.)</b> จาก {len(pending_subs)} รายการ")
+    elif has_pending:
+        verdict_lines.append(f"• ⏳ <b>โควต้ารอกดเข้าห้อง:</b> รวม <b>{pending_days} วัน ({pending_days * 24} ชม.)</b>" + (f" + {pending_minutes} นาที" if pending_minutes else ""))
         verdict_lines.append("• 🎯 <b>ผลการกระทบยอด:</b> ถูกต้อง 100% เมื่อกดเข้าห้องจะเริ่มนับวันหมดอายุตรงตามยอดนี้ ✅")
     else:
         verdict_lines.append("• ⏳ <b>เวลาคงเหลือ:</b> 0 วัน (หมดอายุการใช้งานแล้ว)")
@@ -896,18 +865,20 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
         "",
         "📊 <b>1. สมุดบัญชีการชวนเพื่อน (Referral Ledger):</b>",
         f"• 👥 สถิติชวนเพื่อนทั้งหมด: <b>{total_referred_count} คน</b>",
-        f"• 🎁 โบนัสสะสมที่ได้รับ: <b>{earned_ref_bonus_days} วัน ({earned_ref_bonus_days * 24} ชั่วโมง)</b>",
+        f"• 🎁 โบนัสสะสมที่ได้รับ (ตัวนับ): <b>{earned_ref_bonus_days} วัน ({earned_ref_bonus_days * 24} ชั่วโมง)</b>",
+        f"• 📒 โบนัสจาก Ledger จริง: <b>{referral_grant_days} วัน</b>"
+        + (" ✅" if referral_grant_days == earned_ref_bonus_days else f" ⚠️ ไม่ตรงกับตัวนับ (ต่าง {abs(referral_grant_days - earned_ref_bonus_days)} วัน)"),
         f"• 📋 ตรวจสอบความตรงกัน: {ref_match_str}",
         "",
         "💳 <b>2. สมุดบัญชีแพ็กเกจ & สิทธิ์ที่ได้รับ:</b>",
         f"• 💳 สลิปชำระเงินที่อนุมัติ: <b>{len(approved_slips)} รายการ</b> (ยอดรวม {total_paid_thb:,.2f} บาท -> {package_bought_days} วัน)",
         f"• 👑 สิทธิ์ที่ Admin มอบให้ (/add_vip): <b>{admin_grant_days} วัน</b>",
-        f"• 📦 รวมรายการ Subscription ทั้งหมด: <b>{len(subs)} รายการ</b>",
+        f"• 📦 จำนวนครั้งที่เติมวันทั้งหมด (Ledger): <b>{len(grants)} รายการ</b>",
         "",
         "📦 <b>3. งบดุลเวลารวมตลอดชีพ (Total Time Ledger):</b>",
         f"➕ <b>รวมสิทธิ์ที่เคยได้รับตลอดชีพ:</b> <b>{total_entitled_days} วัน</b> ({total_entitled_days * 24} ชั่วโมง)",
-        f"➖ <b>เวลาที่ใช้งานแล้วในอดีต (หมดอายุ):</b> ~{consumed_days:.1f} วัน",
-        f"⏳ <b>โควต้ารอกดเข้าห้อง (PENDING):</b> <b>{pending_days} วัน ({pending_days * 24} ชั่วโมง)</b> [{len(pending_subs)} รายการ]",
+        f"➖ <b>เวลาที่ใช้งานแล้วในอดีต (ประมาณ, หมดอายุ):</b> ~{consumed_days:.1f} วัน",
+        f"⏳ <b>โควต้ารอกดเข้าห้อง (PENDING):</b> <b>{pending_days} วัน ({pending_days * 24} ชั่วโมง)</b>" + (f" + {pending_minutes} นาที" if pending_minutes else ""),
     ]
 
     if current_active_sub:
@@ -1098,7 +1069,6 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
     now = datetime.now(timezone.utc)
     is_stack_extension = False
     new_expires_at = None
-    sub_id = None
 
     # ตรวจสอบสถานะจริงใน Channel
     is_in_channel = False
@@ -1123,43 +1093,23 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
             full_name=tg_user.full_name if tg_user else f"User {target_uid}",
         )
 
-        active_stmt = (
-            select(Subscription)
-            .where(
-                Subscription.user_id == target_uid,
-                Subscription.status == SubStatus.ACTIVE.value,
-                Subscription.expires_at > now,
-            )
-            .order_by(Subscription.id.desc())
+        grant = await grant_subscription(
+            session,
+            user_id=target_uid,
+            days=days,
+            source_label=f"VIP {days} วัน (Admin เพิ่ม)",
+            grant_type=GrantType.ADMIN_GRANT.value,
+            has_value=True,
+            is_in_channel=is_in_channel,
         )
-        active_sub = (await session.execute(active_stmt)).scalar_one_or_none()
-
-        if active_sub and is_in_channel and active_sub.plan_type != PlanType.TRIAL_15M.value:
-            current_exp = ensure_utc(active_sub.expires_at)
-            base_time = max(current_exp, now) if current_exp else now
-            new_expires_at = base_time + timedelta(days=days)
-            active_sub.expires_at = new_expires_at
-            active_sub.warned_1d = False
-            session.add(active_sub)
-            sub_id = active_sub.id
-            is_stack_extension = True
-            logger.info(f"Admin add_vip: Extended active sub #{sub_id} for User {target_uid} by +{days} days. New expires_at: {new_expires_at}")
-        else:
-            new_expires_at = now + timedelta(days=days)
-            subscription = Subscription(
-                user_id=target_uid,
-                plan_type=f"MANUAL_VIP_{days}D",
-                joined_at=now if is_in_channel else None,
-                expires_at=new_expires_at if is_in_channel else None,
-                status=SubStatus.ACTIVE.value if is_in_channel else SubStatus.PENDING.value,
-            )
-            session.add(subscription)
-            await session.flush()
-            sub_id = subscription.id
+        is_stack_extension = grant.is_stack_extension
+        new_expires_at = grant.new_expires_at
+        if is_stack_extension:
+            logger.info(f"Admin add_vip: Extended active sub for User {target_uid} by +{days} days. New expires_at: {new_expires_at}")
 
     invite_url = "-"
-    if not (is_stack_extension and is_in_channel):
-        # สร้าง invite link ให้
+    if not is_in_channel:
+        # สร้าง invite link ให้ (ผู้ใช้ยังไม่อยู่ใน Channel ไม่ว่าจะเป็นการต่อเวลาสะสมหรือให้สิทธิ์ใหม่)
         try:
             invite_link_obj = await bot.create_chat_invite_link(
                 chat_id=config.CHANNEL_ID,
@@ -1185,6 +1135,12 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "💡 <i>สามารถรับชมเนื้อหาใน Channel VIP ได้ต่อเนื่องทันทีครับ! 🚀</i>"
             )
+        elif is_in_channel:
+            dm_text = (
+                f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({days} วัน) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
+                f"⏳ <b>หมดอายุวันที่:</b> <code>{exp_thai} น.</code>\n\n"
+                "💡 <i>คุณอยู่ใน Channel VIP อยู่แล้ว ใช้งานได้ทันทีโดยไม่ต้องกดลิงก์ใหม่ครับ!</i>"
+            )
         else:
             dm_text = (
                 f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({days} วัน) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
@@ -1206,15 +1162,20 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
             f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
             f"➕ <b>เพิ่มเวลา:</b> +{days} วัน\n"
             f"⏳ <b>วันหมดอายุใหม่:</b> <code>{exp_thai} น.</code> (คงเหลือ {time_rem})\n"
-            f"🆔 <b>Sub ID:</b> <code>#{sub_id}</code>\n"
-            "ℹ️ <i>ผู้ใช้อยู่ในห้องอยู่แล้ว ระบบต่อเวลาให้โดยไม่ต้องกดเข้าใหม่</i>"
+            "ℹ️ <i>ผู้ใช้มีแพ็กเกจ Active อยู่แล้ว ระบบบวกวันเพิ่มให้ทันทีโดยไม่ต้องกดเข้าใหม่</i>"
+        )
+    elif is_in_channel:
+        resp = (
+            "✅ <b>เพิ่มสิทธิ์ VIP เรียบร้อยแล้ว!</b>\n\n"
+            f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
+            f"📅 <b>ระยะเวลา:</b> {days} วัน (หมดอายุ: <code>{exp_thai} น.</code>)\n"
+            "ℹ️ <i>ผู้ใช้อยู่ใน Channel อยู่แล้ว เปิดใช้งาน ACTIVE ให้ทันที ไม่ต้องออก invite link</i>"
         )
     else:
         resp = (
             "✅ <b>เพิ่มสิทธิ์ VIP เรียบร้อยแล้ว!</b>\n\n"
             f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
             f"📅 <b>ระยะเวลา:</b> {days} วัน (หมดอายุ: <code>{exp_thai} น.</code>)\n"
-            f"🆔 <b>Sub ID:</b> <code>#{sub_id}</code>\n"
             f"🔗 <b>Invite Link:</b> <code>{invite_url}</code>"
         )
     await message.answer(resp, parse_mode="HTML")
@@ -1321,20 +1282,21 @@ async def handle_admin_reset_trial_command(message: Message, bot: Bot):
         session.add(user)
 
         # ปรับสถานะ Subscription trial เดิมเป็น EXPIRED
-        trial_subs = (await session.execute(
-            select(Subscription).where(
-                Subscription.user_id == target_uid,
-                Subscription.plan_type == PlanType.TRIAL_15M.value,
-                Subscription.status.in_([SubStatus.ACTIVE.value, SubStatus.PENDING.value])
-            )
-        )).scalars().all()
-
-        for s in trial_subs:
-            s.status = SubStatus.EXPIRED.value
-            session.add(s)
+        sub = await session.get(Subscription, target_uid)
+        is_trial_sub = bool(sub) and (
+            (sub.status == SubStatus.ACTIVE.value and sub.is_trial_active)
+            or (sub.status == SubStatus.PENDING.value and sub.pending_days == 0 and sub.pending_minutes > 0)
+        )
+        if is_trial_sub:
+            sub.status = SubStatus.EXPIRED.value
+            sub.pending_days = 0
+            sub.pending_minutes = 0
+            sub.pending_has_value = False
+            sub.pending_since = None
+            session.add(sub)
 
     # เตะออกจาก Channel หากกำลังใช้ trial
-    if trial_subs:
+    if is_trial_sub:
         try:
             await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, revoke_messages=False)
             await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, only_if_banned=True)
@@ -1376,40 +1338,7 @@ async def handle_admin_reset_trial_command(message: Message, bot: Bot):
         logger.error(f"Failed to notify user {target_uid} about trial reset: {e}")
 
 
-def get_subscription_quota_and_label(plan_type: str, user: Optional[User] = None) -> tuple[str, str]:
-    """คืนค่า (plan_label, quota_str) สำหรับแสดงผลในรายงานแอดมิน"""
-    if plan_type == PlanType.TRIAL_15M.value:
-        return f"⏱️ ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที", f"{config.TRIAL_DURATION_MINUTES} นาที"
-    elif plan_type.startswith("REFERRAL_VIP"):
-        days = 1
-        if "_" in plan_type and plan_type.endswith("D"):
-            try:
-                days = int(plan_type.replace("REFERRAL_VIP_", "").replace("D", ""))
-            except Exception:
-                days = 1
-        hours = days * 24
-        return f"🎁 VIP โบนัสชวนเพื่อน {days} วัน", f"{days} วัน ({hours} ชั่วโมง)"
-    elif plan_type in PLAN_DETAILS:
-        p_info = get_dynamic_plan_info(plan_type)
-        days = p_info["days"]
-        hours = days * 24
-        return p_info["badge"], f"{days} วัน ({hours} ชั่วโมง)"
-    elif plan_type.startswith("PROMOTION_"):
-        try:
-            days = int(plan_type.replace("PROMOTION_", "").replace("D", ""))
-        except Exception:
-            days = 30
-        hours = days * 24
-        return f"🔥 โปรโมชั่นพิเศษ {days} วัน", f"{days} วัน ({hours} ชั่วโมง)"
-    elif plan_type.startswith("MANUAL_VIP_"):
-        try:
-            days = int(plan_type.replace("MANUAL_VIP_", "").replace("D", ""))
-        except Exception:
-            days = 30
-        hours = days * 24
-        return f"VIP {days} วัน (Admin เพิ่ม)", f"{days} วัน ({hours} ชั่วโมง)"
-    else:
-        return f"สมาชิก {plan_type}", "30 วัน (720 ชั่วโมง)"
+get_subscription_quota_and_label = subscription_status_label
 
 
 @router.message(Command("user", "check_user", "info"))
@@ -1462,14 +1391,18 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
             await message.answer(f"❌ <b>ไม่พบข้อมูลผู้ใช้:</b> <code>{html.escape(query)}</code> ในระบบฐานข้อมูล", parse_mode="HTML")
             return
 
-        # ดึงประวัติ Subscriptions ทั้งหมดของผู้ใช้นี้
-        subs_stmt = (
-            select(Subscription)
-            .where(Subscription.user_id == user.telegram_id)
-            .order_by(Subscription.id.desc())
+        # ดึงสถานะสมาชิกปัจจุบัน (1 แถวเดียว) + ประวัติการเติมวันล่าสุด (ledger)
+        sub = await session.get(Subscription, user.telegram_id)
+        grants_stmt = (
+            select(SubscriptionGrant)
+            .where(SubscriptionGrant.user_id == user.telegram_id)
+            .order_by(SubscriptionGrant.id.desc())
+            .limit(15)
         )
-        subs = (await session.execute(subs_stmt)).scalars().all()
-        
+        grants = (await session.execute(grants_stmt)).scalars().all()
+        total_grants_stmt = select(func.count(SubscriptionGrant.id)).where(SubscriptionGrant.user_id == user.telegram_id)
+        total_grants_count = (await session.execute(total_grants_stmt)).scalar() or 0
+
         # ดึงประวัติ PaymentSlips
         slips_stmt = (
             select(PaymentSlip)
@@ -1510,71 +1443,30 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     except Exception as e:
         channel_status_str = f"ไม่อยู่ใน Channel / ตรวจสอบไม่ได้ ({e})"
 
-    # ประวัติการเข้า Channel ทั้งหมด
-    joined_times = [s.joined_at for s in subs if s.joined_at is not None]
-    if joined_times:
-        earliest_join = min(joined_times)
-        latest_join = max(joined_times)
-        if earliest_join != latest_join:
-            join_str = f"🚪 <b>เข้า Channel ครั้งแรก:</b> <code>{format_thai_datetime(earliest_join)} น.</code>\n🚪 <b>เข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(latest_join)} น.</code>"
-        else:
-            join_str = f"🚪 <b>เวลากดเข้า Channel:</b> <code>{format_thai_datetime(latest_join)} น.</code>"
+    # เวลาเข้า Channel ล่าสุด (ระบบใหม่เก็บสถานะปัจจุบันแถวเดียว ไม่มีประวัติการเข้าทุกครั้งอีกต่อไป)
+    if sub and sub.joined_at:
+        join_str = f"🚪 <b>เวลากดเข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(sub.joined_at)} น.</code>"
     else:
         join_str = "🚪 <b>เวลากดเข้า Channel:</b> <i>ยังไม่เคยกดเข้าห้อง</i>"
 
     ref_by_str = f"<code>{user.referred_by_id}</code>" if user.referred_by_id else "<i>ไม่มี (เข้าเองโดยตรง)</i>"
 
-    # คำนวณโควต้า PENDING สะสมทั้งหมดที่รอกดเข้าห้อง
-    pending_subs = [s for s in subs if s.status == SubStatus.PENDING.value]
-    pending_quota_line = None
-    if pending_subs:
-        total_p_days = 0
-        total_p_minutes = 0
-        for ps in pending_subs:
-            p_type = ps.plan_type
-            if p_type == PlanType.TRIAL_15M.value:
-                total_p_minutes += config.TRIAL_DURATION_MINUTES
-            elif p_type.startswith("REFERRAL_VIP"):
-                if "_" in p_type and p_type.endswith("D"):
-                    try:
-                        total_p_days += int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
-                    except Exception:
-                        total_p_days += 1
-                elif user.referral_bonus_days > 0:
-                    total_p_days += user.referral_bonus_days
-                else:
-                    total_p_days += 1
-            elif p_type in PLAN_DETAILS:
-                total_p_days += PLAN_DETAILS[p_type]["days"]
-            elif p_type.startswith("PROMOTION_"):
-                try:
-                    total_p_days += int(p_type.replace("PROMOTION_", "").replace("D", ""))
-                except Exception:
-                    total_p_days += 30
-            elif p_type.startswith("MANUAL_VIP_"):
-                try:
-                    total_p_days += int(p_type.replace("MANUAL_VIP_", "").replace("D", ""))
-                except Exception:
-                    total_p_days += 30
-            else:
-                total_p_days += 30
-
+    # คำนวณโควต้า PENDING ที่รอกดเข้าห้อง (จากแถว Subscription แถวเดียว)
+    has_pending = bool(sub and sub.status == SubStatus.PENDING.value and ((sub.pending_days or 0) > 0 or (sub.pending_minutes or 0) > 0))
+    summary_str = "0 วัน"
+    if has_pending:
         parts = []
-        if total_p_days > 0:
-            total_hours = total_p_days * 24
-            parts.append(f"<b>{total_p_days} วัน ({total_hours} ชั่วโมง)</b>")
-        if total_p_minutes > 0:
-            parts.append(f"<b>{total_p_minutes} นาที</b>")
+        if sub.pending_days > 0:
+            parts.append(f"<b>{sub.pending_days} วัน ({sub.pending_days * 24} ชั่วโมง)</b>")
+        if sub.pending_minutes > 0:
+            parts.append(f"<b>{sub.pending_minutes} นาที</b>")
         summary_str = " + ".join(parts) if parts else "0 วัน"
 
     user_header = format_user_title(user.full_name, user.username, user.telegram_id)
 
     # คำนวณสรุปยอดสิทธิ์และเวลาคงเหลือปัจจุบัน (ตรงกับ /summary ทุกประการ)
-    active_subs = [
-        s for s in subs 
-        if s.status == SubStatus.ACTIVE.value and s.expires_at and ensure_utc(s.expires_at) > now
-    ]
-    latest_active_sub = max(active_subs, key=lambda s: ensure_utc(s.expires_at)) if active_subs else None
+    now = datetime.now(timezone.utc)
+    latest_active_sub = sub if (sub and sub.status == SubStatus.ACTIVE.value and sub.expires_at and ensure_utc(sub.expires_at) > now) else None
 
     resp = [
         f"👤 <b>ข้อมูลผู้ใช้งาน:</b> {user_header}",
@@ -1589,29 +1481,27 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     ]
 
     if latest_active_sub:
-        plan_title, _ = get_plan_display_name(latest_active_sub.plan_type)
+        plan_title = latest_active_sub.source_label or "สมาชิก VIP"
         start_str = format_thai_datetime(latest_active_sub.joined_at)
         end_str = format_thai_datetime(latest_active_sub.expires_at)
         rem_str = format_remaining_time(latest_active_sub.expires_at)
-        
+
         resp.extend([
             "• 🟢 <b>สถานะสิทธิ์:</b> <b>ACTIVE (กำลังใช้งาน)</b>",
             f"• 🏷️ <b>แพ็กเกจปัจจุบัน:</b> <b>{plan_title}</b>",
             f"• 🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_str} น.</code>",
             f"• 🔴 <b>เวลาหมดอายุ (End):</b> <code>{end_str} น.</code>",
             f"• ⏳ <b>เวลาคงเหลือสุทธิ (Remaining):</b> <b>{rem_str}</b>",
-            f"• 🆔 <b>Active Sub ID:</b> <code>#{latest_active_sub.id}</code>",
         ])
-    elif pending_subs:
+    elif has_pending:
         resp.extend([
             "• 🟡 <b>สถานะสิทธิ์:</b> <b>PENDING (ออกลิงก์แล้ว-รอกดเข้าห้อง)</b>",
-            f"• ⏳ <b>โควต้ารอใช้งานรวม:</b> <b>{summary_str}</b>",
+            f"• ⏳ <b>โควต้ารอใช้งานรวม:</b> <b>{summary_str}</b> ({sub.source_label})",
             "• 💡 <i>(เวลาจะเริ่มนับถอยหลังทันทีที่ผู้ใช้กดลิงก์เข้าห้อง)</i>",
         ])
     else:
-        if subs:
-            last_sub = subs[0]
-            last_exp = format_thai_datetime(last_sub.expires_at) if last_sub.expires_at else "-"
+        if sub:
+            last_exp = format_thai_datetime(sub.expires_at) if sub.expires_at else "-"
             resp.extend([
                 "• ⚪ <b>สถานะสิทธิ์:</b> <b>EXPIRED (หมดอายุการใช้งานแล้ว)</b>",
                 f"• ⏰ <b>หมดอายุไปเมื่อ:</b> <code>{last_exp} น.</code>",
@@ -1623,51 +1513,23 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
                 "• ⏳ <b>เวลาคงเหลือ:</b> <b>0 วัน</b>",
             ])
 
-    if pending_subs and latest_active_sub:
-        resp.append(f"• ➕ <b>มีโควต้ารอกดเข้าสะสมเพิ่ม:</b> {summary_str} <i>(จาก {len(pending_subs)} รายการ)</i>")
-
     resp.extend([
         "\n━━━━━━━━━━━━━━━━━━━━",
-        "📦 <b>ประวัติการขอแพ็กเกจ/สิทธิ์ (Subscriptions):</b>",
+        f"📦 <b>ประวัติการเติมวัน (Ledger) — แสดง {len(grants)}/{total_grants_count} รายการล่าสุด:</b>",
     ])
 
-    if not subs:
-        resp.append("<i>ไม่มีประวัติการขอแพ็กเกจ</i>")
+    if not grants:
+        resp.append("<i>ไม่มีประวัติการเติมวัน</i>")
     else:
-        for i, s in enumerate(subs, 1):
-            plan_label, quota_str = get_subscription_quota_and_label(s.plan_type, user)
-            created_thai = format_thai_datetime(s.created_at)
-
-            if s.joined_at:
-                joined_display = f"<code>{format_thai_datetime(s.joined_at)} น.</code>"
-            else:
-                joined_display = "<i>ยังไม่เคยกดเข้าห้อง</i>"
-
-            if s.expires_at:
-                exp_time_thai = format_thai_datetime(s.expires_at)
-                if s.status == SubStatus.ACTIVE.value and ensure_utc(s.expires_at) > now:
-                    expired_display = f"<code>{exp_time_thai} น.</code> (⏳ คงเหลือ: <b>{format_remaining_time(s.expires_at)}</b>)"
-                else:
-                    expired_display = f"<code>{exp_time_thai} น.</code>"
-            else:
-                expired_display = f"<i>ยังไม่เริ่มนับ (โควต้า: <b>{quota_str}</b> จะเริ่มนับทันทีที่กดเข้าห้อง)</i>"
-
-            status_badge = {
-                SubStatus.ACTIVE.value: "🟢 ACTIVE (กำลังใช้งาน)",
-                SubStatus.PENDING.value: "🟡 PENDING (ออกลิงก์แล้ว-รอกดเข้า)",
-                SubStatus.EXPIRED.value: "⚪ EXPIRED (หมดอายุ)",
-                SubStatus.KICKED.value: "🔴 KICKED (เตะออกจากห้องแล้ว)",
-                SubStatus.KICK_FAILED.value: "⚠️ KICK_FAILED (เตะไม่สำเร็จ)",
-            }.get(s.status, s.status)
-
-            sub_info = (
-                f"\n<b>{i}. [#{s.id}] {plan_label}</b> — {status_badge}\n"
-                f"   • 🎟️ <b>เวลาออกลิงก์/สร้าง:</b> <code>{created_thai} น.</code>\n"
-                f"   • ⏳ <b>โควต้าระยะเวลา:</b> <b>{quota_str}</b>\n"
-                f"   • 🚪 <b>เวลากดเข้า Channel:</b> {joined_display}\n"
-                f"   • ⏰ <b>เวลาหมดอายุ:</b> {expired_display}"
+        for i, g in enumerate(grants, 1):
+            created_thai = format_thai_datetime(g.created_at)
+            amount_str = f"{g.days} วัน" if g.days > 0 else f"{g.minutes} นาที"
+            value_badge = "" if g.has_value else " (ฟรี)"
+            resp.append(
+                f"\n<b>{i}. +{amount_str}</b> — {g.source_label}{value_badge}\n"
+                f"   • 🏷️ <b>ประเภท:</b> {g.grant_type}\n"
+                f"   • 🎟️ <b>เวลาเติม:</b> <code>{created_thai} น.</code>"
             )
-            resp.append(sub_info)
 
     if slips:
         resp.append("\n━━━━━━━━━━━━━━━━━━━━")
@@ -1951,8 +1813,7 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
             await callback.answer("❌ ไม่พบข้อมูลผู้ใช้ในระบบ", show_alert=True)
             return
 
-        subs_stmt = select(Subscription).where(Subscription.user_id == user_id).order_by(Subscription.id.desc())
-        subs = (await session.execute(subs_stmt)).scalars().all()
+        sub = await session.get(Subscription, user_id)
 
         slips_stmt = select(PaymentSlip).where(PaymentSlip.user_id == user_id).order_by(PaymentSlip.id.desc())
         slips = (await session.execute(slips_stmt)).scalars().all()
@@ -1975,14 +1836,8 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
     user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
     full_name_safe = html.escape(user.full_name or "")
     
-    joined_times = [s.joined_at for s in subs if s.joined_at is not None]
-    if joined_times:
-        earliest_join = min(joined_times)
-        latest_join = max(joined_times)
-        if earliest_join != latest_join:
-            join_str = f"🚪 <b>เข้า Channel ครั้งแรก:</b> <code>{format_thai_datetime(earliest_join)} น.</code>\n🚪 <b>เข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(latest_join)} น.</code>"
-        else:
-            join_str = f"🚪 <b>เวลากดเข้า Channel:</b> <code>{format_thai_datetime(latest_join)} น.</code>"
+    if sub and sub.joined_at:
+        join_str = f"🚪 <b>เวลากดเข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(sub.joined_at)} น.</code>"
     else:
         join_str = "🚪 <b>เวลากดเข้า Channel:</b> <i>ยังไม่เคยกดเข้าห้อง</i>"
 
@@ -1994,20 +1849,15 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
         f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
         join_str,
         "\n━━━━━━━━━━━━━━━━━━━━",
-        f"📦 <b>ประวัติการขอแพ็กเกจ ({len(subs)} รายการ):</b>",
+        "📦 <b>สถานะแพ็กเกจปัจจุบัน:</b>",
     ]
 
-    for i, s in enumerate(subs[:3], 1):
-        expired_thai = format_thai_datetime(s.expires_at)
-        if s.plan_type == PlanType.TRIAL_15M.value:
-            plan_label = "ทดลองใช้ 15 นาที"
-        elif s.plan_type in PLAN_DETAILS:
-            plan_label = get_dynamic_plan_info(s.plan_type)["badge"]
-        elif s.plan_type.startswith("MANUAL_VIP_"):
-            plan_label = s.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
-        else:
-            plan_label = s.plan_type
-        resp.append(f"• [#{s.id}] <b>{plan_label}</b> ({s.status}) | หมดอายุ: <code>{expired_thai} น.</code>")
+    if sub:
+        plan_label, quota_str = get_subscription_quota_and_label(sub)
+        expired_thai = format_thai_datetime(sub.expires_at) if sub.expires_at else "ยังไม่เริ่มนับ"
+        resp.append(f"• <b>{plan_label}</b> ({sub.status}) | โควต้า: {quota_str} | หมดอายุ: <code>{expired_thai} น.</code>")
+    else:
+        resp.append("• <i>ยังไม่มีประวัติการขอแพ็กเกจ</i>")
 
     if slips:
         method_badge = "🧧 ซอง TrueMoney" if getattr(slips[0], "payment_method", None) == "TRUEMONEY_ANGPAO" or (slips[0].file_id and str(slips[0].file_id).startswith("http")) else "💳 สแกน QR Code"
@@ -2061,19 +1911,20 @@ async def handle_admin_reset_trial_callback(callback: CallbackQuery, bot: Bot):
         user.trial_used = False
         session.add(user)
 
-        trial_subs = (await session.execute(
-            select(Subscription).where(
-                Subscription.user_id == target_uid,
-                Subscription.plan_type == PlanType.TRIAL_15M.value,
-                Subscription.status.in_([SubStatus.ACTIVE.value, SubStatus.PENDING.value])
-            )
-        )).scalars().all()
+        sub = await session.get(Subscription, target_uid)
+        is_trial_sub = bool(sub) and (
+            (sub.status == SubStatus.ACTIVE.value and sub.is_trial_active)
+            or (sub.status == SubStatus.PENDING.value and sub.pending_days == 0 and sub.pending_minutes > 0)
+        )
+        if is_trial_sub:
+            sub.status = SubStatus.EXPIRED.value
+            sub.pending_days = 0
+            sub.pending_minutes = 0
+            sub.pending_has_value = False
+            sub.pending_since = None
+            session.add(sub)
 
-        for s in trial_subs:
-            s.status = SubStatus.EXPIRED.value
-            session.add(s)
-
-    if trial_subs:
+    if is_trial_sub:
         try:
             await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, revoke_messages=False)
             await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, only_if_banned=True)
@@ -2201,7 +2052,7 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
         # 1. ดึงสถิติจำนวนรวม
         total_users = (await session.execute(select(func.count(User.telegram_id)))).scalar() or 0
         total_active = (await session.execute(
-            select(func.count(Subscription.id)).where(
+            select(func.count(Subscription.user_id)).where(
                 Subscription.status == SubStatus.ACTIVE.value,
                 Subscription.expires_at > now,
             )
@@ -2210,7 +2061,7 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
             select(func.count(User.telegram_id)).where(User.trial_used == True)
         )).scalar() or 0
         total_kick_failed = (await session.execute(
-            select(func.count(Subscription.id)).where(Subscription.status == SubStatus.KICK_FAILED.value)
+            select(func.count(Subscription.user_id)).where(Subscription.status == SubStatus.KICK_FAILED.value)
         )).scalar() or 0
 
         if total_users == 0:
@@ -2223,7 +2074,7 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
         stmt = (
             select(User)
             .options(
-                selectinload(User.subscriptions),
+                selectinload(User.subscription),
                 selectinload(User.payment_slips),
             )
             .order_by(User.created_at.desc())
@@ -2256,23 +2107,16 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
             f"   • สิทธิ์ฟรี: {trial_str} | 📅 <b>เข้าใช้บอทครั้งแรก:</b> <code>{format_thai_datetime(u.created_at)} น.</code>",
         ]
 
-        # ตรวจสอบประวัติการกดเข้า Channel ทั้งหมด
-        joined_times = [s.joined_at for s in u.subscriptions if s.joined_at is not None]
-        if joined_times:
-            earliest_join = min(joined_times)
-            latest_join = max(joined_times)
-            if earliest_join != latest_join:
-                user_block.append(f"   • 🚪 <b>เข้า Channel ครั้งแรก:</b> <code>{format_thai_datetime(earliest_join)} น.</code>")
-                user_block.append(f"   • 🚪 <b>เข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(latest_join)} น.</code>")
-            else:
-                user_block.append(f"   • 🚪 <b>เวลากดเข้า Channel:</b> <code>{format_thai_datetime(latest_join)} น.</code>")
+        # เวลากดเข้า Channel ล่าสุด
+        if u.subscription and u.subscription.joined_at:
+            user_block.append(f"   • 🚪 <b>เวลากดเข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(u.subscription.joined_at)} น.</code>")
         else:
             user_block.append("   • 🚪 <b>เวลากดเข้า Channel:</b> <i>ยังไม่เคยกดเข้าห้อง</i>")
 
-        # Subscription ล่าสุด
-        latest_sub = u.subscriptions[0] if u.subscriptions else None
+        # Subscription ปัจจุบัน
+        latest_sub = u.subscription
         if latest_sub:
-            plan_label, quota_str = get_subscription_quota_and_label(latest_sub.plan_type, u)
+            plan_label, quota_str = get_subscription_quota_and_label(latest_sub)
             status_badge = {
                 SubStatus.ACTIVE.value: "🟢 ACTIVE",
                 SubStatus.PENDING.value: "🟡 PENDING (ออกลิงก์แล้ว-รอกดเข้า)",
@@ -2282,7 +2126,6 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
             }.get(latest_sub.status, latest_sub.status)
 
             user_block.append(f"   • 📦 <b>สถานะล่าสุด:</b> {plan_label} [{status_badge}]")
-            user_block.append(f"   • 🎟️ <b>เวลาออกลิงก์ล่าสุด:</b> <code>{format_thai_datetime(latest_sub.created_at)} น.</code>")
             user_block.append(f"   • ⏳ <b>โควต้าระยะเวลา:</b> <b>{quota_str}</b>")
             if latest_sub.expires_at:
                 user_block.append(f"   • ⏰ <b>เวลาหมดอายุ:</b> <code>{format_thai_datetime(latest_sub.expires_at)} น.</code>")
@@ -2296,7 +2139,7 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
 
         user_block.append("")
         lines.extend(user_block)
-        
+
         # เพิ่มปุ่มจัดการผู้ใช้รายบุคคล (UX improvement)
         btn_name = html.escape(u.full_name or f"User {u.telegram_id}")
         buttons.append([InlineKeyboardButton(text=f"👤 {i}. จัดการ {btn_name}", callback_data=f"admin:view_user:{u.telegram_id}")])
@@ -2375,7 +2218,7 @@ async def build_users_latest_view(limit: int = 10) -> tuple[str, Optional[Inline
         # 1. ดึงสถิติจำนวนรวม
         total_users = (await session.execute(select(func.count(User.telegram_id)))).scalar() or 0
         total_active = (await session.execute(
-            select(func.count(Subscription.id)).where(
+            select(func.count(Subscription.user_id)).where(
                 Subscription.status == SubStatus.ACTIVE.value,
                 Subscription.expires_at > now,
             )
@@ -2391,7 +2234,7 @@ async def build_users_latest_view(limit: int = 10) -> tuple[str, Optional[Inline
         stmt = (
             select(User)
             .options(
-                selectinload(User.subscriptions),
+                selectinload(User.subscription),
                 selectinload(User.payment_slips),
             )
             .order_by(User.created_at.desc())
@@ -2419,23 +2262,16 @@ async def build_users_latest_view(limit: int = 10) -> tuple[str, Optional[Inline
             f"   • สิทธิ์ฟรี: {trial_str} | 📅 <b>เข้าใช้บอทครั้งแรก:</b> <code>{format_thai_datetime(u.created_at)} น.</code>",
         ]
 
-        # ตรวจสอบประวัติการกดเข้า Channel ทั้งหมด
-        joined_times = [s.joined_at for s in u.subscriptions if s.joined_at is not None]
-        if joined_times:
-            earliest_join = min(joined_times)
-            latest_join = max(joined_times)
-            if earliest_join != latest_join:
-                user_block.append(f"   • 🚪 <b>เข้า Channel ครั้งแรก:</b> <code>{format_thai_datetime(earliest_join)} น.</code>")
-                user_block.append(f"   • 🚪 <b>เข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(latest_join)} น.</code>")
-            else:
-                user_block.append(f"   • 🚪 <b>เวลากดเข้า Channel:</b> <code>{format_thai_datetime(latest_join)} น.</code>")
+        # เวลากดเข้า Channel ล่าสุด
+        if u.subscription and u.subscription.joined_at:
+            user_block.append(f"   • 🚪 <b>เวลากดเข้า Channel ล่าสุด:</b> <code>{format_thai_datetime(u.subscription.joined_at)} น.</code>")
         else:
             user_block.append("   • 🚪 <b>เวลากดเข้า Channel:</b> <i>ยังไม่เคยกดเข้าห้อง</i>")
 
-        # Subscription ล่าสุด
-        latest_sub = u.subscriptions[0] if u.subscriptions else None
+        # Subscription ปัจจุบัน
+        latest_sub = u.subscription
         if latest_sub:
-            plan_label, quota_str = get_subscription_quota_and_label(latest_sub.plan_type, u)
+            plan_label, quota_str = get_subscription_quota_and_label(latest_sub)
             status_badge = {
                 SubStatus.ACTIVE.value: "🟢 ACTIVE",
                 SubStatus.PENDING.value: "🟡 PENDING (รอกดเข้า)",
@@ -2445,7 +2281,6 @@ async def build_users_latest_view(limit: int = 10) -> tuple[str, Optional[Inline
             }.get(latest_sub.status, latest_sub.status)
 
             user_block.append(f"   • 📦 <b>สถานะล่าสุด:</b> {plan_label} [{status_badge}]")
-            user_block.append(f"   • 🎟️ <b>ออกลิงก์ล่าสุด:</b> <code>{format_thai_datetime(latest_sub.created_at)} น.</code>")
             user_block.append(f"   • ⏳ <b>โควต้าระยะเวลา:</b> <b>{quota_str}</b>")
             if latest_sub.expires_at:
                 user_block.append(f"   • ⏰ <b>หมดอายุ:</b> <code>{format_thai_datetime(latest_sub.expires_at)} น.</code>")
@@ -2459,8 +2294,9 @@ async def build_users_latest_view(limit: int = 10) -> tuple[str, Optional[Inline
 
         user_block.append("")
         lines.extend(user_block)
-        
-        buttons.append([InlineKeyboardButton(text=f"👤 {i}. จัดการ {full_name_safe}", callback_data=f"admin:view_user:{u.telegram_id}")])
+
+        btn_name = html.escape(u.full_name or f"User {u.telegram_id}")
+        buttons.append([InlineKeyboardButton(text=f"👤 {i}. จัดการ {btn_name}", callback_data=f"admin:view_user:{u.telegram_id}")])
 
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("⚡ <i>แสดงเฉพาะ 10 สมาชิกใหม่ล่าสุดแบบรวดเร็ว | ดูทั้งหมดพร้อมเลื่อนหน้าใช้ /users</i>")
@@ -2535,7 +2371,7 @@ async def build_top_referrals_view(page: int = 1, page_size: int = 10) -> tuple[
         # 2. ดึงผู้ใช้ที่ชวนเพื่อน เรียงจากมากไปน้อย
         stmt = (
             select(User)
-            .options(selectinload(User.subscriptions))
+            .options(selectinload(User.subscription))
             .where(func.coalesce(User.referral_count, 0) > 0)
             .order_by(User.referral_count.desc(), User.referral_bonus_days.desc(), User.created_at.asc())
             .offset(offset)
@@ -2552,41 +2388,17 @@ async def build_top_referrals_view(page: int = 1, page_size: int = 10) -> tuple[
             bonus_days = u.referral_bonus_days or 0
             u_id = u.telegram_id
 
-            # ตรวจสอบสถานะ VIP
-            user_subs = list(u.subscriptions or [])
-            active_subs = [s for s in user_subs if s.status == SubStatus.ACTIVE.value and s.expires_at and ensure_utc(s.expires_at) > now]
-            pending_subs = [s for s in user_subs if s.status == SubStatus.PENDING.value]
+            # ตรวจสอบสถานะ VIP (1 แถวเดียวต่อ user)
+            u_sub = u.subscription
+            is_active = bool(u_sub and u_sub.status == SubStatus.ACTIVE.value and u_sub.expires_at and ensure_utc(u_sub.expires_at) > now)
+            is_pending = bool(u_sub and u_sub.status == SubStatus.PENDING.value and ((u_sub.pending_days or 0) > 0 or (u_sub.pending_minutes or 0) > 0))
 
-            if active_subs:
-                exp_thai = format_thai_datetime(active_subs[0].expires_at)
-                rem_str = format_time_remaining(active_subs[0].expires_at)
+            if is_active:
+                exp_thai = format_thai_datetime(u_sub.expires_at)
+                rem_str = format_time_remaining(u_sub.expires_at)
                 vip_status_str = f"🟢 ACTIVE (หมดอายุ: <code>{exp_thai} น.</code> - เหลือ {rem_str})"
-            elif pending_subs:
-                pending_days = 0
-                for ps in pending_subs:
-                    p_type = ps.plan_type
-                    if p_type.startswith("REFERRAL_VIP"):
-                        if "_" in p_type and p_type.endswith("D"):
-                            try:
-                                pending_days += int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
-                            except Exception:
-                                pending_days += 1
-                        elif bonus_days > 0:
-                            pending_days += bonus_days
-                        else:
-                            pending_days += 1
-                    elif p_type in PLAN_DETAILS:
-                        pending_days += PLAN_DETAILS[p_type]["days"]
-                    elif p_type.startswith("PROMOTION_") or p_type.startswith("MANUAL_VIP_"):
-                        try:
-                            pending_days += int(p_type.replace("PROMOTION_", "").replace("MANUAL_VIP_", "").replace("D", ""))
-                        except Exception:
-                            pending_days += 30
-                    elif p_type == PlanType.TRIAL_15M.value:
-                        pass
-                    else:
-                        pending_days += 30
-                vip_status_str = f"🟡 PENDING (มีโควต้ารอกดเข้าสะสม <b>{pending_days} วัน</b>)"
+            elif is_pending:
+                vip_status_str = f"🟡 PENDING (มีโควต้ารอกดเข้าสะสม <b>{u_sub.pending_days} วัน</b>)"
             else:
                 vip_status_str = "⚪ EXPIRED (ไม่อยู่ในห้อง)"
 
@@ -2779,7 +2591,7 @@ async def handle_broadcast_count_command(message: Message):
     async with get_session() as session:
         total_users = (await session.execute(select(func.count(User.telegram_id)))).scalar() or 0
         active_users = (await session.execute(
-            select(func.count(Subscription.id)).where(
+            select(func.count(Subscription.user_id)).where(
                 Subscription.status == SubStatus.ACTIVE.value,
                 Subscription.expires_at > now,
             )
@@ -3071,8 +2883,6 @@ async def handle_admin_deep_scan_command(message: Message, bot: Bot):
     admin_skip = 0
     scanned_count = 0
 
-    now = datetime.now(timezone.utc)
-
     try:
         async with get_session() as session:
             # ดึง User ID ทั้งหมดที่เคยใช้งานบอท
@@ -3114,8 +2924,7 @@ async def handle_admin_deep_scan_command(message: Message, bot: Bot):
                         kicked_count += 1
                         
                         # อัปเดต Sub ล่าสุดให้เป็น KICKED
-                        sub_stmt = select(Subscription).where(Subscription.user_id == user_id).order_by(Subscription.id.desc())
-                        latest_sub = (await session.execute(sub_stmt)).scalars().first()
+                        latest_sub = await session.get(Subscription, user_id)
                         if latest_sub:
                             latest_sub.status = SubStatus.KICKED.value
                             session.add(latest_sub)

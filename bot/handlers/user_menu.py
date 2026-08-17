@@ -14,10 +14,11 @@ from aiogram.types import (
 from sqlalchemy import select
 
 from bot.config import get_settings
-from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info
+from bot.models.schema import User, Subscription, SubStatus, GrantType
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
 from bot.services.referral import get_referral_link, get_share_url
+from bot.services.subscription import grant_subscription, subscription_status_label
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -241,42 +242,31 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
             return
 
         # ตรวจสอบว่ามีแพ็กเกจที่ยังใช้งานอยู่หรือไม่
-        active_sub_stmt = (
-            select(Subscription)
-            .where(
-                Subscription.user_id == user_id,
-                Subscription.status == SubStatus.ACTIVE.value,
-            )
-            .order_by(Subscription.id.desc())
-        )
-        active_sub = (await session.execute(active_sub_stmt)).scalar_one_or_none()
-        if active_sub:
+        sub = await session.get(Subscription, user_id)
+        now = datetime.now(timezone.utc)
+        if sub and sub.status == SubStatus.ACTIVE.value and sub.expires_at and sub.expires_at > now:
             await callback.answer(
                 "ℹ️ คุณมีแพ็กเกจสมาชิกที่กำลังใช้งานอยู่แล้ว!",
                 show_alert=True,
             )
             return
 
-        # ตรวจสอบว่ามีรายการ PENDING trial เดิมอยู่หรือไม่
-        pending_sub_stmt = (
-            select(Subscription)
-            .where(
-                Subscription.user_id == user_id,
-                Subscription.plan_type == PlanType.TRIAL_15M.value,
-                Subscription.status == SubStatus.PENDING.value,
-            )
-            .order_by(Subscription.id.desc())
+        # ถ้ามีโควต้าทดลองที่รออยู่แล้ว (pending) ไม่ต้องเติมซ้ำ แค่ออกลิงก์เชิญใหม่ให้
+        already_has_pending_trial = bool(
+            sub and sub.status == SubStatus.PENDING.value and sub.pending_days == 0 and sub.pending_minutes > 0
         )
-        pending_sub = (await session.execute(pending_sub_stmt)).scalar_one_or_none()
-
-        if not pending_sub:
-            pending_sub = Subscription(
+        if not already_has_pending_trial:
+            await grant_subscription(
+                session,
                 user_id=user_id,
-                plan_type=PlanType.TRIAL_15M.value,
-                status=SubStatus.PENDING.value,
+                days=0,
+                minutes=config.TRIAL_DURATION_MINUTES,
+                source_label=f"⏱️ ทดลองใช้งานฟรี {config.TRIAL_DURATION_MINUTES} นาที",
+                grant_type=GrantType.TRIAL.value,
+                has_value=False,
+                is_trial=True,
+                is_in_channel=False,
             )
-            session.add(pending_sub)
-            await session.flush()
 
     # สร้างลิงก์เชิญแบบใช้งานได้ 1 ครั้งสำหรับ Channel ส่วนตัว (หมดอายุภายใน 48 ชม. หากไม่กดเข้า)
     try:
@@ -414,33 +404,20 @@ async def handle_my_status(callback: CallbackQuery, state: FSMContext):
             full_name=callback.from_user.full_name or callback.from_user.first_name,
         )
 
-        stmt = (
-            select(Subscription)
-            .where(Subscription.user_id == user_id)
-            .order_by(Subscription.id.desc())
-        )
-        sub = (await session.execute(stmt)).scalars().first()
+        sub = await session.get(Subscription, user_id)
 
     status_text = f"📊 <b>สถานะการเป็นสมาชิกของคุณ</b>\n\n"
     status_text += f"👤 <b>Telegram ID:</b> <code>{user_id}</code>\n"
     status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n"
     status_text += f"🎁 <b>โบนัสชวนเพื่อน:</b> ชวนสำเร็จ {user.referral_count or 0} คน (รับโบนัสสะสม {user.referral_bonus_days or 0} วัน)\n\n"
 
+    plan_label, quota_str = subscription_status_label(sub)
+
     if not sub:
         status_text += "🔴 <b>สถานะ:</b> ไม่มีแพ็กเกจที่ใช้งานอยู่\n"
         status_text += "คุณสามารถเริ่มทดลองใช้ฟรี หรือสมัครสมาชิกได้จากเมนูด้านล่างครับ"
     elif sub.status == SubStatus.ACTIVE.value:
         status_text += "🟢 <b>สถานะ:</b> กำลังใช้งาน (ACTIVE)\n"
-        if sub.plan_type == PlanType.TRIAL_15M.value:
-            plan_label = f"⏱️ ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที"
-        elif sub.plan_type in PLAN_DETAILS:
-            plan_label = get_dynamic_plan_info(sub.plan_type)["badge"]
-        elif sub.plan_type.startswith("PROMOTION_"):
-            plan_label = sub.plan_type.replace("PROMOTION_", "🔥 โปรโมชั่นพิเศษ ").replace("D", " วัน")
-        elif sub.plan_type.startswith("MANUAL_VIP_"):
-            plan_label = sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
-        else:
-            plan_label = sub.plan_type
         status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"
         if sub.joined_at:
             status_text += f"📅 <b>เริ่มเข้าใช้งาน:</b> <code>{format_thai_datetime(sub.joined_at)} น.</code>\n"
@@ -449,22 +426,10 @@ async def handle_my_status(callback: CallbackQuery, state: FSMContext):
             status_text += f"⏰ <b>เวลาคงเหลือ:</b> {format_time_remaining(sub.expires_at)}\n"
     elif sub.status == SubStatus.PENDING.value:
         status_text += "🟡 <b>สถานะ:</b> รอกดเข้าร่วม Channel\n"
-        if sub.plan_type == PlanType.TRIAL_15M.value:
-            plan_label = "⏱️ ทดลองใช้ฟรี"
-        elif sub.plan_type in PLAN_DETAILS:
-            plan_label = get_dynamic_plan_info(sub.plan_type)["badge"]
-        else:
-            plan_label = sub.plan_type
-        status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"
+        status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label} ({quota_str})\n"
         status_text += "ระบบได้สร้างลิงก์เชิญให้คุณแล้ว เวลาจะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel ครับ"
     elif sub.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value, SubStatus.KICK_FAILED.value):
         status_text += "🔴 <b>สถานะ:</b> หมดอายุแล้ว (EXPIRED)\n"
-        if sub.plan_type == PlanType.TRIAL_15M.value:
-            plan_label = "⏱️ ทดลองใช้ฟรี"
-        elif sub.plan_type in PLAN_DETAILS:
-            plan_label = get_dynamic_plan_info(sub.plan_type)["badge"]
-        else:
-            plan_label = sub.plan_type
         status_text += f"📦 <b>แพ็กเกจล่าสุด:</b> {plan_label}\n"
         if sub.expires_at:
             status_text += f"📅 <b>หมดอายุเมื่อ:</b> <code>{format_thai_datetime(sub.expires_at)} น.</code>\n"
@@ -532,38 +497,27 @@ async def handle_status_command(message: Message, state: FSMContext):
             username=message.from_user.username,
             full_name=message.from_user.full_name or message.from_user.first_name,
         )
-        stmt = (
-            select(Subscription)
-            .where(Subscription.user_id == user_id)
-            .order_by(Subscription.id.desc())
-        )
-        sub = (await session.execute(stmt)).scalars().first()
+        sub = await session.get(Subscription, user_id)
 
     status_text = f"📊 <b>สถานะการเป็นสมาชิกของคุณ</b>\n\n"
     status_text += f"👤 <b>Telegram ID:</b> <code>{user_id}</code>\n"
     status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n"
     status_text += f"🎁 <b>โบนัสชวนเพื่อน:</b> ชวนสำเร็จ {user.referral_count or 0} คน (รับโบนัสสะสม {user.referral_bonus_days or 0} วัน)\n\n"
 
+    plan_label, quota_str = subscription_status_label(sub)
+
     if not sub or sub.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value, SubStatus.KICK_FAILED.value):
         status_text += "🔴 <b>สถานะ:</b> ไม่มีแพ็กเกจที่ใช้งานอยู่\n"
         status_text += "พิมพ์ /start เพื่อทดลองใช้ฟรี หรือสมัครสมาชิก VIP"
     elif sub.status == SubStatus.ACTIVE.value:
         status_text += "🟢 <b>สถานะ:</b> กำลังใช้งาน (ACTIVE)\n"
-        if sub.plan_type == PlanType.TRIAL_15M.value:
-            plan_label = f"ทดลองใช้ฟรี {config.TRIAL_DURATION_MINUTES} นาที"
-        elif sub.plan_type in PLAN_DETAILS:
-            plan_label = get_dynamic_plan_info(sub.plan_type)["badge"]
-        elif sub.plan_type.startswith("MANUAL_VIP_"):
-            plan_label = sub.plan_type.replace("MANUAL_VIP_", "VIP ").replace("D", " วัน")
-        else:
-            plan_label = sub.plan_type
-
         status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"
         if sub.expires_at:
             status_text += f"⏳ <b>หมดอายุวันที่:</b> <code>{format_thai_datetime(sub.expires_at)} น.</code>\n"
             status_text += f"⏰ <b>เวลาคงเหลือ:</b> {format_time_remaining(sub.expires_at)}\n"
     elif sub.status == SubStatus.PENDING.value:
         status_text += "🟡 <b>สถานะ:</b> รอกดเข้าร่วม Channel (รอคุณใช้ลิงก์เชิญ)\n"
+        status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label} ({quota_str})\n"
 
     await message.answer(
         text=status_text,

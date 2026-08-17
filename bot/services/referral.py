@@ -7,9 +7,10 @@ from aiogram import Bot
 from sqlalchemy import select
 
 from bot.config import get_settings
-from bot.models.schema import User, Subscription, SubStatus, PlanType
+from bot.models.schema import GrantType, User
 from bot.services.database import get_session
 from bot.services.chat_logger import log_chat_message
+from bot.services.subscription import grant_subscription
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -44,10 +45,7 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
     friend_name = html.escape(friend_user.full_name or f"User {friend_user.telegram_id}")
     friend_handle = f"@{friend_user.username}" if friend_user.username else f"ID: {friend_user.telegram_id}"
 
-    sub_extended = False
-    new_sub_created = False
     invite_url = None
-    new_expires_at = None
 
     async with get_session() as session:
         # 1. ค้นหาผู้แนะนำ
@@ -64,63 +62,21 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
         referrer.referral_bonus_days += 1
         session.add(referrer)
 
-        # 3. ตรวจสอบ Subscription ปัจจุบันของผู้แนะนำ (เช็ค Active ก่อน)
-        active_sub_stmt = (
-            select(Subscription)
-            .where(
-                Subscription.user_id == referrer_id,
-                Subscription.status == SubStatus.ACTIVE.value,
-                Subscription.expires_at > now,
-            )
-            .order_by(Subscription.id.desc())
+        # 3. เติมวัน +1 วัน (24 ชม.) ให้ผู้แนะนำ -- บวกทันทีถ้ามี ACTIVE อยู่แล้ว มิเช่นนั้นสะสมเข้า pending
+        grant = await grant_subscription(
+            session,
+            user_id=referrer_id,
+            days=1,
+            source_label="🎁 VIP โบนัสชวนเพื่อน",
+            grant_type=GrantType.REFERRAL_BONUS.value,
+            has_value=False,
+            is_in_channel=False,
         )
-        active_sub = (await session.execute(active_sub_stmt)).scalar_one_or_none()
 
-        if active_sub:
-            # ซ้อนทับและขยายเวลาเพิ่มอีก 1 วัน (24 ชั่วโมง) จากเวลาหมดอายุเดิม!
-            active_sub.expires_at = active_sub.expires_at + timedelta(days=1)
-            active_sub.warned_1d = False
-            session.add(active_sub)
-            sub_extended = True
-            new_expires_at = active_sub.expires_at
-            logger.info(
-                f"Referral bonus: Extended active sub #{active_sub.id} for User {referrer_id} by +1 day. "
-                f"New expires_at: {new_expires_at}"
-            )
-        else:
-            # เช็คว่ามี Pending Referral Sub อยู่แล้วหรือไม่
-            pending_sub_stmt = (
-                select(Subscription)
-                .where(
-                    Subscription.user_id == referrer_id,
-                    Subscription.status == SubStatus.PENDING.value,
-                )
-                .order_by(Subscription.id.desc())
-            )
-            pending_sub = (await session.execute(pending_sub_stmt)).scalar_one_or_none()
-
-            if pending_sub and pending_sub.plan_type.startswith("REFERRAL_VIP"):
-                # มี PENDING อยู่แล้ว -> เพิ่มสะสมวันใน PENDING
-                current_days = 1
-                if "_" in pending_sub.plan_type and pending_sub.plan_type.endswith("D"):
-                    try:
-                        current_days = int(pending_sub.plan_type.replace("REFERRAL_VIP_", "").replace("D", ""))
-                    except Exception:
-                        current_days = 1
-                new_pending_days = current_days + 1
-                pending_sub.plan_type = f"REFERRAL_VIP_{new_pending_days}D"
-                session.add(pending_sub)
-                bonus_total_days = new_pending_days
-            else:
-                # ยังไม่มี -> สร้าง PENDING ใหม่
-                new_sub = Subscription(
-                    user_id=referrer_id,
-                    plan_type="REFERRAL_VIP_1D",
-                    status=SubStatus.PENDING.value,
-                )
-                session.add(new_sub)
-                new_sub_created = True
-                bonus_total_days = 1
+    sub_extended = grant.is_stack_extension
+    new_expires_at = grant.new_expires_at
+    if sub_extended:
+        logger.info(f"Referral bonus: Extended active sub for User {referrer_id} by +1 day. New expires_at: {new_expires_at}")
 
     # 4. หากไม่มี Active Sub -> สร้าง Invite Link ส่งให้ผู้แนะนำ
     if not sub_extended:
@@ -151,7 +107,7 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
                 "💡 <i>ระบบสะสมและขยายเวลาให้โดยอัตโนมัติ ชวนเพื่อนเพิ่มเพื่อรับวันใช้งานฟรีต่อเนื่องได้เลยครับ!</i>"
             )
         else:
-            bonus_total_days = referrer.referral_bonus_days or 1
+            bonus_total_days = grant.subscription.pending_days or referrer.referral_bonus_days or 1
             link_info = f"\n🔗 <b>ลิงก์เข้า Channel VIP ของคุณ:</b>\n{invite_url}\n\n⏱️ <i>เวลานับถอยหลัง {bonus_total_days} วัน จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</i>" if invite_url else ""
             dm_text = (
                 "🎉 <b>ยินดีด้วย! เพื่อนที่คุณแนะนำได้เข้าร่วมทดลองใช้งานแล้ว</b>\n"

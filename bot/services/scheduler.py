@@ -12,9 +12,10 @@ from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
 
 from bot.config import get_settings
-from bot.models.schema import User, Subscription, SubStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info
+from bot.models.schema import Subscription, SubStatus
 from bot.services.database import get_session
 from bot.services.referral import award_referral_bonus
+from bot.services.subscription import PENDING_STALE_HOURS, activate_pending_subscription, is_pending_stale
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -28,15 +29,15 @@ def format_remaining_time(expires_at: Optional[datetime]) -> str:
     now = datetime.now(timezone.utc)
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
-        
+
     diff = expires_at - now
     if diff.total_seconds() <= 0:
         return "หมดอายุแล้ว"
-    
+
     days = diff.days
     hours, remainder = divmod(diff.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
-    
+
     parts = []
     if days > 0:
         parts.append(f"{days} วัน")
@@ -46,33 +47,27 @@ def format_remaining_time(expires_at: Optional[datetime]) -> str:
         parts.append(f"{minutes} นาที")
     if days == 0 and hours == 0 and minutes < 5:
         parts.append(f"{seconds} วินาที")
-    
+
     return " ".join(parts)
 
 
-def get_plan_display_name(plan_type: str) -> tuple[str, str]:
-    """คืนค่า (plan_title, duration_str) สำหรับแสดงผล"""
-    if plan_type == PlanType.TRIAL_15M.value:
-        return f"ทดลองใช้งานฟรี {config.TRIAL_DURATION_MINUTES} นาที", f"{config.TRIAL_DURATION_MINUTES} นาที"
-    elif plan_type == PlanType.REFERRAL_VIP.value:
-        return "สมาชิก 🎁 VIP โบนัสชวนเพื่อน", "1 วัน"
-    elif plan_type in PLAN_DETAILS:
-        p_info = get_dynamic_plan_info(plan_type)
-        return f"สมาชิก {p_info['badge']}", f"{p_info['days']} วัน"
-    elif plan_type.startswith("PROMOTION_"):
-        try:
-            days = int(plan_type.replace("PROMOTION_", "").replace("D", ""))
-        except Exception:
-            days = 30
-        return f"สมาชิก 🔥 โปรโมชั่นพิเศษ {days} วัน", f"{days} วัน"
-    elif plan_type.startswith("MANUAL_VIP_"):
-        try:
-            days = int(plan_type.replace("MANUAL_VIP_", "").replace("D", ""))
-        except Exception:
-            days = 30
-        return f"สมาชิก VIP {days} วัน", f"{days} วัน"
-    else:
-        return f"สมาชิก {plan_type}", "30 วัน"
+async def _send_stale_pending_alert(bot: Bot, sub: Subscription) -> None:
+    try:
+        await bot.send_message(
+            chat_id=config.ADMIN_GROUP_ID,
+            text=(
+                "⚠️ <b>[แจ้งเตือน] มีโควต้าที่มีมูลค่าค้างอยู่ แต่ผู้ใช้ยังไม่กดเข้า Channel เกิน "
+                f"{PENDING_STALE_HOURS} ชม.!</b>\n\n"
+                f"👤 <b>User ID:</b> <code>{sub.user_id}</code>\n"
+                f"📦 <b>โควต้าค้าง:</b> {sub.pending_days} วัน {sub.pending_minutes} นาที ({sub.source_label})\n"
+                f"📅 <b>เริ่มรอตั้งแต่:</b> <code>{format_thai_datetime(sub.pending_since)} น.</code>\n\n"
+                "ระบบจะ<b>ไม่</b>ยกเลิกโควต้านี้ให้อัตโนมัติเพราะเป็นแพ็กเกจที่มีมูลค่า "
+                "กรุณาตรวจสอบว่าผู้ใช้กดลิงก์เชิญเข้า Channel แล้วหรือยัง หรือบอทมีสิทธิ์ตรวจสอบสมาชิกในห้องหรือไม่"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.error(f"[SYNC] Failed to send stale-pending alert to Admin Group: {e}")
 
 
 async def sync_pending_members(bot: Bot) -> dict:
@@ -80,7 +75,9 @@ async def sync_pending_members(bot: Bot) -> dict:
     ตรวจสอบและซิงค์ผู้ใช้ที่มีสถานะ PENDING ในฐานข้อมูล:
     - หากผู้ใช้เข้าไปอยู่ใน Channel แล้ว -> เปิดใช้งาน ACTIVE ให้ทันที
     - หากหมดอายุแล้วขณะบอทออฟไลน์ -> สั่ง Soft-Kick ทันที
-    - หากค้าง PENDING เกิน 24 ชม. และไม่ได้เข้า Channel -> ปรับเป็น EXPIRED
+    - หากค้าง PENDING เกิน PENDING_STALE_HOURS และไม่ได้เข้า Channel:
+        - โควต้าฟรี (Trial/Referral) -> ปรับเป็น EXPIRED อัตโนมัติ
+        - โควต้าที่มีมูลค่า (ซื้อ/แอดมินให้) -> แจ้งเตือนแอดมินแทน ไม่ auto-expire
     """
     now = datetime.now(timezone.utc)
     results = {"activated": 0, "kicked_expired": 0, "stale_cleaned": 0}
@@ -98,14 +95,9 @@ async def sync_pending_members(bot: Bot) -> dict:
 
         logger.info(f"Syncing {len(pending_subs)} PENDING subscription(s)...")
 
-        # จัดกลุ่ม PENDING ตาม user_id
-        user_pending_map = {}
         for sub in pending_subs:
-            user_pending_map.setdefault(sub.user_id, []).append(sub)
-
-        for user_id, u_subs in user_pending_map.items():
-            primary_sub = u_subs[0]
-            user_obj = primary_sub.user
+            user_id = sub.user_id
+            user_obj = sub.user
 
             try:
                 chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id)
@@ -126,216 +118,120 @@ async def sync_pending_members(bot: Bot) -> dict:
                 logger.debug(f"Could not check member status for User {user_id}: {e}")
                 in_channel = False
 
-            if in_channel:
-                # ผู้ใช้อยู่ใน Channel แล้ว -> รวมโควต้า PENDING ทั้งหมดของผู้ใช้นี้
-                referred_by_to_award = None
-                friend_snapshot = None
-                total_days = 0
-                total_minutes = 0
-                primary_plan_badge = None
-                valid_subs = []
-
-                for sub in u_subs:
-                    # ตรวจสอบว่าเคยใช้ Trial ไปแล้วหรือไม่
-                    if sub.plan_type == PlanType.TRIAL_15M.value and user_obj and user_obj.trial_used:
-                        sub.status = SubStatus.EXPIRED.value
-                        session.add(sub)
-                        continue
-
-                    valid_subs.append(sub)
-                    p_type = sub.plan_type
-                    if p_type == PlanType.TRIAL_15M.value:
-                        total_minutes += config.TRIAL_DURATION_MINUTES
-                        if user_obj:
-                            if not user_obj.trial_used and user_obj.referred_by_id:
-                                referred_by_to_award = user_obj.referred_by_id
-                                friend_snapshot = user_obj
-                            user_obj.trial_used = True
-                            session.add(user_obj)
-                        if not primary_plan_badge:
-                            primary_plan_badge = f"ทดลองใช้งานฟรี {config.TRIAL_DURATION_MINUTES} นาที"
-                    elif p_type.startswith("REFERRAL_VIP"):
-                        bonus_days = 1
-                        if "_" in p_type and p_type.endswith("D"):
-                            try:
-                                bonus_days = int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
-                            except Exception:
-                                bonus_days = 1
-                        total_days += bonus_days
-                        if not primary_plan_badge:
-                            primary_plan_badge = f"สมาชิก 🎁 VIP โบนัสชวนเพื่อน ({bonus_days} วัน)"
-                    elif p_type in PLAN_DETAILS:
-                        p_info = get_dynamic_plan_info(p_type)
-                        total_days += p_info["days"]
-                        if not primary_plan_badge:
-                            primary_plan_badge = f"สมาชิก {p_info['badge']}"
-                    elif p_type.startswith("PROMOTION_"):
-                        try:
-                            days = int(p_type.replace("PROMOTION_", "").replace("D", ""))
-                        except Exception:
-                            days = 30
-                        total_days += days
-                        if not primary_plan_badge:
-                            primary_plan_badge = f"สมาชิก 🔥 โปรโมชั่นพิเศษ {days} วัน"
-                    elif p_type.startswith("MANUAL_VIP_"):
-                        try:
-                            days = int(p_type.replace("MANUAL_VIP_", "").replace("D", ""))
-                        except Exception:
-                            days = 30
-                        total_days += days
-                        if not primary_plan_badge:
-                            primary_plan_badge = f"สมาชิก VIP {days} วัน"
-                    else:
-                        total_days += 30
-                        if not primary_plan_badge:
-                            primary_plan_badge = f"สมาชิก {p_type}"
-
-                if not valid_subs:
+            if not in_channel:
+                if not is_pending_stale(sub, now):
                     continue
 
-                # 1. ตรวจสอบว่าผู้ใช้มี Subscription ที่ ACTIVE อยู่แล้วหรือไม่
-                active_stmt = (
-                    select(Subscription)
-                    .where(
-                        Subscription.user_id == user_id,
-                        Subscription.status == SubStatus.ACTIVE.value,
-                        Subscription.expires_at > now,
+                if not sub.pending_has_value:
+                    # Trial/Referral เป็นสิทธิ์ฟรี ไม่มีมูลค่าเงิน ปล่อยหมดอายุอัตโนมัติได้อย่างปลอดภัย
+                    sub.status = SubStatus.EXPIRED.value
+                    sub.pending_days = 0
+                    sub.pending_minutes = 0
+                    sub.pending_has_value = False
+                    sub.pending_since = None
+                    session.add(sub)
+                    results["stale_cleaned"] += 1
+                    logger.info(f"[SYNC] Cleaned up stale free-grant PENDING for User {user_id}")
+                elif not sub.stale_alerted:
+                    # แพ็กเกจนี้มีมูลค่า ห้าม auto-expire เงียบๆ เพราะลูกค้าอาจเสียสิทธิ์ที่จ่ายเงินไปโดยไม่มีใครรู้
+                    sub.stale_alerted = True
+                    session.add(sub)
+                    logger.warning(
+                        f"[SYNC] PENDING for User {user_id} is stale (>{PENDING_STALE_HOURS}h) but has value. "
+                        f"NOT auto-expired -- alerting admin instead."
                     )
-                    .order_by(Subscription.id.desc())
-                )
-                existing_active = (await session.execute(active_stmt)).scalar_one_or_none()
+                    await _send_stale_pending_alert(bot, sub)
+                continue
 
-                if existing_active and existing_active.plan_type != PlanType.TRIAL_15M.value:
-                    base_time = max(ensure_utc(existing_active.expires_at), now)
-                    existing_active.status = SubStatus.EXPIRED.value
-                    session.add(existing_active)
-                    is_stack_extension = True
-                else:
-                    if existing_active:
-                        existing_active.status = SubStatus.EXPIRED.value
-                        session.add(existing_active)
-                    base_time = now
-                    is_stack_extension = False
+            # ผู้ใช้อยู่ใน Channel แล้ว -> เปิดใช้งานโควต้าที่สะสมไว้ทันที
+            trial_already_used_before = bool(user_obj.trial_used) if user_obj else True
+            grant = await activate_pending_subscription(session, user_id=user_id)
+            if not grant:
+                continue
 
-                final_expires_at = base_time + timedelta(days=total_days, minutes=total_minutes)
-                joined_time = now
+            plan_title = grant.subscription.source_label or "สมาชิก VIP"
+            duration_str = f"{grant.granted_days} วัน" if grant.granted_days > 0 else f"{grant.granted_minutes} นาที"
+            joined_time = now
+            final_expires_at = grant.new_expires_at
 
-                for sub in valid_subs:
-                    sub.joined_at = joined_time
+            if final_expires_at <= now:
+                # กรณี edge-case: โควต้าที่ได้เท่ากับ 0 พอดี -> เตะออกทันที
+                try:
+                    await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, revoke_messages=False)
+                    await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, only_if_banned=True)
+                    grant.subscription.status = SubStatus.KICKED.value
+                    session.add(grant.subscription)
+                    results["kicked_expired"] += 1
+                    logger.info(f"[SYNC] User {user_id} was PENDING but already expired in channel. Kicked successfully.")
 
-                if len(valid_subs) > 1 or is_stack_extension:
-                    duration_str = f"{total_days} วัน (ต่อเวลาสะสมรวม {len(valid_subs)} รายการ)" if is_stack_extension else f"{total_days} วัน (รวม {len(valid_subs)} แพ็กเกจ)"
-                    plan_title = f"สมาชิก VIP รวมสะสม {total_days} วัน"
-                else:
-                    duration_str = f"{total_days} วัน" if total_days > 0 else f"{total_minutes} นาที"
-                    plan_title = primary_plan_badge or f"สมาชิก VIP ({duration_str})"
-
-                if final_expires_at <= now:
-                    # หมดอายุแล้ว -> เตะออกทันที
-                    try:
-                        await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, revoke_messages=False)
-                        await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, only_if_banned=True)
-                        for s in valid_subs:
-                            s.status = SubStatus.KICKED.value
-                            s.expires_at = final_expires_at
-                            session.add(s)
-                        results["kicked_expired"] += 1
-                        logger.info(f"[SYNC] User {user_id} was PENDING but already expired in channel. Kicked successfully.")
-
-                        # ส่งแจ้งเตือนเข้ากลุ่ม Admin
-                        start_time_thai = format_thai_datetime(joined_time)
-                        expires_at_thai = format_thai_datetime(final_expires_at)
-                        user_handle_sync = f"@{user_obj.username}" if (user_obj and user_obj.username) else "ไม่มี Username"
-                        full_name_sync = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
-                        admin_kick_msg = (
-                            "🚪 <b>สมาชิกหมดอายุและถูกเตะออกจาก Channel แล้ว!</b>\n\n"
-                            f"👤 <b>ผู้ใช้งาน:</b> {full_name_sync} ({user_handle_sync})\n"
-                            f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
-                            f"📦 <b>แพ็กเกจ:</b> <b>{plan_title}</b> ({duration_str})\n"
-                            f"🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_time_thai} น.</code>\n"
-                            f"🔴 <b>เวลาหมดอายุ (End):</b> <code>{expires_at_thai} น.</code>\n"
-                            f"🆔 <b>Subscription ID:</b> <code>#{primary_sub.id}</code>\n"
-                            "━━━━━━━━━━━━━━━━━━━━\n"
-                            "ℹ️ <i>ตรวจพบสมาชิกหมดอายุในห้องและนำออกจาก Channel เรียบร้อย</i>"
-                        )
-                        try:
-                            await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_kick_msg, parse_mode="HTML")
-                        except Exception:
-                            pass
-                    except Exception as e:
-                        for s in valid_subs:
-                            s.status = SubStatus.KICK_FAILED.value
-                            session.add(s)
-                        logger.warning(f"[SYNC] Failed to kick expired user {user_id}: {e}")
-                else:
-                    # ยังไม่หมดอายุ -> เปิดใช้งาน ACTIVE
-                    primary_sub.status = SubStatus.ACTIVE.value
-                    primary_sub.expires_at = final_expires_at
-                    primary_sub.warned_1d = False
-                    session.add(primary_sub)
-
-                    for s in valid_subs[1:]:
-                        s.status = SubStatus.EXPIRED.value
-                        s.expires_at = final_expires_at
-                        session.add(s)
-
-                    results["activated"] += 1
-                    sub_id = primary_sub.id
-                    logger.info(f"[SYNC] Activated PENDING sub #{sub_id} for User {user_id}. Expires at {final_expires_at}")
-
-                    # ส่ง DM ต้อนรับหาผู้ใช้
                     start_time_thai = format_thai_datetime(joined_time)
                     expires_at_thai = format_thai_datetime(final_expires_at)
-                    try:
-                        welcome_dm = (
-                            f"🎉 <b>ยินดีต้อนรับเข้าสู่ VIP Channel!</b>\n\n"
-                            f"แพ็กเกจ <b>{plan_title}</b> ของคุณเปิดใช้งานเรียบร้อยแล้ว 🚀\n\n"
-                            f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
-                            f"⏰ <b>เวลาเริ่มต้น:</b> <code>{start_time_thai} น.</code>\n"
-                            f"📅 <b>หมดอายุวันที่:</b> <code>{expires_at_thai} น.</code>\n\n"
-                            f"ขอให้เพลิดเพลินกับเนื้อหาพิเศษของเราครับ!"
-                        )
-                        await bot.send_message(chat_id=user_id, text=welcome_dm, parse_mode="HTML")
-                    except Exception as e:
-                        logger.debug(f"[SYNC] Could not send welcome DM to User {user_id}: {e}")
-
-                    # ส่งแจ้งเตือนเข้ากลุ่ม Admin
-                    user_handle = f"@{user_obj.username}" if (user_obj and user_obj.username) else "ไม่มี Username"
-                    full_name_safe = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
-                    admin_log_msg = (
-                        "🚪 <b>มีสมาชิกกดเข้าร่วม Channel แล้ว!</b>\n\n"
-                        f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
+                    user_handle_sync = f"@{user_obj.username}" if (user_obj and user_obj.username) else "ไม่มี Username"
+                    full_name_sync = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
+                    admin_kick_msg = (
+                        "🚪 <b>สมาชิกหมดอายุและถูกเตะออกจาก Channel แล้ว!</b>\n\n"
+                        f"👤 <b>ผู้ใช้งาน:</b> {full_name_sync} ({user_handle_sync})\n"
                         f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
-                        f"📦 <b>แผนที่ใช้งาน:</b> <b>{plan_title}</b>\n"
-                        f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
+                        f"📦 <b>แพ็กเกจ:</b> <b>{plan_title}</b> ({duration_str})\n"
                         f"🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_time_thai} น.</code>\n"
                         f"🔴 <b>เวลาหมดอายุ (End):</b> <code>{expires_at_thai} น.</code>\n"
-                        f"🆔 <b>Subscription ID:</b> <code>#{sub_id}</code>\n"
                         "━━━━━━━━━━━━━━━━━━━━\n"
-                        "ℹ️ <i>บันทึกประวัติการเข้าใช้งานลงฐานข้อมูลเรียบร้อย</i>"
+                        "ℹ️ <i>ตรวจพบสมาชิกหมดอายุในห้องและนำออกจาก Channel เรียบร้อย</i>"
                     )
                     try:
-                        await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_log_msg, parse_mode="HTML")
-                    except Exception as e:
-                        logger.warning(f"[SYNC] Could not send join notification to Admin Group: {e}")
+                        await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_kick_msg, parse_mode="HTML")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    grant.subscription.status = SubStatus.KICK_FAILED.value
+                    session.add(grant.subscription)
+                    logger.warning(f"[SYNC] Failed to kick expired user {user_id}: {e}")
+                continue
 
-                if referred_by_to_award and friend_snapshot:
-                    try:
-                        await award_referral_bonus(bot=bot, referrer_id=referred_by_to_award, friend_user=friend_snapshot)
-                    except Exception as e:
-                        logger.error(f"[SYNC] Failed to award referral bonus: {e}")
+            results["activated"] += 1
+            logger.info(f"[SYNC] Activated PENDING subscription for User {user_id}. Expires at {final_expires_at}")
 
-            else:
-                for sub in u_subs:
-                    sub_created = sub.created_at if sub.created_at else now
-                    if sub_created.tzinfo is None:
-                        sub_created = sub_created.replace(tzinfo=timezone.utc)
+            # ส่ง DM ต้อนรับหาผู้ใช้
+            start_time_thai = format_thai_datetime(joined_time)
+            expires_at_thai = format_thai_datetime(final_expires_at)
+            try:
+                welcome_dm = (
+                    f"🎉 <b>ยินดีต้อนรับเข้าสู่ VIP Channel!</b>\n\n"
+                    f"แพ็กเกจ <b>{plan_title}</b> ของคุณเปิดใช้งานเรียบร้อยแล้ว 🚀\n\n"
+                    f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
+                    f"⏰ <b>เวลาเริ่มต้น:</b> <code>{start_time_thai} น.</code>\n"
+                    f"📅 <b>หมดอายุวันที่:</b> <code>{expires_at_thai} น.</code>\n\n"
+                    f"ขอให้เพลิดเพลินกับเนื้อหาพิเศษของเราครับ!"
+                )
+                await bot.send_message(chat_id=user_id, text=welcome_dm, parse_mode="HTML")
+            except Exception as e:
+                logger.debug(f"[SYNC] Could not send welcome DM to User {user_id}: {e}")
 
-                    if now - sub_created > timedelta(hours=48):
-                        sub.status = SubStatus.EXPIRED.value
-                        session.add(sub)
-                        results["stale_cleaned"] += 1
-                    logger.info(f"[SYNC] Cleaned up stale PENDING sub for User {user_id}")
+            # ส่งแจ้งเตือนเข้ากลุ่ม Admin
+            user_handle = f"@{user_obj.username}" if (user_obj and user_obj.username) else "ไม่มี Username"
+            full_name_safe = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
+            admin_log_msg = (
+                "🚪 <b>มีสมาชิกกดเข้าร่วม Channel แล้ว!</b>\n\n"
+                f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
+                f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+                f"📦 <b>แผนที่ใช้งาน:</b> <b>{plan_title}</b>\n"
+                f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
+                f"🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_time_thai} น.</code>\n"
+                f"🔴 <b>เวลาหมดอายุ (End):</b> <code>{expires_at_thai} น.</code>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "ℹ️ <i>บันทึกประวัติการเข้าใช้งานลงฐานข้อมูลเรียบร้อย</i>"
+            )
+            try:
+                await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_log_msg, parse_mode="HTML")
+            except Exception as e:
+                logger.warning(f"[SYNC] Could not send join notification to Admin Group: {e}")
+
+            # มอบรางวัล Referral Bonus หากเพิ่งใช้สิทธิ์ทดลองเป็นครั้งแรกและมีคนแนะนำ
+            if not trial_already_used_before and user_obj and user_obj.trial_used and user_obj.referred_by_id:
+                try:
+                    await award_referral_bonus(bot=bot, referrer_id=user_obj.referred_by_id, friend_user=user_obj)
+                except Exception as e:
+                    logger.error(f"[SYNC] Failed to award referral bonus: {e}")
 
     return results
 
@@ -358,7 +254,7 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
                 Subscription.expires_at > now,
                 Subscription.expires_at <= one_day_later,
                 Subscription.warned_1d == False,
-                Subscription.plan_type != PlanType.TRIAL_15M.value,
+                Subscription.is_trial_active == False,
             )
         )
         expiring_subs = (await session.execute(stmt)).scalars().all()
@@ -371,27 +267,8 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
         for sub in expiring_subs:
             user_id = sub.user_id
             user_obj = sub.user
-            sub_id = sub.id
-            plan = sub.plan_type
+            plan_title = sub.source_label or "สมาชิก VIP"
 
-            # ตรวจสอบว่ามี ACTIVE subscription อื่นที่มีวันหมดอายุเกิน 24 ชั่วโมงข้างหน้าหรือไม่
-            other_active_later_stmt = (
-                select(Subscription)
-                .where(
-                    Subscription.user_id == user_id,
-                    Subscription.id != sub_id,
-                    Subscription.status == SubStatus.ACTIVE.value,
-                    Subscription.expires_at.is_not(None),
-                    Subscription.expires_at > one_day_later,
-                )
-            )
-            has_later_sub = (await session.execute(other_active_later_stmt)).scalars().first()
-            if has_later_sub:
-                sub.warned_1d = True
-                session.add(sub)
-                continue
-
-            plan_title, duration_str = get_plan_display_name(plan)
             expires_at_thai = format_thai_datetime(sub.expires_at)
             time_rem = format_remaining_time(sub.expires_at)
             user_name = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
@@ -400,7 +277,6 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
             sub.warned_1d = True
             session.add(sub)
 
-            # ส่งข้อความเตือนเข้า DM ของผู้ใช้
             warn_text = (
                 "⚠️ <b>[แจ้งเตือน] แพ็กเกจสมาชิก VIP ของคุณจะหมดอายุในอีก 24 ชั่วโมง!</b>\n\n"
                 f"เรียนคุณ {user_name} 👋\n"
@@ -427,7 +303,7 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
                     reply_markup=renew_keyboard,
                     parse_mode="HTML",
                 )
-                logger.info(f"Sent 1-day expiration warning DM to User ID={user_id} (Sub #{sub_id}).")
+                logger.info(f"Sent 1-day expiration warning DM to User ID={user_id}.")
             except TelegramForbiddenError:
                 logger.info(f"User ID={user_id} has blocked the bot. Skipping 1-day warning.")
             except Exception as e:
@@ -480,32 +356,14 @@ async def check_expired_subscriptions(bot: Bot) -> None:
 
         for sub in expired_subs:
             user_id = sub.user_id
-            plan = sub.plan_type
-            sub_id = sub.id
+            plan_title = sub.source_label or "สมาชิก VIP"
+            is_trial = sub.is_trial_active
             was_already_failed = (sub.status == SubStatus.KICK_FAILED.value)
             user_obj = sub.user
             user_handle = f"@{user_obj.username}" if (user_obj and user_obj.username) else ""
             user_name = html.escape(user_obj.full_name) if (user_obj and user_obj.full_name) else f"User {user_id}"
 
-            # ตรวจสอบก่อนว่า User คนนี้มี ACTIVE subscription อื่นที่ยังไม่หมดอายุหรือไม่!
-            other_active_stmt = (
-                select(Subscription)
-                .where(
-                    Subscription.user_id == user_id,
-                    Subscription.id != sub_id,
-                    Subscription.status == SubStatus.ACTIVE.value,
-                    Subscription.expires_at.is_not(None),
-                    Subscription.expires_at > now,
-                )
-            )
-            other_active = (await session.execute(other_active_stmt)).scalars().first()
-            if other_active:
-                logger.info(f"[EXPIRE_CHECK] User {user_id} has another active sub #{other_active.id} (expires {other_active.expires_at}). Marking #{sub_id} as EXPIRED without kicking.")
-                sub.status = SubStatus.EXPIRED.value
-                session.add(sub)
-                continue
-
-            logger.info(f"Processing expiration for Subscription ID={sub_id}, User ID={user_id}, Plan={plan}")
+            logger.info(f"Processing expiration for User ID={user_id}, Plan={plan_title}")
 
             # ตรวจสอบว่าเป็น Admin/Owner ของ Channel หรือไม่ (ถ้าใช่ไม่ต้องเตะ)
             is_channel_admin = False
@@ -564,7 +422,7 @@ async def check_expired_subscriptions(bot: Bot) -> None:
 
                 # 1. ส่งข้อความแจ้งเตือนทาง DM ให้ผู้ใช้
                 try:
-                    if plan == PlanType.TRIAL_15M.value:
+                    if is_trial:
                         dm_text = (
                             f"⏰ <b>หมดเวลาทดลองใช้งานฟรี ({config.TRIAL_DURATION_MINUTES} นาที) แล้วครับ</b>\n\n"
                             "ระยะเวลาทดลองใช้งานฟรีของคุณสิ้นสุดลง และระบบได้นำคุณออกจาก Channel เรียบร้อยแล้วครับ\n\n"
@@ -591,7 +449,6 @@ async def check_expired_subscriptions(bot: Bot) -> None:
                     logger.warning(f"Failed to send expiration DM to User ID={user_id}: {e}")
 
                 # 2. ส่งข้อความแจ้งเตือนเข้ากลุ่ม Admin พร้อม Start/End และข้อมูลแพ็กเกจ
-                plan_title, duration_str = get_plan_display_name(plan)
                 start_time_thai = format_thai_datetime(sub.joined_at or sub.created_at)
                 expires_at_thai = format_thai_datetime(sub.expires_at)
                 user_handle_str = f"@{user_obj.username}" if (user_obj and user_obj.username) else "ไม่มี Username"
@@ -601,10 +458,9 @@ async def check_expired_subscriptions(bot: Bot) -> None:
                     "🚪 <b>สมาชิกหมดอายุและถูกเตะออกจาก Channel แล้ว!</b>\n\n"
                     f"👤 <b>ผู้ใช้งาน:</b> {full_name_str} ({user_handle_str})\n"
                     f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
-                    f"📦 <b>แพ็กเกจ:</b> <b>{plan_title}</b> ({duration_str})\n"
+                    f"📦 <b>แพ็กเกจ:</b> <b>{plan_title}</b>\n"
                     f"🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_time_thai} น.</code>\n"
                     f"🔴 <b>เวลาหมดอายุ (End):</b> <code>{expires_at_thai} น.</code>\n"
-                    f"🆔 <b>Subscription ID:</b> <code>#{sub_id}</code>\n"
                     "━━━━━━━━━━━━━━━━━━━━\n"
                     "ℹ️ <i>บอทได้นำผู้ใช้ออกจาก Channel และส่งข้อความแจ้งเตือนทาง DM เรียบร้อย</i>"
                 )
@@ -614,7 +470,7 @@ async def check_expired_subscriptions(bot: Bot) -> None:
                         text=admin_kick_msg,
                         parse_mode="HTML",
                     )
-                    logger.info(f"Sent expiration kick notification to Admin Group for User ID={user_id} (Sub #{sub_id}).")
+                    logger.info(f"Sent expiration kick notification to Admin Group for User ID={user_id}.")
                 except Exception as e:
                     logger.warning(f"Failed to send expiration kick log to Admin Group: {e}")
             else:
@@ -629,7 +485,7 @@ async def check_expired_subscriptions(bot: Bot) -> None:
                             "⚠️ <b>[แจ้งเตือน] บอทไม่สามารถเตะสมาชิกที่หมดอายุได้!</b>\n\n"
                             f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
                             f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
-                            f"📦 <b>แพ็กเกจ:</b> {plan}\n"
+                            f"📦 <b>แพ็กเกจ:</b> {plan_title}\n"
                             f"❌ <b>สาเหตุ:</b> <code>{html.escape(fail_reason or 'Unknown error')}</code>\n\n"
                             "👉 <b>แนวทางแก้ไข:</b>\n"
                             "1. ตรวจสอบสิทธิ์ของบอทใน Channel ว่าเปิด <b>'Ban Users'</b> หรือไม่\n"
@@ -667,7 +523,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
             logger.warning(f"Could not fetch chat member count for channel {config.CHANNEL_ID}: {e}")
 
     async with get_session() as session:
-        # 2. ดึง Subscription ที่ ACTIVE อยู่ทั้งหมด พร้อมข้อมูล User
+        # 2. ดึง Subscription ที่ ACTIVE อยู่ทั้งหมด พร้อมข้อมูล User (1 แถวต่อ user อยู่แล้ว)
         stmt = (
             select(Subscription)
             .options(selectinload(Subscription.user))
@@ -678,8 +534,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
             )
             .order_by(Subscription.expires_at.asc())
         )
-        result = await session.execute(stmt)
-        active_subs = result.scalars().all()
+        unique_active_subs = (await session.execute(stmt)).scalars().all()
 
         # 3. ดึงรายการที่ KICK_FAILED (ค้างเตะไม่สำเร็จ)
         stmt_failed = (
@@ -697,18 +552,6 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
             .where(Subscription.status == SubStatus.PENDING.value)
         )
         pending_subs = (await session.execute(stmt_pending)).scalars().all()
-
-        # Deduplicate active subscriptions by user_id
-        user_active_map = {}
-        for sub in active_subs:
-            user_active_map.setdefault(sub.user_id, []).append(sub)
-
-        unique_active_subs = []
-        for uid, u_subs in user_active_map.items():
-            best_sub = max(u_subs, key=lambda s: ensure_utc(s.expires_at))
-            unique_active_subs.append(best_sub)
-
-        unique_active_subs.sort(key=lambda s: ensure_utc(s.expires_at))
 
         # ตรวจสอบสถานะว่าอยู่ในห้อง Channel จริงหรือไม่
         in_channel_active_subs = []
@@ -736,18 +579,13 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 else:
                     left_channel_active_subs.append(sub)
         else:
-            in_channel_active_subs = unique_active_subs
-
-        # จัดกลุ่ม PENDING รายบุคคล
-        user_pending_map = {}
-        for psub in pending_subs:
-            user_pending_map.setdefault(psub.user_id, []).append(psub)
+            in_channel_active_subs = list(unique_active_subs)
 
         total_active = len(unique_active_subs)
         total_in_channel = len(in_channel_active_subs)
         total_left = len(left_channel_active_subs)
         total_failed = len(failed_subs)
-        total_pending = len(user_pending_map)
+        total_pending = len(pending_subs)
 
         report = (
             f"📊 <b>รายงานสรุปสถานะสมาชิก Channel VIP</b>\n"
@@ -789,12 +627,12 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
             for i, sub in enumerate(unique_active_subs, start=1):
                 user = sub.user
                 u_header = format_user_title(user.full_name if user else None, user.username if user else None, sub.user_id)
-                
-                plan_name, _ = get_plan_display_name(sub.plan_type)
+
+                plan_name = sub.source_label or "สมาชิก VIP"
                 start_time = format_thai_datetime(sub.joined_at)
                 end_time = format_thai_datetime(sub.expires_at)
                 remaining = format_remaining_time(sub.expires_at)
-                
+
                 # แสดงสถานะการอยู่ในห้อง
                 if bot:
                     channel_badge = "🟢 ใน Channel" if sub in in_channel_active_subs else "⚪ ออกจากห้องแล้ว"
@@ -806,24 +644,19 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                     f"   • <b>แพ็กเกจ:</b> {plan_name}\n"
                     f"   • 🟢 <b>เริ่ม (Start):</b> <code>{start_time} น.</code>\n"
                     f"   • 🔴 <b>หมดอายุ (End):</b> <code>{end_time} น.</code>\n"
-                    f"   • ⏳ <b>เวลาคงเหลือ:</b> {remaining}\n"
-                    f"   • 🆔 <b>Sub ID:</b> <code>#{sub.id}</code>\n\n"
+                    f"   • ⏳ <b>เวลาคงเหลือ:</b> {remaining}\n\n"
                 )
 
         # แสดงรายการสมาชิกรอกดเข้าร่วม (Pending)
         if total_pending > 0:
             report += "🟡 <b>รายชื่อสมาชิกรอกดเข้าร่วม (Pending):</b>\n\n"
-            for p_idx, (p_uid, p_list) in enumerate(user_pending_map.items(), start=1):
-                p_user = p_list[0].user
-                p_u_header = format_user_title(p_user.full_name if p_user else None, p_user.username if p_user else None, p_uid)
-                p_plan_names = []
-                for s in p_list:
-                    p_title, _ = get_plan_display_name(s.plan_type)
-                    p_plan_names.append(p_title)
-                p_plans_str = ", ".join(p_plan_names)
+            for p_idx, psub in enumerate(pending_subs, start=1):
+                p_user = psub.user
+                p_u_header = format_user_title(p_user.full_name if p_user else None, p_user.username if p_user else None, psub.user_id)
+                quota_str = f"{psub.pending_days} วัน" if psub.pending_days > 0 else f"{psub.pending_minutes} นาที"
                 report += (
                     f"<b>{p_idx}.</b> {p_u_header}\n"
-                    f"   • <b>โควต้ารอใช้งาน:</b> {p_plans_str}\n"
+                    f"   • <b>โควต้ารอใช้งาน:</b> {quota_str} ({psub.source_label})\n"
                     f"   • 🟡 <b>สถานะ:</b> ออกลิงก์แล้ว-รอกดเข้าห้อง\n\n"
                 )
 

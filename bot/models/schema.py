@@ -110,6 +110,15 @@ class SlipStatus(str, enum.Enum):
     REJECTED = "REJECTED"
 
 
+class GrantType(str, enum.Enum):
+    """หมวดหมู่ของการเติมวัน (ใช้ tag ตอนเติมวันโดยตรง ไม่ต้อง parse string ย้อนหลัง)"""
+    TRIAL = "TRIAL"
+    PURCHASE = "PURCHASE"
+    PROMOTION = "PROMOTION"
+    REFERRAL_BONUS = "REFERRAL_BONUS"
+    ADMIN_GRANT = "ADMIN_GRANT"
+
+
 class User(Base):
     """Telegram User model."""
 
@@ -131,8 +140,11 @@ class User(Base):
     )
 
     # Relationships
-    subscriptions: Mapped[List["Subscription"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan", order_by="desc(Subscription.id)"
+    subscription: Mapped[Optional["Subscription"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", uselist=False
+    )
+    grants: Mapped[List["SubscriptionGrant"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan", order_by="desc(SubscriptionGrant.id)"
     )
     payment_slips: Mapped[List["PaymentSlip"]] = relationship(
         back_populates="user", cascade="all, delete-orphan", order_by="desc(PaymentSlip.id)"
@@ -146,16 +158,21 @@ class User(Base):
 
 
 class Subscription(Base):
-    """Channel Subscription model."""
+    """
+    สถานะสมาชิกปัจจุบันของผู้ใช้ (1 แถวต่อ 1 user เท่านั้น — ไม่มีประวัติหลายแถวอีกต่อไป)
+
+    ไม่มีแนวคิด "แพ็กเกจ" ผูกกับแถวนี้อีกต่อไป — expires_at คือยอดวันคงเหลือสะสมล้วนๆ
+    (ระบบ "เติมวัน": ทุกการให้สิทธิ์คือ +N วัน เข้า expires_at โดยตรง)
+    ประวัติการเติมแต่ละครั้งเก็บแยกไว้ที่ SubscriptionGrant (ledger) แทน
+    """
 
     __tablename__ = "subscriptions"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True
+        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), primary_key=True
     )
-    plan_type: Mapped[str] = mapped_column(
-        String(32), default=PlanType.TRIAL_15M.value, nullable=False
+    status: Mapped[str] = mapped_column(
+        String(32), default=SubStatus.PENDING.value, nullable=False, index=True
     )
     joined_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -163,10 +180,19 @@ class Subscription(Base):
     expires_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
-    status: Mapped[str] = mapped_column(
-        String(32), default=SubStatus.PENDING.value, nullable=False, index=True
-    )
+    is_trial_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    source_label: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+
+    # โควต้าที่เติมไว้แล้วแต่ยังไม่เริ่มนับ (รอผู้ใช้กดเข้า Channel ครั้งแรก/ครั้งถัดไป)
+    pending_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    pending_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    pending_has_value: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    pending_since: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
     warned_1d: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    stale_alerted: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -174,7 +200,7 @@ class Subscription(Base):
     )
 
     # Relationship
-    user: Mapped["User"] = relationship(back_populates="subscriptions")
+    user: Mapped["User"] = relationship(back_populates="subscription")
 
     __table_args__ = (
         Index("ix_subscriptions_status_expires", "status", "expires_at"),
@@ -182,8 +208,39 @@ class Subscription(Base):
 
     def __repr__(self) -> str:
         return (
-            f"<Subscription(id={self.id}, user_id={self.user_id}, "
-            f"plan_type={self.plan_type}, status={self.status}, expires_at={self.expires_at})>"
+            f"<Subscription(user_id={self.user_id}, "
+            f"status={self.status}, expires_at={self.expires_at}, pending_days={self.pending_days})>"
+        )
+
+
+class SubscriptionGrant(Base):
+    """
+    Ledger แบบ append-only บันทึกการ 'เติมวัน' ทุกครั้ง (ไม่เคยแก้ไข/ลบ) ใช้สำหรับ audit/ประวัติย้อนหลัง
+    แยกออกจาก Subscription (สถานะปัจจุบัน) โดยเจตนา เพื่อไม่ให้ต้อง parse string ย้อนหลังอีก
+    """
+
+    __tablename__ = "subscription_grants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.telegram_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    source_label: Mapped[str] = mapped_column(String(128), default="", nullable=False)
+    grant_type: Mapped[str] = mapped_column(String(32), default=GrantType.PURCHASE.value, nullable=False)
+    has_value: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False, index=True
+    )
+
+    # Relationship
+    user: Mapped["User"] = relationship(back_populates="grants")
+
+    def __repr__(self) -> str:
+        return (
+            f"<SubscriptionGrant(user_id={self.user_id}, days={self.days}, "
+            f"minutes={self.minutes}, grant_type={self.grant_type})>"
         )
 
 
