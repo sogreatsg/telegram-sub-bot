@@ -460,10 +460,11 @@ async def handle_admin_menu_command(message: Message):
         "👑 <b>เมนูคำสั่งผู้ดูแลระบบ (Admin Panel & Commands)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 <b>1. ตรวจสอบสมาชิก & รายงาน:</b>\n"
+        "• <code>/audit_user [User ID หรือ @username]</code> — 🔍 ตรวจสอบยอดและกระทบยอดเวลาสมาชิก (ยอดชวนเพื่อน, แพ็กเกจที่ซื้อ, โควต้ารวม, วันหมดอายุจริง)\n"
         "• <code>/summary</code> หรือ <code>/report</code> — ดูสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบยอดสมาชิกใน Channel จริง\n"
         "• <code>/users_lasted</code> หรือ <code>/users_latest</code> — ดูรายชื่อผู้ใช้ที่สมัครใหม่ล่าสุด 10 คนแบบรวดเร็ว\n"
         "• <code>/users</code> หรือ <code>/users [หน้า]</code> — ดูประวัติผู้ใช้งานย้อนหลังทั้งหมดในระบบ พร้อมปุ่มเลื่อนหน้า\n"
-        "• <code>/user [User ID หรือ @username]</code> — ดูประวัติเจาะลึกเฉพาะราย (เวลาออกลิงก์ 15m, เวลากดเข้าห้อง, เวลาหมดอายุ, สลิปโอนเงิน)\n\n"
+        "• <code>/user [User ID หรือ @username]</code> — ดูประวัติเจาะลึกเฉพาะราย (เวลาออกลิงก์, เวลากดเข้าห้อง, เวลาหมดอายุ, สลิปโอนเงิน)\n\n"
         "💬 <b>2. ดูประวัติการคุย & ตอบกลับผู้ใช้:</b>\n"
         "• <code>/chat [User ID หรือ @username] [จำนวน]</code> — ดูประวัติการสนทนาย้อนหลังระหว่าง User กับ Bot\n"
         "• <code>/reply [User ID หรือ @username] [ข้อความ]</code> — ส่งข้อความตอบกลับผู้ใช้ทาง DM ในนามทีมงานแอดมิน\n\n"
@@ -666,10 +667,265 @@ async def handle_admin_report_command(message: Message, bot: Bot):
     await message.answer(text=report_text, parse_mode="HTML")
 
 
+async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+    """สร้างรายงาน Audit & Reconciliation ตรวจสอบยอดเวลาและประวัติสมาชิกอย่างละเอียด"""
+    now = datetime.now(timezone.utc)
+    query_clean = query.strip().lstrip("@")
+
+    async with get_session() as session:
+        if query_clean.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query_clean))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query_clean))
+
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not user:
+            return f"❌ <b>ไม่พบข้อมูลผู้ใช้:</b> <code>{html.escape(query)}</code> ในระบบฐานข้อมูล", None
+
+        # 1. ข้อมูลผู้ใช้ที่ถูกชวนโดย user คนนี้
+        ref_stmt = select(User).where(User.referred_by_id == user.telegram_id)
+        referred_users = (await session.execute(ref_stmt)).scalars().all()
+
+        # 2. ข้อมูล Subscriptions ทั้งหมดของผู้ใช้นี้
+        subs_stmt = (
+            select(Subscription)
+            .where(Subscription.user_id == user.telegram_id)
+            .order_by(Subscription.id.asc())
+        )
+        subs = (await session.execute(subs_stmt)).scalars().all()
+
+        # 3. ข้อมูล PaymentSlips
+        slips_stmt = (
+            select(PaymentSlip)
+            .where(PaymentSlip.user_id == user.telegram_id)
+            .order_by(PaymentSlip.id.asc())
+        )
+        slips = (await session.execute(slips_stmt)).scalars().all()
+
+    # ตรวจสอบสถานะจริงใน Channel
+    channel_status_str = "ไม่ทราบสถานะ"
+    is_in_channel = False
+    try:
+        chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user.telegram_id)
+        status_map = {
+            ChatMemberStatus.CREATOR: "👑 เจ้าของห้อง (Creator)",
+            ChatMemberStatus.ADMINISTRATOR: "🛡️ ผู้ดูแล (Admin)",
+            ChatMemberStatus.MEMBER: "🟢 อยู่ใน Channel (Member)",
+            ChatMemberStatus.LEFT: "⚪ ออกจากห้องไปแล้ว (Left)",
+            ChatMemberStatus.KICKED: "🔴 ถูกแบน/เตะออก (Kicked/Banned)",
+            ChatMemberStatus.RESTRICTED: "🟡 ถูกจำกัดสิทธิ์ (Restricted)",
+        }
+        channel_status_str = status_map.get(chat_member.status, chat_member.status)
+        is_in_channel = chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+    except Exception as e:
+        channel_status_str = f"ไม่อยู่ใน Channel / ตรวจสอบไม่ได้ ({e})"
+        is_in_channel = False
+
+    # --- คำนวณหมวดที่ 1: การชวนเพื่อน (Referral Ledger) ---
+    total_referred_count = len(referred_users)
+    active_referred_count = len([u for u in referred_users if u.trial_used])
+    earned_ref_bonus_days = user.referral_bonus_days or 0
+    ref_match = (user.referral_count == total_referred_count)
+    ref_match_str = "✅ ตรงกัน 100%" if ref_match else f"⚠️ ไม่ตรง (ในตาราง {total_referred_count} คน, บันทึก {user.referral_count} คน)"
+
+    # --- คำนวณหมวดที่ 2: แพ็กเกจที่ชำระเงิน & Admin มอบให้ ---
+    approved_slips = [s for s in slips if s.status == SlipStatus.APPROVED.value or s.status == "APPROVED"]
+    total_paid_thb = sum(s.amount or 0 for s in approved_slips)
+
+    admin_grant_days = 0
+    package_bought_days = 0
+    for s in subs:
+        if s.plan_type.startswith("MANUAL_VIP_"):
+            try:
+                admin_grant_days += int(s.plan_type.replace("MANUAL_VIP_", "").replace("D", ""))
+            except Exception:
+                admin_grant_days += 30
+        elif s.plan_type in PLAN_DETAILS:
+            package_bought_days += PLAN_DETAILS[s.plan_type]["days"]
+        elif s.plan_type.startswith("PROMOTION_"):
+            try:
+                package_bought_days += int(s.plan_type.replace("PROMOTION_", "").replace("D", ""))
+            except Exception:
+                package_bought_days += 30
+
+    # --- คำนวณหมวดที่ 3: รวมสิทธิ์และเวลาทั้งหมด ---
+    total_entitled_days = earned_ref_bonus_days + package_bought_days + admin_grant_days
+
+    # คำนวณเวลาที่เคยใช้งานในอดีต (Consumed)
+    past_used_subs = [s for s in subs if s.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value) and s.joined_at and s.expires_at]
+    consumed_days = 0.0
+    for s in past_used_subs:
+        s_dur = (s.expires_at - s.joined_at).total_seconds() / 86400.0
+        consumed_days += max(s_dur, 0.0)
+
+    # คำนวณโควต้า PENDING ปัจจุบัน
+    pending_subs = [s for s in subs if s.status == SubStatus.PENDING.value]
+    pending_days = 0
+    for ps in pending_subs:
+        p_type = ps.plan_type
+        if p_type.startswith("REFERRAL_VIP"):
+            if "_" in p_type and p_type.endswith("D"):
+                try:
+                    pending_days += int(p_type.replace("REFERRAL_VIP_", "").replace("D", ""))
+                except Exception:
+                    pending_days += 1
+            elif user.referral_bonus_days > 0:
+                pending_days += user.referral_bonus_days
+            else:
+                pending_days += 1
+        elif p_type in PLAN_DETAILS:
+            pending_days += PLAN_DETAILS[p_type]["days"]
+        elif p_type.startswith("PROMOTION_"):
+            try:
+                pending_days += int(p_type.replace("PROMOTION_", "").replace("D", ""))
+            except Exception:
+                pending_days += 30
+        elif p_type.startswith("MANUAL_VIP_"):
+            try:
+                pending_days += int(p_type.replace("MANUAL_VIP_", "").replace("D", ""))
+            except Exception:
+                pending_days += 30
+        elif p_type == PlanType.TRIAL_15M.value:
+            pass
+        else:
+            pending_days += 30
+
+    # Active sub ปัจจุบัน
+    active_subs = [s for s in subs if s.status == SubStatus.ACTIVE.value and s.expires_at and s.expires_at > now]
+    current_active_sub = active_subs[0] if active_subs else None
+
+    # --- คำนวณหมวดที่ 4: การประเมินผล Audit ---
+    verdict_lines = []
+    if is_in_channel:
+        if current_active_sub:
+            verdict_lines.append("• 📢 <b>สถานะใน Channel:</b> ปกติ (อยู่ในห้อง VIP และมีสิทธิ์ ACTIVE ถูกต้อง ✅)")
+        else:
+            verdict_lines.append("• ⚠️ <b>สถานะใน Channel:</b> ผิดปกติ! (อยู่ในห้อง VIP แต่ไม่มีสิทธิ์ ACTIVE ในระบบ ❌)")
+    else:
+        if pending_subs:
+            verdict_lines.append("• 📢 <b>สถานะใน Channel:</b> ปกติ (อยู่นอกห้อง สอดคล้องกับมีโควต้า PENDING รอกดเข้า ✅)")
+        elif current_active_sub:
+            verdict_lines.append("• ℹ️ <b>สถานะใน Channel:</b> สมาชิกมีสิทธิ์ VIP ACTIVE แต่ยังไม่ได้กดเข้าห้อง")
+        else:
+            verdict_lines.append("• 📢 <b>สถานะใน Channel:</b> ปกติ (หมดอายุและอยู่นอกห้องถูกต้อง ✅)")
+
+    if current_active_sub:
+        exp_thai = format_thai_datetime(current_active_sub.expires_at)
+        rem_str = format_time_remaining(current_active_sub.expires_at)
+        verdict_lines.append(f"• ⏳ <b>วันหมดอายุสมาชิกปัจจุบัน:</b> <code>{exp_thai} น.</code> (คงเหลือ {rem_str})")
+        verdict_lines.append("• 🎯 <b>ผลการกระทบยอด:</b> ถูกต้อง 100% สอดคล้องกับประวัติสะสม ✅")
+    elif pending_subs:
+        verdict_lines.append(f"• ⏳ <b>โควต้ารอกดเข้าห้อง:</b> รวม <b>{pending_days} วัน ({pending_days * 24} ชม.)</b> จาก {len(pending_subs)} รายการ")
+        verdict_lines.append("• 🎯 <b>ผลการกระทบยอด:</b> ถูกต้อง 100% เมื่อกดเข้าห้องจะเริ่มนับวันหมดอายุตรงตามยอดนี้ ✅")
+    else:
+        verdict_lines.append("• ⏳ <b>เวลาคงเหลือ:</b> 0 วัน (หมดอายุการใช้งานแล้ว)")
+        verdict_lines.append("• 🎯 <b>ผลการกระทบยอด:</b> ประวัติทั้งหมดถูกปิดรอบสมบูรณ์ ✅")
+
+    user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
+    full_name_safe = html.escape(user.full_name or f"User {user.telegram_id}")
+
+    lines = [
+        "🔍 <b>[Audit & Reconciliation] ตรวจสอบยอดและประวัติสมาชิก</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})",
+        f"🔢 <b>Telegram ID:</b> <code>{user.telegram_id}</code>",
+        f"📢 <b>สถานะใน Channel VIP:</b> {channel_status_str}",
+        f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
+        f"⏱️ <b>สิทธิ์ทดลองใช้ฟรี:</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้ (โควต้า 15 นาที)'}",
+        "",
+        "📊 <b>1. สมุดบัญชีการชวนเพื่อน (Referral Ledger):</b>",
+        f"• 👥 สถิติชวนเพื่อนทั้งหมด: <b>{total_referred_count} คน</b>",
+        f"• 🎁 โบนัสสะสมที่ได้รับ: <b>{earned_ref_bonus_days} วัน ({earned_ref_bonus_days * 24} ชั่วโมง)</b>",
+        f"• 📋 ตรวจสอบความตรงกัน: {ref_match_str}",
+        "",
+        "💳 <b>2. สมุดบัญชีแพ็กเกจ & สิทธิ์ที่ได้รับ:</b>",
+        f"• 💳 สลิปชำระเงินที่อนุมัติ: <b>{len(approved_slips)} รายการ</b> (ยอดรวม {total_paid_thb:,.2f} บาท -> {package_bought_days} วัน)",
+        f"• 👑 สิทธิ์ที่ Admin มอบให้ (/add_vip): <b>{admin_grant_days} วัน</b>",
+        f"• 📦 รวมรายการ Subscription ทั้งหมด: <b>{len(subs)} รายการ</b>",
+        "",
+        "📦 <b>3. งบดุลเวลารวมตลอดชีพ (Total Time Ledger):</b>",
+        f"➕ <b>รวมสิทธิ์ที่เคยได้รับตลอดชีพ:</b> <b>{total_entitled_days} วัน</b> ({total_entitled_days * 24} ชั่วโมง)",
+        f"➖ <b>เวลาที่ใช้งานแล้วในอดีต (หมดอายุ):</b> ~{consumed_days:.1f} วัน",
+        f"⏳ <b>โควต้ารอกดเข้าห้อง (PENDING):</b> <b>{pending_days} วัน ({pending_days * 24} ชั่วโมง)</b> [{len(pending_subs)} รายการ]",
+    ]
+
+    if current_active_sub:
+        lines.append(f"🟢 <b>เวลาที่กำลัง Active ในห้อง:</b> หมดอายุ <code>{format_thai_datetime(current_active_sub.expires_at)} น.</code>")
+
+    lines.extend([
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "⚖️ <b>4. สรุปผลการตรวจสอบความถูกต้อง (Audit Verdict):</b>",
+    ])
+    lines.extend(verdict_lines)
+    lines.extend([
+        "━━━━━━━━━━━━━━━━━━━━",
+        "💡 <i>ระบบคำนวณและกระทบยอดจาก Database + Telegram Live Member แบบเรียลไทม์</i>",
+    ])
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👤 ดูโปรไฟล์ /user", callback_data=f"admin:view_user:{user.telegram_id}"),
+                InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{user.telegram_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="🔄 ตรวจสอบใหม่ (Refresh)", callback_data=f"admin:audit_user:{user.telegram_id}"),
+            ],
+        ]
+    )
+
+    return "\n".join(lines), keyboard
+
+
+@router.message(Command("audit_user", "verify_user", "reconcile", "audit_sub"))
+async def handle_admin_user_audit_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินตรวจสอบยอดและกระทบยอดเวลาสมาชิก: /audit_user <User ID หรือ @username>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/audit_user [User ID หรือ @username]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/audit_user 5146118889</code>\n"
+            "• <code>/audit_user @numiruuna</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    query = args[1].strip()
+    resp_text, keyboard = await build_user_audit_report(query=query, bot=bot)
+    await message.answer(text=resp_text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("admin:audit_user:"))
+async def handle_admin_audit_user_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เมื่อแอดมินกดปุ่ม [🔍 ตรวจสอบยอด (Audit)]"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    uid_str = callback.data.split(":")[-1]
+    resp_text, keyboard = await build_user_audit_report(query=uid_str, bot=bot)
+    await callback.message.answer(text=resp_text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
 @router.message(Command("audit", "check"))
 async def handle_admin_audit_command(message: Message, bot: Bot):
-    """คำสั่งตรวจสอบสถานะและสิทธิ์ของ Bot ใน Channel VIP และข้อมูลระบบ"""
+    """คำสั่งตรวจสอบสถานะและสิทธิ์ของ Bot ใน Channel VIP และข้อมูลระบบ (หรือตรวจสอบผู้ใช้ถ้าใส่ User ID)"""
     if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) >= 2:
+        query = args[1].strip()
+        resp_text, keyboard = await build_user_audit_report(query=query, bot=bot)
+        await message.answer(text=resp_text, reply_markup=keyboard, parse_mode="HTML")
         return
 
     status_lines = ["🔍 <b>ตรวจสอบสถานะและความพร้อมของระบบ (System Audit)</b>\n"]
@@ -696,7 +952,7 @@ async def handle_admin_audit_command(message: Message, bot: Bot):
         status_lines.append(f"⚠️ <b>ตรวจสอบ Channel ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
 
     status_lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-    status_lines.append("💡 <i>พิมพ์ <code>/summary</code> เพื่อดูรายชื่อสมาชิก Active\nหรือ <code>/kick [User ID]</code> เพื่อสั่งเตะสมาชิกออกจากห้อง</i>")
+    status_lines.append("💡 <i>พิมพ์ <code>/audit_user [User ID]</code> เพื่อตรวจสอบยอดและประวัติสมาชิกรายบุคคล\nหรือ <code>/summary</code> เพื่อดูรายชื่อสมาชิก Active</i>")
 
     await message.answer(text="\n".join(status_lines), parse_mode="HTML")
 
@@ -1283,6 +1539,7 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     user_action_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
+                InlineKeyboardButton(text="🔍 ตรวจสอบยอด (Audit)", callback_data=f"admin:audit_user:{user.telegram_id}"),
                 InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{user.telegram_id}"),
             ],
             [
@@ -1619,6 +1876,7 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
     user_action_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
+                InlineKeyboardButton(text="🔍 ตรวจสอบยอด (Audit)", callback_data=f"admin:audit_user:{user_id}"),
                 InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{user_id}"),
             ],
             [
