@@ -501,7 +501,8 @@ async def handle_admin_menu_command(message: Message):
         "• <code>/user [User ID หรือ @username]</code> — ดูประวัติเจาะลึกเฉพาะราย (เวลาออกลิงก์, เวลากดเข้าห้อง, เวลาหมดอายุ, สลิปโอนเงิน)\n\n"
         "💬 <b>2. ดูประวัติการคุย & ตอบกลับผู้ใช้:</b>\n"
         "• <code>/chat [User ID หรือ @username] [จำนวน]</code> — ดูประวัติการสนทนาย้อนหลังระหว่าง User กับ Bot\n"
-        "• <code>/reply [User ID หรือ @username] [ข้อความ]</code> — ส่งข้อความตอบกลับผู้ใช้ทาง DM ในนามทีมงานแอดมิน\n\n"
+        "• <code>/reply [User ID หรือ @username] [ข้อความ]</code> — ส่งข้อความตอบกลับผู้ใช้ทาง DM ในนามทีมงานแอดมิน\n"
+        "• <code>/close_chat [User ID หรือ @username]</code> — ✅ ปิดจบการสนทนา / ทำเครื่องหมายว่าตอบแล้ว เพื่อหยุดการแจ้งเตือนเตือนซ้ำข้อความค้างตอบ\n\n"
         "📢 <b>3. บรอดแคสต์ & ส่งข้อความหาผู้ใช้:</b>\n"
         "• <code>/broadcast_count</code> — ตรวจสอบยอดผู้ใช้ทั้งหมดที่สามารถบรอดแคสต์ไปหาได้\n"
         "• <code>/broadcast_menu</code> — บรอดแคสต์เมนูหลัก /start ล่าสุด (พร้อมปุ่มชวนเพื่อน/โปรโมชั่น) ให้ผู้ใช้ทุกคน\n"
@@ -2263,6 +2264,139 @@ async def handle_admin_view_chat_callback(callback: CallbackQuery):
 
     await callback.message.answer(text="\n".join(lines), parse_mode="HTML")
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:resolve_chat:"))
+async def handle_admin_resolve_chat_callback(callback: CallbackQuery):
+    """Callback เมื่อแอดมินกดปุ่ม [✅ ปิดจบการสนทนา] รายบุคคล"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    uid_str = callback.data.split(":")[-1]
+    if not uid_str.isdigit():
+        await callback.answer("❌ User ID ไม่ถูกต้อง")
+        return
+
+    target_uid = int(uid_str)
+    admin_user = callback.from_user
+    admin_name = f"@{admin_user.username}" if admin_user.username else html.escape(admin_user.full_name)
+
+    await log_chat_message(
+        user_id=target_uid,
+        sender_role="ADMIN",
+        message_text=f"[แอดมิน {admin_name} ปิดจบการสนทนา / ทำเครื่องหมายว่าตอบแล้ว]"
+    )
+
+    await callback.answer(f"✅ ปิดจบการสนทนาของ User {target_uid} เรียบร้อย", show_alert=False)
+    try:
+        await callback.message.reply(
+            f"✅ <b>ปิดจบการสนทนาเรียบร้อย!</b>\n"
+            f"แอดมิน {admin_name} ได้ทำเครื่องหมายว่าตอบ/ปิดจบการสนทนาสำหรับ User ID <code>{target_uid}</code> แล้ว (ระบบจะไม่ส่งเตือนซ้ำ)",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "admin:resolve_all_chats")
+async def handle_admin_resolve_all_chats_callback(callback: CallbackQuery):
+    """Callback เมื่อแอดมินกดปุ่ม [✅ ปิดจบทั้งหมด]"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    admin_user = callback.from_user
+    admin_name = f"@{admin_user.username}" if admin_user.username else html.escape(admin_user.full_name)
+
+    resolved_count = 0
+    async with get_session() as session:
+        subq = (
+            select(ChatMessage.user_id, func.max(ChatMessage.id).label("max_id"))
+            .group_by(ChatMessage.user_id)
+            .subquery()
+        )
+        stmt = (
+            select(ChatMessage)
+            .join(subq, ChatMessage.id == subq.c.max_id)
+            .where(ChatMessage.sender_role == "USER", ~ChatMessage.message_text.startswith("/"))
+        )
+        unanswered_msgs = (await session.execute(stmt)).scalars().all()
+
+        for msg in unanswered_msgs:
+            session.add(ChatMessage(
+                user_id=msg.user_id,
+                sender_role="ADMIN",
+                message_text=f"[แอดมิน {admin_name} ปิดจบการสนทนาทั้งหมด / ทำเครื่องหมายว่าตอบแล้ว]"
+            ))
+            resolved_count += 1
+        await session.commit()
+
+    await callback.answer(f"✅ ปิดจบการสนทนาที่ค้างอยู่ทั้งหมด ({resolved_count} คน) เรียบร้อย", show_alert=True)
+    if resolved_count > 0:
+        try:
+            await callback.message.reply(
+                f"✅ <b>ปิดจบการสนทนาทั้งหมดสำเร็จ!</b>\n"
+                f"แอดมิน {admin_name} ได้ทำเครื่องหมายปิดจบข้อความที่ค้างอยู่ทั้งหมด {resolved_count} รายการเรียบร้อยแล้ว",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+
+@router.message(Command("close_chat", "resolve_chat", "done_chat", "end_chat"))
+async def handle_admin_close_chat_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับปิดจบการสนทนาของ User: /close_chat <User ID หรือ @username>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/close_chat [User ID หรือ @username]</code>\n"
+            "ตัวอย่าง: <code>/close_chat 5125375696</code>\n\n"
+            "ℹ️ <i>คำสั่งนี้จะทำเครื่องหมายว่าการสนทนาได้รับการดูแลแล้ว เพื่อหยุดการแจ้งเตือนเตือนซ้ำข้อความค้างตอบ</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+
+        if not user:
+            if query.isdigit():
+                target_uid = int(query)
+                user_header = f"User {target_uid}"
+            else:
+                await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+                return
+        else:
+            target_uid = user.telegram_id
+            user_header = format_user_title(user.full_name, user.username, target_uid)
+
+        admin_name = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else "Admin"
+        session.add(ChatMessage(
+            user_id=target_uid,
+            sender_role="ADMIN",
+            message_text=f"[แอดมิน {admin_name} ปิดจบการสนทนาด้วยคำสั่ง /close_chat]"
+        ))
+        await session.commit()
+
+    await message.answer(
+        f"✅ <b>ปิดจบการสนทนาสำเร็จ!</b>\n"
+        f"👤 <b>ผู้ใช้:</b> {user_header}\n"
+        "ℹ️ <i>ระบบทำเครื่องหมายว่าได้รับการดูแลแล้ว และจะไม่ส่งแจ้งเตือนเตือนซ้ำข้อความนี้อีกครับ</i>",
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data.startswith("admin:view_user:"))

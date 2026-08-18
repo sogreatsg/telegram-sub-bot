@@ -8,11 +8,11 @@ from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, func
 from sqlalchemy.orm import selectinload
 
 from bot.config import get_settings
-from bot.models.schema import Subscription, SubStatus, PaymentSlip, SlipStatus, get_dynamic_plan_info
+from bot.models.schema import Subscription, SubStatus, PaymentSlip, SlipStatus, get_dynamic_plan_info, ChatMessage
 from bot.services.database import get_session
 from bot.services.referral import award_referral_bonus
 from bot.services.subscription import PENDING_STALE_HOURS, activate_pending_subscription, is_pending_stale
@@ -848,6 +848,120 @@ async def check_pending_slips_reminder(bot: Bot) -> None:
         logger.error(f"[REMINDER] Error in check_pending_slips_reminder job: {e}", exc_info=True)
 
 
+async def check_unanswered_user_dms_reminder(bot: Bot) -> None:
+    """
+    ตรวจสอบข้อความล่าสุดที่เป็น DM จาก User หากแอดมินยังไม่ตอบกลับและรอนานเกิน 1 นาที
+    จะรวบรวมรายชื่อผู้ใช้ที่ยังไม่ได้รับการตอบกลับแล้วส่งแจ้งเตือนเข้า Admin Group ทุก 1 นาที
+    หากรอบไหนไม่มีข้อความค้างตอบ จะไม่ส่งข้อความเตือน
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        async with get_session() as session:
+            # ดึงข้อความล่าสุดของแต่ละ user_id
+            subq = (
+                select(
+                    ChatMessage.user_id,
+                    func.max(ChatMessage.id).label("max_id")
+                )
+                .group_by(ChatMessage.user_id)
+                .subquery()
+            )
+
+            stmt = (
+                select(ChatMessage)
+                .options(selectinload(ChatMessage.user))
+                .join(subq, ChatMessage.id == subq.c.max_id)
+                .where(
+                    ChatMessage.sender_role == "USER",
+                    ~ChatMessage.message_text.startswith("/")
+                )
+                .order_by(ChatMessage.created_at.asc())
+            )
+            latest_user_msgs = (await session.execute(stmt)).scalars().all()
+
+            unanswered = []
+            for msg in latest_user_msgs:
+                created_at = ensure_utc(msg.created_at)
+                time_waiting = (now - created_at).total_seconds()
+                # ต้องรอนานเกิน 1 นาที (60 วินาที)
+                if time_waiting >= 60:
+                    wait_sec = int(time_waiting)
+                    wait_min = wait_sec // 60
+                    wait_rem_sec = wait_sec % 60
+                    if wait_min > 0 and wait_rem_sec > 0:
+                        wait_str = f"{wait_min} นาที {wait_rem_sec} วินาที"
+                    elif wait_min > 0:
+                        wait_str = f"{wait_min} นาที"
+                    else:
+                        wait_str = f"{wait_rem_sec} วินาที"
+                    unanswered.append((msg, wait_str, msg.user))
+
+            # ถ้ารอบนี้ไม่มีข้อความค้างตอบ -> ไม่ต้องส่งเตือน
+            if not unanswered:
+                return
+
+            # จัดรูปแบบข้อความรวบรวมรายชื่อผู้ใช้ที่ยังไม่ตอบ
+            count = len(unanswered)
+            lines = [
+                f"🚨 <b>[แจ้งเตือนข้อความค้างตอบ] มีผู้ใช้รอแอดมินตอบกลับ {count} คน!</b>",
+                "━━━━━━━━━━━━━━━━━━━━",
+                "📌 <i>ข้อความล่าสุดเป็นของผู้ใช้ที่ยังไม่ได้รับการตอบกลับเกิน 1 นาที:</i>\n",
+            ]
+
+            for i, (msg, wait_str, u_obj) in enumerate(unanswered[:10], start=1):
+                u_name = html.escape((u_obj.full_name if u_obj else None) or f"User {msg.user_id}")
+                u_handle = f"@{u_obj.username}" if (u_obj and u_obj.username) else "ไม่มี Username"
+                t_str = format_thai_datetime(msg.created_at)
+
+                # ตัดข้อความให้กระชับ
+                raw_text = msg.message_text.replace("\n", " ")
+                snippet = html.escape(raw_text[:60] + ("..." if len(raw_text) > 60 else ""))
+
+                lines.append(
+                    f"<b>{i}.</b> <b>{u_name}</b> ({u_handle}) | ID: <code>{msg.user_id}</code>\n"
+                    f"   • ⏳ <b>รอนาน:</b> <b>{wait_str}</b>\n"
+                    f"   • 💬 <b>ข้อความ:</b> <i>\"{snippet}\"</i>\n"
+                    f"   • ⏰ <b>ส่งเมื่อ:</b> <code>{t_str} น.</code>\n"
+                    f"   • ✍️ <code>/reply {msg.user_id} </code>\n"
+                )
+
+            if count > 10:
+                lines.append(f"<i>...และยังมีผู้ใช้รออยู่อีก {count - 10} คน</i>\n")
+
+            lines.append("━━━━━━━━━━━━━━━━━━━━")
+            lines.append("💡 <i>แตะคำสั่ง <code>/reply [User ID] [ข้อความ]</code> เพื่อตอบกลับ หรือกดปุ่มด้านล่างเพื่อปิดจบการสนทนา</i>")
+
+            # สร้างปุ่มสำหรับ Action
+            keyboard_rows = []
+            for msg, wait_str, u_obj in unanswered[:4]:
+                u_label = (u_obj.full_name if u_obj else f"User {msg.user_id}")[:10]
+                keyboard_rows.append([
+                    InlineKeyboardButton(text=f"📜 ดูแชท ({u_label})", callback_data=f"admin:view_chat:{msg.user_id}"),
+                    InlineKeyboardButton(text=f"✅ ปิดจบ ({u_label})", callback_data=f"admin:resolve_chat:{msg.user_id}"),
+                ])
+
+            if count > 1:
+                keyboard_rows.append([
+                    InlineKeyboardButton(text=f"✅ ปิดจบทั้งหมด ({count} คน)", callback_data="admin:resolve_all_chats")
+                ])
+
+            reply_kb = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+            try:
+                await bot.send_message(
+                    chat_id=config.ADMIN_GROUP_ID,
+                    text="\n".join(lines),
+                    reply_markup=reply_kb,
+                    parse_mode="HTML",
+                )
+                logger.info(f"[DM_REMINDER] Sent unanswered DMs reminder for {count} users to Admin Group {config.ADMIN_GROUP_ID}")
+            except Exception as e:
+                logger.error(f"[DM_REMINDER] Failed to send unanswered DMs reminder: {e}")
+
+    except Exception as e:
+        logger.error(f"[DM_REMINDER] Error in check_unanswered_user_dms_reminder job: {e}", exc_info=True)
+
+
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     """สร้างและตั้งค่า APScheduler AsyncIOScheduler ตามช่วงเวลาที่กำหนด"""
     scheduler = AsyncIOScheduler(timezone=BANGKOK_TZ)
@@ -885,6 +999,19 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         args=[bot],
         id="check_pending_slips_reminder_job",
         name="Check and remind pending payment slips to Admin Group",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # 4. Job แจ้งเตือนข้อความ DM จากผู้ใช้ที่ค้างตอบเกิน 1 นาที (ทำงานทุก 60 วินาที)
+    scheduler.add_job(
+        check_unanswered_user_dms_reminder,
+        trigger="interval",
+        seconds=60,
+        args=[bot],
+        id="check_unanswered_user_dms_reminder_job",
+        name="Check and remind unanswered user DMs to Admin Group",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
