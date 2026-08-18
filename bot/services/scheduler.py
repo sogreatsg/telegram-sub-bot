@@ -697,10 +697,14 @@ async def send_daily_active_summary(bot: Bot) -> None:
         logger.error(f"Failed to send daily active summary report to Admin Group: {e}", exc_info=True)
 
 
+PENDING_SLIP_REMINDER_TIMEOUT_SECONDS = 600  # 10 นาที
+UNANSWERED_DM_REMINDER_TIMEOUT_SECONDS = 600  # 10 นาที
+
+
 async def check_pending_slips_reminder(bot: Bot) -> None:
     """
-    ตรวจสอบสลิป/ซองของขวัญที่ค้าง PENDING นานเกิน 1 นาที
-    และส่งแจ้งเตือนซ้ำเข้ากลุ่มแอดมินทุกๆ 1 นาที จนกว่าจะมีแอดมินกดอนุมัติหรือปฏิเสธ
+    ตรวจสอบสลิป/ซองของขวัญที่ค้าง PENDING นานเกิน 10 นาที
+    และส่งแจ้งเตือนซ้ำเข้ากลุ่มแอดมินทุกๆ 10 นาที จนกว่าจะมีแอดมินกดอนุมัติหรือปฏิเสธ
     """
     now = datetime.now(timezone.utc)
     try:
@@ -719,15 +723,15 @@ async def check_pending_slips_reminder(bot: Bot) -> None:
                 created_at = ensure_utc(slip.created_at)
                 last_reminded = ensure_utc(slip.last_reminded_at) if getattr(slip, "last_reminded_at", None) else None
 
-                # ตรวจสอบว่าค้างเกิน 1 นาที (60 วินาที) นับจากตอนส่งสลิปหรือไม่
+                # ตรวจสอบว่าค้างเกิน 10 นาที (600 วินาที) นับจากตอนส่งสลิปหรือไม่
                 time_since_creation = (now - created_at).total_seconds()
-                if time_since_creation < 60:
+                if time_since_creation < PENDING_SLIP_REMINDER_TIMEOUT_SECONDS:
                     continue
 
-                # หากเคยแจ้งเตือนซ้ำไปแล้ว ให้เว้นระยะห่างอย่างน้อย 60 วินาที
+                # หากเคยแจ้งเตือนซ้ำไปแล้ว ให้เว้นระยะห่างอย่างน้อย 10 นาที (600 วินาที)
                 if last_reminded:
                     time_since_last_reminder = (now - last_reminded).total_seconds()
-                    if time_since_last_reminder < 60:
+                    if time_since_last_reminder < PENDING_SLIP_REMINDER_TIMEOUT_SECONDS:
                         continue
 
                 # อัปเดตสถิติการแจ้งเตือน
@@ -850,8 +854,8 @@ async def check_pending_slips_reminder(bot: Bot) -> None:
 
 async def check_unanswered_user_dms_reminder(bot: Bot) -> None:
     """
-    ตรวจสอบข้อความล่าสุดที่เป็น DM จาก User หากแอดมินยังไม่ตอบกลับและรอนานเกิน 1 นาที
-    จะรวบรวมรายชื่อผู้ใช้ที่ยังไม่ได้รับการตอบกลับแล้วส่งแจ้งเตือนเข้า Admin Group ทุก 1 นาที
+    ตรวจสอบข้อความล่าสุดที่เป็น DM จาก User หากแอดมินยังไม่ตอบกลับและรอนานเกิน 10 นาที
+    จะรวบรวมรายชื่อผู้ใช้ที่ยังไม่ได้รับการตอบกลับแล้วส่งแจ้งเตือนเข้า Admin Group ทุก 10 นาที
     หากรอบไหนไม่มีข้อความค้างตอบ จะไม่ส่งข้อความเตือน
     """
     now = datetime.now(timezone.utc)
@@ -883,8 +887,8 @@ async def check_unanswered_user_dms_reminder(bot: Bot) -> None:
             for msg in latest_user_msgs:
                 created_at = ensure_utc(msg.created_at)
                 time_waiting = (now - created_at).total_seconds()
-                # ต้องรอนานเกิน 1 นาที (60 วินาที)
-                if time_waiting >= 60:
+                # ต้องรอนานเกิน 10 นาที (600 วินาที)
+                if time_waiting >= UNANSWERED_DM_REMINDER_TIMEOUT_SECONDS:
                     wait_sec = int(time_waiting)
                     wait_min = wait_sec // 60
                     wait_rem_sec = wait_sec % 60
@@ -905,7 +909,7 @@ async def check_unanswered_user_dms_reminder(bot: Bot) -> None:
             lines = [
                 f"🚨 <b>[แจ้งเตือนข้อความค้างตอบ] มีผู้ใช้รอแอดมินตอบกลับ {count} คน!</b>",
                 "━━━━━━━━━━━━━━━━━━━━",
-                "📌 <i>ข้อความล่าสุดเป็นของผู้ใช้ที่ยังไม่ได้รับการตอบกลับเกิน 1 นาที:</i>\n",
+                "📌 <i>ข้อความล่าสุดเป็นของผู้ใช้ที่ยังไม่ได้รับการตอบกลับเกิน 10 นาที:</i>\n",
             ]
 
             for i, (msg, wait_str, u_obj) in enumerate(unanswered[:10], start=1):
@@ -991,7 +995,7 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         coalesce=True,
     )
 
-    # 3. Job แจ้งเตือนสลิป/ซองของขวัญค้าง PENDING นานเกิน 1 นาที (ทำงานทุก 30 วินาที)
+    # 3. Job แจ้งเตือนสลิป/ซองของขวัญค้าง PENDING นานเกิน 10 นาที (ทำงานตรวจเช็คทุก 30 วินาที)
     scheduler.add_job(
         check_pending_slips_reminder,
         trigger="interval",
@@ -1004,7 +1008,7 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         coalesce=True,
     )
 
-    # 4. Job แจ้งเตือนข้อความ DM จากผู้ใช้ที่ค้างตอบเกิน 1 นาที (ทำงานทุก 60 วินาที)
+    # 4. Job แจ้งเตือนข้อความ DM จากผู้ใช้ที่ค้างตอบเกิน 10 นาที (ทำงานตรวจเช็คทุก 60 วินาที)
     scheduler.add_job(
         check_unanswered_user_dms_reminder,
         trigger="interval",

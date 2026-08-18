@@ -58,7 +58,7 @@ async def test_slip_reminder():
         )
         session.add(user)
 
-        # Slip 1: Recent slip (created 30s ago) -> Should NOT be reminded
+        # Slip 1: Recent slip (created 60s ago) -> Should NOT be reminded (< 600s)
         slip_recent = PaymentSlip(
             id=1,
             user_id=8888,
@@ -66,10 +66,10 @@ async def test_slip_reminder():
             plan_type=PlanType.VIP_30D.value,
             payment_method="TRUEMONEY_ANGPAO",
             status=SlipStatus.PENDING.value,
-            created_at=now - timedelta(seconds=30),
+            created_at=now - timedelta(seconds=60),
         )
 
-        # Slip 2: Overdue slip (created 90s ago, never reminded) -> Should BE reminded
+        # Slip 2: Overdue slip (created 650s ago, never reminded) -> Should BE reminded (> 600s)
         slip_overdue = PaymentSlip(
             id=2,
             user_id=8888,
@@ -77,10 +77,10 @@ async def test_slip_reminder():
             plan_type=PlanType.VIP_30D.value,
             payment_method="TRUEMONEY_ANGPAO",
             status=SlipStatus.PENDING.value,
-            created_at=now - timedelta(seconds=90),
+            created_at=now - timedelta(seconds=650),
         )
 
-        # Slip 3: Overdue photo slip (created 120s ago, never reminded) -> Should BE reminded
+        # Slip 3: Overdue photo slip (created 700s ago, never reminded) -> Should BE reminded (> 600s)
         slip_photo = PaymentSlip(
             id=3,
             user_id=8888,
@@ -88,10 +88,10 @@ async def test_slip_reminder():
             plan_type=PlanType.VIP_30D.value,
             payment_method="PROMPTPAY",
             status=SlipStatus.PENDING.value,
-            created_at=now - timedelta(seconds=120),
+            created_at=now - timedelta(seconds=700),
         )
 
-        # Slip 4: Approved slip (created 100s ago) -> Should NOT be reminded
+        # Slip 4: Approved slip (created 650s ago) -> Should NOT be reminded
         slip_approved = PaymentSlip(
             id=4,
             user_id=8888,
@@ -99,7 +99,7 @@ async def test_slip_reminder():
             plan_type=PlanType.VIP_30D.value,
             payment_method="PROMPTPAY",
             status=SlipStatus.APPROVED.value,
-            created_at=now - timedelta(seconds=100),
+            created_at=now - timedelta(seconds=650),
         )
 
         session.add_all([slip_recent, slip_overdue, slip_photo, slip_approved])
@@ -126,15 +126,15 @@ async def test_slip_reminder():
     mock_bot.send_photo.reset_mock()
     await check_pending_slips_reminder(mock_bot)
 
-    # Verify: No new reminders because < 60s since last reminder
+    # Verify: No new reminders because < 600s since last reminder
     assert mock_bot.send_message.call_count == 0
     assert mock_bot.send_photo.call_count == 0
     print("Throttle Verification: PASS ✅")
 
-    print("--- [TEST 4] Fast-forward 65 seconds and test Round 2 Reminder ---")
+    print("--- [TEST 4] Fast-forward 650 seconds and test Round 2 Reminder ---")
     async with async_session() as session:
         s2 = await session.get(PaymentSlip, 2)
-        s2.last_reminded_at = now - timedelta(seconds=65)
+        s2.last_reminded_at = now - timedelta(seconds=650)
         session.add(s2)
         await session.commit()
 

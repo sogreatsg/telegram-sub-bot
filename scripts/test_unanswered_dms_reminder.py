@@ -51,24 +51,24 @@ async def test_unanswered_dms_reminder():
     assert mock_bot.send_message.call_count == 0
     print("Empty state: PASS (0 messages sent) ✅")
 
-    print("\n--- [TEST 2] Add User A (recent msg, 20s ago) -> Should NOT send reminder ---")
+    print("\n--- [TEST 2] Add User A (recent msg, 100s ago) -> Should NOT send reminder (< 600s) ---")
     async with async_session() as session:
         u_a = User(telegram_id=1001, username="user_a", full_name="User Alpha", created_at=now)
-        msg_a = ChatMessage(id=1, user_id=1001, sender_role="USER", message_text="สนใจแพ็กเกจ 30 วันครับ", created_at=now - timedelta(seconds=20))
+        msg_a = ChatMessage(id=1, user_id=1001, sender_role="USER", message_text="สนใจแพ็กเกจ 30 วันครับ", created_at=now - timedelta(seconds=100))
         session.add_all([u_a, msg_a])
         await session.commit()
 
     await check_unanswered_user_dms_reminder(mock_bot)
     assert mock_bot.send_message.call_count == 0
-    print("Recent message (<60s): PASS (0 messages sent) ✅")
+    print("Recent message (<600s): PASS (0 messages sent) ✅")
 
-    print("\n--- [TEST 3] Add User B (overdue msg, 90s ago) and User C (overdue msg, 150s ago) ---")
+    print("\n--- [TEST 3] Add User B (overdue msg, 650s ago) and User C (overdue msg, 700s ago) ---")
     async with async_session() as session:
         u_b = User(telegram_id=1002, username="user_b", full_name="User Beta", created_at=now)
-        msg_b = ChatMessage(id=2, user_id=1002, sender_role="USER", message_text="ขอสอบถามเรื่องโอนเงินครับ", created_at=now - timedelta(seconds=90))
+        msg_b = ChatMessage(id=2, user_id=1002, sender_role="USER", message_text="ขอสอบถามเรื่องโอนเงินครับ", created_at=now - timedelta(seconds=650))
 
         u_c = User(telegram_id=1003, username="user_c", full_name="User Gamma", created_at=now)
-        msg_c = ChatMessage(id=3, user_id=1003, sender_role="USER", message_text="ลิงก์ซองแดงเปิดไม่ติดครับ", created_at=now - timedelta(seconds=150))
+        msg_c = ChatMessage(id=3, user_id=1003, sender_role="USER", message_text="ลิงก์ซองแดงเปิดไม่ติดครับ", created_at=now - timedelta(seconds=700))
 
         session.add_all([u_b, msg_b, u_c, msg_c])
         await session.commit()
@@ -80,7 +80,7 @@ async def test_unanswered_dms_reminder():
 
     assert "User Beta" in sent_text
     assert "User Gamma" in sent_text
-    assert "User Alpha" not in sent_text  # Alpha was only 20s ago
+    assert "User Alpha" not in sent_text  # Alpha was only 100s ago
     print("Aggregated Overdue Reminder: PASS ✅")
 
     print("\n--- [TEST 4] Admin replies to User B -> User B removed from reminder ---")
