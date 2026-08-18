@@ -389,7 +389,9 @@ async def process_truemoney_submission(
     submitted_time_thai = format_thai_datetime(slip.created_at)
 
     admin_text = (
-        "🧧 <b>มีการชำระเงินใหม่ผ่าน ซองของขวัญ TrueMoney!</b>\n\n"
+        "🧧 <b>มีการชำระเงินใหม่ผ่าน ซองของขวัญ TrueMoney!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n\n"
         f"🆔 <b>รหัสรายการ:</b> <code>#{slip_id}</code>\n"
         f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
@@ -503,7 +505,9 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
     submitted_time_thai = format_thai_datetime(slip.created_at)
 
     admin_caption = (
-        "🔔 <b>มีการส่งสลิปชำระเงินใหม่!</b>\n\n"
+        "🔔 <b>มีการส่งสลิปชำระเงินใหม่!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n\n"
         f"🆔 <b>รหัสสลิป:</b> <code>#{slip_id}</code>\n"
         f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
@@ -586,7 +590,9 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
     submitted_time_thai = format_thai_datetime(slip.created_at)
 
     admin_caption = (
-        "🔔 <b>มีการส่งสลิปชำระเงินใหม่ (ไฟล์รูป)!</b>\n\n"
+        "🔔 <b>มีการส่งสลิปชำระเงินใหม่ (ไฟล์รูป)!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n\n"
         f"🆔 <b>รหัสสลิป:</b> <code>#{slip_id}</code>\n"
         f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
@@ -646,6 +652,7 @@ async def handle_slip_text_input(message: Message, state: FSMContext, bot: Bot):
     admin_alert = (
         "💬 <b>มีข้อความจากผู้ใช้ (ระหว่างรอสลิปโอนเงิน)!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n"
         f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
         f"📝 <b>ข้อความ:</b>\n<i>{html.escape(msg_text)}</i>\n"
@@ -705,6 +712,7 @@ async def handle_general_user_media(message: Message, bot: Bot):
     admin_alert = (
         f"📷 <b>มีผู้ใช้ส่ง{media_type} (Direct Message)!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n"
         f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
     )

@@ -57,7 +57,9 @@ async def _send_stale_pending_alert(bot: Bot, sub: Subscription) -> None:
             chat_id=config.ADMIN_GROUP_ID,
             text=(
                 "⚠️ <b>[แจ้งเตือน] มีโควต้าที่มีมูลค่าค้างอยู่ แต่ผู้ใช้ยังไม่กดเข้า Channel เกิน "
-                f"{PENDING_STALE_HOURS} ชม.!</b>\n\n"
+                f"{PENDING_STALE_HOURS} ชม.!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n\n"
                 f"👤 <b>User ID:</b> <code>{sub.user_id}</code>\n"
                 f"📦 <b>โควต้าค้าง:</b> {sub.pending_days} วัน {sub.pending_minutes} นาที ({sub.source_label})\n"
                 f"📅 <b>เริ่มรอตั้งแต่:</b> <code>{format_thai_datetime(sub.pending_since)} น.</code>\n\n"
@@ -787,6 +789,7 @@ async def check_pending_slips_reminder(bot: Bot) -> None:
                     admin_text = (
                         f"🚨 <b>[แจ้งเตือนซ้ำ #{slip.reminder_count}] ซองของขวัญ TrueMoney รอดำเนินการนานเกิน {wait_str}!</b>\n"
                         "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION} กรุณาตรวจสอบหรือกดอนุมัติ\n\n"
                         f"🆔 <b>รหัสรายการ:</b> <code>#{slip.id}</code>\n"
                         f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
                         f"🔢 <b>User ID:</b> <code>{telegram_user_id}</code>\n"
@@ -817,6 +820,7 @@ async def check_pending_slips_reminder(bot: Bot) -> None:
                     admin_caption = (
                         f"🚨 <b>[แจ้งเตือนซ้ำ #{slip.reminder_count}] สลิปโอนเงินรอดำเนินการนานเกิน {wait_str}!</b>\n"
                         "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION} กรุณาตรวจสอบหรือกดอนุมัติ\n\n"
                         f"🆔 <b>รหัสสลิป:</b> <code>#{slip.id}</code>\n"
                         f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
                         f"🔢 <b>User ID:</b> <code>{telegram_user_id}</code>\n"
@@ -909,6 +913,7 @@ async def check_unanswered_user_dms_reminder(bot: Bot) -> None:
             lines = [
                 f"🚨 <b>[แจ้งเตือนข้อความค้างตอบ] มีผู้ใช้รอแอดมินตอบกลับ {count} คน!</b>",
                 "━━━━━━━━━━━━━━━━━━━━",
+                f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n",
                 "📌 <i>ข้อความล่าสุดเป็นของผู้ใช้ที่ยังไม่ได้รับการตอบกลับเกิน 10 นาที:</i>\n",
             ]
 

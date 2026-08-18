@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     BOT_TOKEN: str = Field(..., description="Telegram Bot API Token from @BotFather")
     CHANNEL_ID: int = Field(..., description="Target private Telegram Channel ID (e.g. -1001234567890)")
     ADMIN_GROUP_ID: int = Field(..., description="Admin Telegram Group ID (e.g. -1009876543210)")
+    ADMIN_MENTION: str = Field(
+        default="@sgrtbl",
+        description="Telegram handle or username to tag in admin group alerts",
+    )
     DATABASE_URL: str = Field(
         default="sqlite+aiosqlite:///data/bot.db",
         description="Async SQLAlchemy database connection URL",

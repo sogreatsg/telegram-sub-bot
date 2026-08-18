@@ -567,6 +567,7 @@ async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
         admin_alert = (
             "💬 <b>มีผู้ใช้ส่งลิงก์ซองของขวัญ TrueMoney (ยังไม่ได้เลือกแพ็กเกจ)!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n"
             f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
             f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
             f"🔗 <b>ลิงก์ที่ส่ง:</b> <code>{html.escape(angpao_url)}</code>\n"
@@ -611,6 +612,7 @@ async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
     admin_alert = (
         "💬 <b>มีข้อความใหม่จากผู้ใช้ (Direct Message)!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n"
         f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
         f"📝 <b>ข้อความ:</b>\n<i>{html.escape(msg_text)}</i>\n"
