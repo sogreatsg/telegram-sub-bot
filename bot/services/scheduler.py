@@ -12,7 +12,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
 
 from bot.config import get_settings
-from bot.models.schema import Subscription, SubStatus
+from bot.models.schema import Subscription, SubStatus, PaymentSlip, SlipStatus, get_dynamic_plan_info
 from bot.services.database import get_session
 from bot.services.referral import award_referral_bonus
 from bot.services.subscription import PENDING_STALE_HOURS, activate_pending_subscription, is_pending_stale
@@ -697,6 +697,157 @@ async def send_daily_active_summary(bot: Bot) -> None:
         logger.error(f"Failed to send daily active summary report to Admin Group: {e}", exc_info=True)
 
 
+async def check_pending_slips_reminder(bot: Bot) -> None:
+    """
+    ตรวจสอบสลิป/ซองของขวัญที่ค้าง PENDING นานเกิน 1 นาที
+    และส่งแจ้งเตือนซ้ำเข้ากลุ่มแอดมินทุกๆ 1 นาที จนกว่าจะมีแอดมินกดอนุมัติหรือปฏิเสธ
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        async with get_session() as session:
+            stmt = (
+                select(PaymentSlip)
+                .options(selectinload(PaymentSlip.user))
+                .where(PaymentSlip.status == SlipStatus.PENDING.value)
+                .order_by(PaymentSlip.created_at.asc())
+            )
+            pending_slips = (await session.execute(stmt)).scalars().all()
+            if not pending_slips:
+                return
+
+            for slip in pending_slips:
+                created_at = ensure_utc(slip.created_at)
+                last_reminded = ensure_utc(slip.last_reminded_at) if getattr(slip, "last_reminded_at", None) else None
+
+                # ตรวจสอบว่าค้างเกิน 1 นาที (60 วินาที) นับจากตอนส่งสลิปหรือไม่
+                time_since_creation = (now - created_at).total_seconds()
+                if time_since_creation < 60:
+                    continue
+
+                # หากเคยแจ้งเตือนซ้ำไปแล้ว ให้เว้นระยะห่างอย่างน้อย 60 วินาที
+                if last_reminded:
+                    time_since_last_reminder = (now - last_reminded).total_seconds()
+                    if time_since_last_reminder < 60:
+                        continue
+
+                # อัปเดตสถิติการแจ้งเตือน
+                slip.reminder_count = (getattr(slip, "reminder_count", 0) or 0) + 1
+                slip.last_reminded_at = now
+                session.add(slip)
+
+                # คำนวณเวลาที่รอนาน
+                wait_sec = int(time_since_creation)
+                wait_min = wait_sec // 60
+                wait_rem_sec = wait_sec % 60
+                if wait_min > 0 and wait_rem_sec > 0:
+                    wait_str = f"{wait_min} นาที {wait_rem_sec} วินาที"
+                elif wait_min > 0:
+                    wait_str = f"{wait_min} นาที"
+                else:
+                    wait_str = f"{wait_rem_sec} วินาที"
+
+                user = slip.user
+                telegram_user_id = slip.user_id
+                user_handle = f"@{user.username}" if (user and user.username) else "ไม่มี Username"
+                full_name_safe = html.escape((user.full_name if user else None) or f"User {telegram_user_id}")
+                submitted_time_thai = format_thai_datetime(created_at)
+                plan_info = get_dynamic_plan_info(slip.plan_type or "VIP_30D")
+
+                slip_kb = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="✅ อนุมัติ",
+                                callback_data=f"admin:approve:{slip.id}",
+                            ),
+                            InlineKeyboardButton(
+                                text="❌ ปฏิเสธ",
+                                callback_data=f"admin:reject:{slip.id}",
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="👤 ดูข้อมูลสมาชิก",
+                                callback_data=f"admin:view_user:{telegram_user_id}",
+                            ),
+                            InlineKeyboardButton(
+                                text="📜 ดูประวัติการคุย",
+                                callback_data=f"admin:view_chat:{telegram_user_id}",
+                            ),
+                        ]
+                    ]
+                )
+
+                if slip.payment_method == "TRUEMONEY_ANGPAO":
+                    angpao_url = slip.file_id
+                    admin_text = (
+                        f"🚨 <b>[แจ้งเตือนซ้ำ #{slip.reminder_count}] ซองของขวัญ TrueMoney รอดำเนินการนานเกิน {wait_str}!</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🆔 <b>รหัสรายการ:</b> <code>#{slip.id}</code>\n"
+                        f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
+                        f"🔢 <b>User ID:</b> <code>{telegram_user_id}</code>\n"
+                        f"📦 <b>แพ็กเกจที่ขอ:</b> <b>{plan_info['badge']} ({plan_info['price']:,} บาท)</b>\n"
+                        f"⏳ <b>ระยะเวลา:</b> {plan_info['days']} วัน\n"
+                        f"📅 <b>เวลาที่ส่งครั้งแรก:</b> <code>{submitted_time_thai} น.</code> (<i>รอนาน {wait_str} แล้ว</i>)\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🔗 <b>ลิงก์ซองของขวัญ (TrueMoney Angpao):</b>\n"
+                        f"👉 <a href=\"{angpao_url}\">{html.escape(angpao_url)}</a>\n\n"
+                        f"📋 <b>แตะเพื่อคัดลอกลิงก์:</b>\n"
+                        f"<code>{angpao_url}</code>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"⚠️ <b>แอดมินยังไม่ได้กดตอบรับ กรุณากดรับซองและเลือกดำเนินการด้านล่าง:</b>"
+                    )
+                    try:
+                        await bot.send_message(
+                            chat_id=config.ADMIN_GROUP_ID,
+                            text=admin_text,
+                            reply_markup=slip_kb,
+                            parse_mode="HTML",
+                            disable_web_page_preview=True,
+                        )
+                        logger.info(f"[REMINDER] Sent repeat reminder #{slip.reminder_count} for TrueMoney slip #{slip.id} to Admin Group")
+                    except Exception as e:
+                        logger.error(f"[REMINDER] Failed to re-send TrueMoney slip #{slip.id} to Admin: {e}")
+
+                else:  # PROMPTPAY photo / document
+                    admin_caption = (
+                        f"🚨 <b>[แจ้งเตือนซ้ำ #{slip.reminder_count}] สลิปโอนเงินรอดำเนินการนานเกิน {wait_str}!</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🆔 <b>รหัสสลิป:</b> <code>#{slip.id}</code>\n"
+                        f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
+                        f"🔢 <b>User ID:</b> <code>{telegram_user_id}</code>\n"
+                        f"📦 <b>แพ็กเกจที่ขอ:</b> <b>{plan_info['badge']} ({plan_info['price']:,} บาท)</b>\n"
+                        f"⏳ <b>ระยะเวลา:</b> {plan_info['days']} วัน\n"
+                        f"📅 <b>เวลาที่ส่งครั้งแรก:</b> <code>{submitted_time_thai} น.</code> (<i>รอนาน {wait_str} แล้ว</i>)\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        "⚠️ <b>แอดมินยังไม่ได้กดตอบรับ กรุณาตรวจสอบสลิปและเลือกการดำเนินการด้านล่าง:</b>"
+                    )
+                    try:
+                        try:
+                            await bot.send_photo(
+                                chat_id=config.ADMIN_GROUP_ID,
+                                photo=slip.file_id,
+                                caption=admin_caption,
+                                reply_markup=slip_kb,
+                                parse_mode="HTML",
+                            )
+                        except Exception:
+                            await bot.send_document(
+                                chat_id=config.ADMIN_GROUP_ID,
+                                document=slip.file_id,
+                                caption=admin_caption,
+                                reply_markup=slip_kb,
+                                parse_mode="HTML",
+                            )
+                        logger.info(f"[REMINDER] Sent repeat reminder #{slip.reminder_count} for payment slip #{slip.id} to Admin Group")
+                    except Exception as e:
+                        logger.error(f"[REMINDER] Failed to re-send slip photo/doc #{slip.id} to Admin: {e}")
+
+            await session.commit()
+    except Exception as e:
+        logger.error(f"[REMINDER] Error in check_pending_slips_reminder job: {e}", exc_info=True)
+
+
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     """สร้างและตั้งค่า APScheduler AsyncIOScheduler ตามช่วงเวลาที่กำหนด"""
     scheduler = AsyncIOScheduler(timezone=BANGKOK_TZ)
@@ -721,6 +872,19 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         args=[bot],
         id="daily_active_summary_job",
         name="Send daily active members summary to Admin Group at 23:59",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # 3. Job แจ้งเตือนสลิป/ซองของขวัญค้าง PENDING นานเกิน 1 นาที (ทำงานทุก 30 วินาที)
+    scheduler.add_job(
+        check_pending_slips_reminder,
+        trigger="interval",
+        seconds=30,
+        args=[bot],
+        id="check_pending_slips_reminder_job",
+        name="Check and remind pending payment slips to Admin Group",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

@@ -266,6 +266,14 @@ async def init_db() -> None:
             except Exception:
                 pass
             try:
+                await conn.execute(text("ALTER TABLE payment_slips ADD COLUMN last_reminded_at DATETIME;"))
+            except Exception:
+                pass
+            try:
+                await conn.execute(text("ALTER TABLE payment_slips ADD COLUMN reminder_count INTEGER DEFAULT 0;"))
+            except Exception:
+                pass
+            try:
                 await conn.execute(text("ALTER TABLE users ADD COLUMN referred_by_id BIGINT;"))
             except Exception:
                 pass

@@ -266,6 +266,12 @@ class PaymentSlip(Base):
         String(32), default=SlipStatus.PENDING.value, nullable=False, index=True
     )
     admin_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    last_reminded_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reminder_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
