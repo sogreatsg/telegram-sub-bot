@@ -84,12 +84,9 @@ async def show_promotion_status(message_or_callback, bot: Optional[Bot] = None):
         await message_or_callback.answer(text=text, reply_markup=kb, parse_mode="HTML")
 
 
-@router.message(Command("promotion", "promo"))
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("promotion", "promo"))
 async def handle_promotion_command(message: Message, state: FSMContext):
     """คำสั่งดูสถานะหรือควบคุมโปรโมชั่น: /promotion [on/off/setting]"""
-    if message.chat.id != config.ADMIN_GROUP_ID:
-        return
-
     args = (message.text or "").split()[1:]
     if not args:
         await show_promotion_status(message)
@@ -111,31 +108,25 @@ async def handle_promotion_command(message: Message, state: FSMContext):
         await show_promotion_status(message)
 
 
-@router.message(Command("promotion_on", "promo_on"))
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("promotion_on", "promo_on"))
 async def handle_promotion_on_command(message: Message):
     """คำสั่งเปิดใช้งานโปรโมชั่น: /promotion_on"""
-    if message.chat.id != config.ADMIN_GROUP_ID:
-        return
     update_promotion(is_active=True)
     text, kb = get_promotion_status_text_and_kb()
     await message.answer(f"✅ <b>เปิดใช้งานโปรโมชั่นเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
 
 
-@router.message(Command("promotion_off", "promo_off"))
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("promotion_off", "promo_off"))
 async def handle_promotion_off_command(message: Message):
     """คำสั่งปิดใช้งานโปรโมชั่น: /promotion_off"""
-    if message.chat.id != config.ADMIN_GROUP_ID:
-        return
     update_promotion(is_active=False)
     text, kb = get_promotion_status_text_and_kb()
     await message.answer(f"❌ <b>ปิดใช้งานโปรโมชั่นเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
 
 
-@router.message(Command("promotion_setting", "promo_setting", "promotion_set", "promo_set"))
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("promotion_setting", "promo_setting", "promotion_set", "promo_set"))
 async def handle_promotion_setting_command(message: Message, state: FSMContext):
     """คำสั่งเริ่มตั้งค่าโปรโมชั่น: /promotion_setting"""
-    if message.chat.id != config.ADMIN_GROUP_ID:
-        return
     await message.answer("⚙️ <b>กรุณาพิมพ์จำนวนวันสำหรับโปรโมชั่นนี้</b> (เช่น 3, 10, 30 หรือพิมพ์ /cancel เพื่อยกเลิก):", parse_mode="HTML")
     await state.set_state(PromoSettingStates.waiting_for_days)
 
@@ -168,10 +159,8 @@ async def handle_promo_action_callback(callback: CallbackQuery, state: FSMContex
         await state.set_state(PromoBroadcastStates.waiting_for_message)
 
 
-@router.message(PromoSettingStates.waiting_for_days)
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, PromoSettingStates.waiting_for_days)
 async def process_promo_days(message: Message, state: FSMContext):
-    if message.chat.id != config.ADMIN_GROUP_ID:
-        return
     if message.text == "/cancel":
         await state.clear()
         await message.answer("❌ ยกเลิกการตั้งค่าโปรโมชั่นแล้ว")
@@ -243,19 +232,15 @@ async def process_promo_price(callback: CallbackQuery, state: FSMContext):
     await state.clear()
 
 
-@router.message(Command("promo_broadcast", "promotion_broadcast", "broadcast_promo", "promobc"))
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("promo_broadcast", "promotion_broadcast", "broadcast_promo", "promobc"))
 async def handle_promo_broadcast(message: Message, state: FSMContext):
     """คำสั่งบรอดแคสต์โปรโมชั่น: /promo_broadcast"""
-    if message.chat.id != config.ADMIN_GROUP_ID:
-        return
     await message.answer("📢 <b>กรุณาพิมพ์ข้อความโปรโมชั่นที่คุณต้องการส่งหาผู้ใช้</b>\n(รองรับ HTML format หรือพิมพ์ /cancel เพื่อยกเลิก):", parse_mode="HTML")
     await state.set_state(PromoBroadcastStates.waiting_for_message)
 
 
-@router.message(PromoBroadcastStates.waiting_for_message)
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, PromoBroadcastStates.waiting_for_message)
 async def process_broadcast_message(message: Message, state: FSMContext):
-    if message.chat.id != config.ADMIN_GROUP_ID:
-        return
     if message.text == "/cancel":
         await state.clear()
         await message.answer("❌ ยกเลิกการบรอดแคสต์แล้ว")
@@ -345,10 +330,8 @@ async def process_broadcast_target(callback: CallbackQuery, state: FSMContext, b
     )
 
 
-@router.message(PromoBroadcastStates.waiting_for_target)
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, PromoBroadcastStates.waiting_for_target)
 async def process_broadcast_single_user(message: Message, state: FSMContext, bot: Bot):
-    if message.chat.id != config.ADMIN_GROUP_ID:
-        return
     if message.text == "/cancel":
         await state.clear()
         await message.answer("❌ ยกเลิกการส่งแล้ว")
