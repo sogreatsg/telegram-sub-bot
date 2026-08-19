@@ -3,8 +3,12 @@
 ## 1. 🔍 Mandatory Code Verification Before Commit
 * **Always run pre-commit verification:** Before staging and committing any Python code, run an import & syntax check using the local environment:
   ```bash
-  .\venv\Scripts\python.exe -c "from bot.handlers import user_menu, payment, admin, channel_events; from bot.main import main; print('OK')"
+  .\venv\Scripts\python.exe -c "from bot.handlers import user_menu, payment, admin, channel_events, promotion_admin, promotion_user; from bot.main import main; print('OK')"
   ```
+* **Mandatory Button & Callback Query Simulation Testing (ทดสอบทุกปุ่มเสมอ):**
+  - Whenever creating or modifying any Inline Keyboard buttons, callback queries (`menu:*`, `payment:*`, `admin:*`, `promoset:*`, etc.), or package options:
+  - **NEVER rely solely on static import checks.**
+  - **MUST run automated callback simulation tests** (e.g., `scripts/test_subscribe_callbacks.py`, `scripts/test_payment_features.py`, `scripts/test_promotion_commands.py`) to execute every callback handler path end-to-end and ensure `callback.answer()` and reply rendering succeed with 0 runtime errors.
 * **Verify tests:** When modifying business logic (e.g., subscriptions, referrals, reconciliation), run the corresponding test script in `scripts/`.
 * **Zero Runtime Crashes:** Ensure all imports, type annotations, and database schema mappings are 100% valid.
 
