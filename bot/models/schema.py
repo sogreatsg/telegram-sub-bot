@@ -26,6 +26,7 @@ class Base(DeclarativeBase):
 class PlanType(str, enum.Enum):
     """Subscription plan types."""
     TRIAL_15M = "TRIAL_15M"
+    VIP_1D = "VIP_1D"
     VIP_3D = "VIP_3D"
     VIP_10D = "VIP_10D"
     VIP_30D = "VIP_30D"
@@ -35,6 +36,13 @@ class PlanType(str, enum.Enum):
 
 
 PLAN_DETAILS = {
+    PlanType.VIP_1D.value: {
+        "name": "VIP 1 วัน",
+        "badge": "⚡ VIP 1 วัน",
+        "price": 100,
+        "days": 1,
+        "qr_filename": "qr_100.png",
+    },
     PlanType.VIP_3D.value: {
         "name": "VIP 3 วัน",
         "badge": "🥉 VIP 3 วัน",

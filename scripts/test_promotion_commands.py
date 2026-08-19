@@ -83,6 +83,21 @@ async def test_promotion():
     assert get_promotion_settings().get("is_active") is True
     print("Legacy space commands: PASS ✅")
 
+    print("\n--- [TEST 6] Testing Setting Promotion with 100 Baht ---")
+    from bot.handlers.promotion_admin import process_promo_price
+    mock_cb.data = "promoset:100"
+    mock_state.get_data = AsyncMock(return_value={"promo_days": 1})
+    mock_state.clear = AsyncMock()
+    mock_cb.message.edit_text.reset_mock()
+
+    await process_promo_price(mock_cb, mock_state)
+    settings = get_promotion_settings()
+    assert settings.get("price") == 100
+    assert settings.get("days") == 1
+    assert settings.get("qr_filename") == "qr_100.png"
+    assert mock_cb.message.edit_text.call_count == 1
+    print("100 Baht promo setting & qr_100.png mapping: PASS ✅")
+
     print("\n==============================================")
     print("    ALL PROMOTION COMMAND TESTS PASSED!       ")
     print("==============================================\n")

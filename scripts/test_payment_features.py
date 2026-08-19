@@ -35,7 +35,7 @@ async def run_tests():
     print("  -> URL extraction tests PASSED!")
 
     print("\n2. Testing Payment Keyboards...")
-    for plan in [PlanType.VIP_3D.value, PlanType.VIP_10D.value, PlanType.VIP_30D.value, PlanType.PROMOTION.value]:
+    for plan in [PlanType.VIP_1D.value, PlanType.VIP_3D.value, PlanType.VIP_10D.value, PlanType.VIP_30D.value, PlanType.PROMOTION.value]:
         kb = get_payment_method_keyboard(plan)
         assert len(kb.inline_keyboard) == 3, f"Payment method keyboard should have 3 rows for {plan}"
         assert f"payment:method:promptpay:{plan}" in kb.inline_keyboard[0][0].callback_data

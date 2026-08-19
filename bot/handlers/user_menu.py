@@ -27,7 +27,7 @@ router = Router(name="user_menu")
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
 
 def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup:
-    """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard พร้อม 3 แพ็กเกจ และระบบชวนเพื่อน"""
+    """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard พร้อมแพ็กเกจ และระบบชวนเพื่อน"""
     trial_button_text = "⏱️ ทดลองใช้ฟรี 15 นาที" if trial_available else "⏱️ ทดลองฟรี (ใช้สิทธิ์แล้ว)"
     
     keyboard = [
@@ -36,6 +36,12 @@ def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup
                 text=trial_button_text,
                 callback_data="menu:trial",
             )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⚡ VIP 1 วัน — 100 บาท",
+                callback_data="menu:subscribe:VIP_1D",
+            ),
         ],
         [
             InlineKeyboardButton(
@@ -159,6 +165,7 @@ async def handle_start(message: Message, state: FSMContext):
         "เข้าถึงเนื้อหาสุดพิเศษใน Channel VIP ส่วนตัว พร้อมการอัปเดตแบบเรียลไทม์\n\n"
         "🌟 <b>กรุณาเลือกแพ็กเกจที่ต้องการด้านล่าง:</b>\n"
         "• <b>⏱️ ทดลองใช้ฟรี 15 นาที</b>: ทดลองเข้าชม Channel ฟรี 1 ครั้ง\n"
+        "• <b>⚡ VIP 1 วัน</b>: ราคา 100 บาท\n"
         "• <b>🥉 VIP 3 วัน</b>: ราคา 300 บาท\n"
         "• <b>🥈 VIP 10 วัน</b>: ราคา 500 บาท\n"
         "• <b>🥇 VIP 30 วัน</b>: ราคา 1,000 บาท\n\n"

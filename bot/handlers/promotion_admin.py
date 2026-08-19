@@ -187,13 +187,18 @@ async def process_promo_days(message: Message, state: FSMContext):
 
     await state.update_data(promo_days=days)
 
-    # 3 options matching existing QR codes
+    # 4 options matching existing QR codes (100, 300, 500, 1000)
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="300 บาท", callback_data="promoset:300")],
-        [InlineKeyboardButton(text="500 บาท", callback_data="promoset:500")],
-        [InlineKeyboardButton(text="1,000 บาท", callback_data="promoset:1000")],
+        [
+            InlineKeyboardButton(text="100 บาท", callback_data="promoset:100"),
+            InlineKeyboardButton(text="300 บาท", callback_data="promoset:300"),
+        ],
+        [
+            InlineKeyboardButton(text="500 บาท", callback_data="promoset:500"),
+            InlineKeyboardButton(text="1,000 บาท", callback_data="promoset:1000"),
+        ],
     ])
-    await message.answer(f"⏳ <b>กำหนด {days} วัน เรียบร้อย</b>\nกรุณาเลือกราคาสำหรับโปรโมชั่น (จำกัด 3 ราคาตาม QR Code ที่มี):", reply_markup=kb, parse_mode="HTML")
+    await message.answer(f"⏳ <b>กำหนด {days} วัน เรียบร้อย</b>\nกรุณาเลือกราคาสำหรับโปรโมชั่น (จำกัด 4 ราคาตาม QR Code ที่มี):", reply_markup=kb, parse_mode="HTML")
     await state.set_state(PromoSettingStates.waiting_for_price)
 
 
@@ -203,6 +208,7 @@ async def process_promo_price(callback: CallbackQuery, state: FSMContext):
     price = int(price_str)
 
     qr_map = {
+        100: "qr_100.png",
         300: "qr_300.png",
         500: "qr_500.png",
         1000: "qr_1000.png"
