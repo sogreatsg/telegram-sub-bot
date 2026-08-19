@@ -702,6 +702,9 @@ async def send_daily_active_summary(bot: Bot) -> None:
 PENDING_SLIP_REMINDER_TIMEOUT_SECONDS = 600  # 10 นาที
 UNANSWERED_DM_REMINDER_TIMEOUT_SECONDS = 600  # 10 นาที
 
+# แคชเก็บเวลาที่เคยส่งแจ้งเตือน DM ค้างตอบล่าสุดของแต่ละ ChatMessage ID ในหน่วยความจำ (ID -> datetime)
+_dm_last_reminded: dict[int, datetime] = {}
+
 
 async def check_pending_slips_reminder(bot: Bot) -> None:
     """
@@ -887,24 +890,39 @@ async def check_unanswered_user_dms_reminder(bot: Bot) -> None:
             )
             latest_user_msgs = (await session.execute(stmt)).scalars().all()
 
+            # ล้างประวัติข้อความเก่าที่ตอบไปแล้วหรือไม่มีในรายการค้างตอบแล้ว
+            active_msg_ids = {msg.id for msg in latest_user_msgs}
+            for old_id in list(_dm_last_reminded.keys()):
+                if old_id not in active_msg_ids:
+                    _dm_last_reminded.pop(old_id, None)
+
             unanswered = []
             for msg in latest_user_msgs:
                 created_at = ensure_utc(msg.created_at)
                 time_waiting = (now - created_at).total_seconds()
                 # ต้องรอนานเกิน 10 นาที (600 วินาที)
-                if time_waiting >= UNANSWERED_DM_REMINDER_TIMEOUT_SECONDS:
-                    wait_sec = int(time_waiting)
-                    wait_min = wait_sec // 60
-                    wait_rem_sec = wait_sec % 60
-                    if wait_min > 0 and wait_rem_sec > 0:
-                        wait_str = f"{wait_min} นาที {wait_rem_sec} วินาที"
-                    elif wait_min > 0:
-                        wait_str = f"{wait_min} นาที"
-                    else:
-                        wait_str = f"{wait_rem_sec} วินาที"
-                    unanswered.append((msg, wait_str, msg.user))
+                if time_waiting < UNANSWERED_DM_REMINDER_TIMEOUT_SECONDS:
+                    continue
 
-            # ถ้ารอบนี้ไม่มีข้อความค้างตอบ -> ไม่ต้องส่งเตือน
+                # ตรวจสอบว่าเคยแจ้งเตือนไปแล้วหรือไม่ หากเคยแจ้งเตือนแล้ว ต้องเว้นระยะห่างอย่างน้อย 10 นาที (600 วินาที)
+                last_reminded = _dm_last_reminded.get(msg.id)
+                if last_reminded:
+                    time_since_last_reminder = (now - last_reminded).total_seconds()
+                    if time_since_last_reminder < UNANSWERED_DM_REMINDER_TIMEOUT_SECONDS:
+                        continue
+
+                wait_sec = int(time_waiting)
+                wait_min = wait_sec // 60
+                wait_rem_sec = wait_sec % 60
+                if wait_min > 0 and wait_rem_sec > 0:
+                    wait_str = f"{wait_min} นาที {wait_rem_sec} วินาที"
+                elif wait_min > 0:
+                    wait_str = f"{wait_min} นาที"
+                else:
+                    wait_str = f"{wait_rem_sec} วินาที"
+                unanswered.append((msg, wait_str, msg.user))
+
+            # ถ้ารอบนี้ไม่มีข้อความที่ครบกำหนดส่งเตือน -> ไม่ต้องส่งเตือน
             if not unanswered:
                 return
 
@@ -963,9 +981,13 @@ async def check_unanswered_user_dms_reminder(bot: Bot) -> None:
                     reply_markup=reply_kb,
                     parse_mode="HTML",
                 )
+                # บันทึกเวลาที่ส่งแจ้งเตือนล่าสุดของแต่ละข้อความ
+                for msg, _, _ in unanswered:
+                    _dm_last_reminded[msg.id] = now
                 logger.info(f"[DM_REMINDER] Sent unanswered DMs reminder for {count} users to Admin Group {config.ADMIN_GROUP_ID}")
             except Exception as e:
                 logger.error(f"[DM_REMINDER] Failed to send unanswered DMs reminder: {e}")
+
 
     except Exception as e:
         logger.error(f"[DM_REMINDER] Error in check_unanswered_user_dms_reminder job: {e}", exc_info=True)

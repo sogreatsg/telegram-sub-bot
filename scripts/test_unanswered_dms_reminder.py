@@ -83,11 +83,31 @@ async def test_unanswered_dms_reminder():
     assert "User Alpha" not in sent_text  # Alpha was only 100s ago
     print("Aggregated Overdue Reminder: PASS ✅")
 
+    print("\n--- [TEST 3.1] Run check_unanswered_user_dms_reminder immediately (0s later) ---")
+    mock_bot.send_message.reset_mock()
+    await check_unanswered_user_dms_reminder(mock_bot)
+    assert mock_bot.send_message.call_count == 0, "Expected 0 messages due to 10-minute throttle cooldown"
+    print("Throttle Verification (0s later): PASS (0 messages sent) ✅")
+
+    print("\n--- [TEST 3.2] Fast-forward 650 seconds -> Should send repeat reminder ---")
+    # Simulate 650 seconds passing for last_reminded timestamp
+    for msg_id in sched_module._dm_last_reminded:
+        sched_module._dm_last_reminded[msg_id] = now - timedelta(seconds=650)
+
+    mock_bot.send_message.reset_mock()
+    await check_unanswered_user_dms_reminder(mock_bot)
+    assert mock_bot.send_message.call_count == 1, "Expected 1 repeat reminder message after cooldown"
+    print("Repeat Reminder after 10m: PASS ✅")
+
     print("\n--- [TEST 4] Admin replies to User B -> User B removed from reminder ---")
     async with async_session() as session:
         admin_reply_b = ChatMessage(id=4, user_id=1002, sender_role="ADMIN", message_text="สวัสดีครับ สามารถโอนผ่านพร้อมเพย์ได้เลยครับ", created_at=now)
         session.add(admin_reply_b)
         await session.commit()
+
+    # Fast-forward cooldown for remaining overdue users
+    for msg_id in sched_module._dm_last_reminded:
+        sched_module._dm_last_reminded[msg_id] = now - timedelta(seconds=650)
 
     mock_bot.send_message.reset_mock()
     await check_unanswered_user_dms_reminder(mock_bot)
