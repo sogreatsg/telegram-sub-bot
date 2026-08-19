@@ -245,8 +245,9 @@ async def sync_pending_members(bot: Bot) -> dict:
 
 async def check_expiring_soon_subscriptions(bot: Bot) -> None:
     """
-    ตรวจสอบสมาชิกที่กำลังจะหมดอายุล่วงหน้า 1 วัน (24 ชั่วโมง)
-    และส่งข้อความแจ้งเตือนทาง DM แนะนำให้กด /start หรือกดปุ่มต่ออายุสมาชิก
+    ตรวจสอบสมาชิกที่กำลังจะหมดอายุล่วงหน้า และส่งข้อความแจ้งเตือนทาง DM แนะนำให้ต่ออายุ
+    - แพ็กเกจระยะยาว (> 24 ชม. เช่น 3 วัน, 10 วัน, 30 วัน): แจ้งเตือนล่วงหน้า 24 ชั่วโมง
+    - แพ็กเกจระยะสั้น (<= 24 ชม. เช่น 12 ชั่วโมง): แจ้งเตือนล่วงหน้า 1 ชั่วโมงก่อนหมดอายุ
     """
     now = datetime.now(timezone.utc)
     one_day_later = now + timedelta(hours=24)
@@ -269,9 +270,19 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
         if not expiring_subs:
             return
 
-        logger.info(f"Found {len(expiring_subs)} subscription(s) expiring within 24 hours. Sending 1-day warning...")
-
         for sub in expiring_subs:
+            # คำนวณระยะเวลารวมของแพ็กเกจ (total duration)
+            joined_ref = ensure_utc(sub.joined_at) or ensure_utc(sub.created_at) or now
+            total_duration = (ensure_utc(sub.expires_at) - joined_ref).total_seconds()
+            is_short_plan = total_duration <= (24 * 3600)  # แพ็กเกจ 12 ชม. หรือ <= 24 ชม.
+
+            # ถ้าเป็นแพ็กเกจระยะสั้น (เช่น 12 ชั่วโมง) ให้แจ้งเตือนเมื่อเหลือเวลา <= 1 ชั่วโมงเท่านั้น
+            if is_short_plan:
+                one_hour_later = now + timedelta(hours=1)
+                if ensure_utc(sub.expires_at) > one_hour_later:
+                    # ยังเหลือเวลามากกว่า 1 ชั่วโมง -> ข้ามไปก่อน รอเตือนตอนเหลือ 1 ชั่วโมง
+                    continue
+
             user_id = sub.user_id
             user_obj = sub.user
             plan_title = sub.source_label or "สมาชิก VIP"
@@ -280,12 +291,12 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
             time_rem = format_remaining_time(sub.expires_at)
             user_name = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
 
-            # มาร์กว่าได้ส่งแจ้งเตือน 1 วันแล้ว
+            # มาร์กว่าได้ส่งแจ้งเตือนแล้ว
             sub.warned_1d = True
             session.add(sub)
 
             warn_text = (
-                "⚠️ <b>[แจ้งเตือน] แพ็กเกจสมาชิก VIP ของคุณจะหมดอายุในอีก 24 ชั่วโมง!</b>\n\n"
+                f"⚠️ <b>[แจ้งเตือน] แพ็กเกจสมาชิก VIP ของคุณจะหมดอายุในอีก {time_rem}!</b>\n\n"
                 f"เรียนคุณ {user_name} 👋\n"
                 f"แพ็กเกจ <b>{plan_title}</b> ของคุณกำลังจะหมดอายุใน:\n"
                 f"📅 <code>{expires_at_thai} น.</code> (เหลือเวลาประมาณ {time_rem})\n\n"
@@ -298,7 +309,7 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(text="💳 ต่ออายุสมาชิก VIP", callback_data="menu:packages"),
-                        InlineKeyboardButton(text="📊 เช็คสถานะ", callback_data="menu:status"),
+                        InlineKeyboardButton(text="📊 เช็คสถานะ", callback_data="menu:my_status"),
                     ],
                 ]
             )
@@ -310,11 +321,13 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
                     reply_markup=renew_keyboard,
                     parse_mode="HTML",
                 )
-                logger.info(f"Sent 1-day expiration warning DM to User ID={user_id}.")
+                logger.info(f"Sent expiration warning DM ({time_rem} remaining) to User ID={user_id}.")
             except TelegramForbiddenError:
-                logger.info(f"User ID={user_id} has blocked the bot. Skipping 1-day warning.")
+                logger.info(f"User ID={user_id} has blocked the bot. Skipping warning.")
             except Exception as e:
-                logger.warning(f"Failed to send 1-day warning DM to User ID={user_id}: {e}")
+                logger.warning(f"Failed to send warning DM to User ID={user_id}: {e}")
+
+        await session.commit()
 
 
 async def check_expired_subscriptions(bot: Bot) -> None:

@@ -188,7 +188,7 @@ async def handle_start(message: Message, state: FSMContext):
         pass
 
 
-@router.callback_query(F.data == "menu:main")
+@router.callback_query(F.data.in_(["menu:main", "menu:packages"]))
 async def handle_menu_main(callback: CallbackQuery, state: FSMContext):
     """จัดการการกดปุ่มกลับสู่เมนูหลัก"""
     await state.clear()
@@ -406,7 +406,7 @@ async def handle_referral_menu(callback: CallbackQuery, bot: Bot, state: FSMCont
     await callback.answer()
 
 
-@router.callback_query(F.data == "menu:my_status")
+@router.callback_query(F.data.in_(["menu:my_status", "menu:status"]))
 async def handle_my_status(callback: CallbackQuery, state: FSMContext):
     """แสดงสถานะแพ็กเกจสมาชิกของผู้ใช้งาน (เวลาไทย)"""
     await state.clear()
