@@ -884,7 +884,8 @@ async def check_unanswered_user_dms_reminder(bot: Bot) -> None:
                 .join(subq, ChatMessage.id == subq.c.max_id)
                 .where(
                     ChatMessage.sender_role == "USER",
-                    ~ChatMessage.message_text.startswith("/")
+                    ~ChatMessage.message_text.startswith("/"),
+                    ~ChatMessage.message_text.startswith("[")
                 )
                 .order_by(ChatMessage.created_at.asc())
             )

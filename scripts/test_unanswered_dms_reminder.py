@@ -128,6 +128,18 @@ async def test_unanswered_dms_reminder():
     assert mock_bot.send_message.call_count == 0, "Expected 0 messages after all are resolved"
     print("All Resolved -> 0 Reminders: PASS ✅")
 
+    print("\n--- [TEST 6] User D sends payment slip log '[ส่งรูปภาพสลิปโอนเงิน #99]' -> Should NOT trigger DM reminder ---")
+    async with async_session() as session:
+        u_d = User(telegram_id=1004, username="user_d", full_name="User Delta", created_at=now)
+        msg_d = ChatMessage(id=6, user_id=1004, sender_role="USER", message_text="[ส่งรูปภาพสลิปโอนเงิน #99 (🥇 VIP 30 วัน)]", created_at=now - timedelta(seconds=700))
+        session.add_all([u_d, msg_d])
+        await session.commit()
+
+    mock_bot.send_message.reset_mock()
+    await check_unanswered_user_dms_reminder(mock_bot)
+    assert mock_bot.send_message.call_count == 0, "Expected 0 DM reminders for bracketed payment slips"
+    print("Slip bracket messages excluded: PASS ✅")
+
     await engine.dispose()
     if test_db.exists():
         test_db.unlink()

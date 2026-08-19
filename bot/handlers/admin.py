@@ -371,6 +371,15 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
         except Exception as e:
             logger.error(f"Failed to update admin message caption/text: {e}")
 
+        try:
+            await log_chat_message(
+                user_id=target_user_id,
+                sender_role="ADMIN",
+                message_text=f"[แอดมิน {admin_name} อนุมัติสลิป #{slip_id} ({plan_badge})]"
+            )
+        except Exception:
+            pass
+
         await callback.answer(f"✅ อนุมัติการชำระเงินเรียบร้อย ({'ต่อเวลาสะสม' if is_stack_extension else 'ส่งลิงก์เชิญ'})")
     except Exception as e:
         logger.error(f"Failed to approve slip #{slip_id}: {e}", exc_info=True)
@@ -474,6 +483,15 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
                     )
         except Exception as e:
             logger.error(f"Failed to update admin message caption/text: {e}")
+
+        try:
+            await log_chat_message(
+                user_id=target_user_id,
+                sender_role="ADMIN",
+                message_text=f"[แอดมิน {admin_name} ปฏิเสธสลิป #{slip_id}]"
+            )
+        except Exception:
+            pass
 
         await callback.answer("❌ ปฏิเสธการชำระเงินเรียบร้อยแล้ว")
     except Exception as e:
@@ -2323,7 +2341,11 @@ async def handle_admin_resolve_all_chats_callback(callback: CallbackQuery):
         stmt = (
             select(ChatMessage)
             .join(subq, ChatMessage.id == subq.c.max_id)
-            .where(ChatMessage.sender_role == "USER", ~ChatMessage.message_text.startswith("/"))
+            .where(
+                ChatMessage.sender_role == "USER",
+                ~ChatMessage.message_text.startswith("/"),
+                ~ChatMessage.message_text.startswith("[")
+            )
         )
         unanswered_msgs = (await session.execute(stmt)).scalars().all()
 
