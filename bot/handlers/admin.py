@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from aiogram.filters import Command
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError, TelegramBadRequest
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -2626,9 +2626,9 @@ async def handle_admin_confirm_reset_user_callback(callback: CallbackQuery):
         f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n\n"
         "• ประวัติการคุย (Chat Messages) ทั้งหมดจะถูกลบ\n"
         "• สลิปการโอนเงิน (Payment Slips) ทั้งหมดจะถูกลบ\n"
-        "• สิทธิ์สมาชิก (Subscriptions) ทั้งหมดจะถูกลบ\n"
-        "• ผู้ใช้จะถูกเตะออกจากห้อง VIP ทันที\n"
-        "• บัญชีจะถูกลบออกจากระบบ (กลายเป็น User ใหม่ 100%)",
+        "• ประวัติการเติมวันและสิทธิ์สมาชิก (Subscriptions & Grants) ทั้งหมดจะถูกลบ\n"
+        "• ผู้ใช้จะถูกเตะออกจากห้อง VIP ทันที และปลดแบนให้พร้อมเข้าใหม่\n"
+        "• บัญชีจะถูกลบออกจากระบบ (กลายเป็น User ใหม่ 100% เหมือนไม่เคยเข้าใช้มาก่อน)",
         reply_markup=confirm_kb,
         parse_mode="HTML",
     )
@@ -2637,7 +2637,7 @@ async def handle_admin_confirm_reset_user_callback(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin:do_reset_user:"))
 async def handle_admin_do_reset_user_callback(callback: CallbackQuery, bot: Bot):
-    """Callback ดำเนินการลบประวัติและผู้ใช้ทั้งหมดจริง"""
+    """Callback ดำเนินการลบประวัติและผู้ใช้ทั้งหมดจริง (100% Factory Reset)"""
     if not callback.from_user or not callback.message:
         return
     if callback.message.chat.id != config.ADMIN_GROUP_ID:
@@ -2654,24 +2654,42 @@ async def handle_admin_do_reset_user_callback(callback: CallbackQuery, bot: Bot)
         user = (await session.execute(select(User).where(User.telegram_id == target_uid))).scalar_one_or_none()
         user_name = html.escape(user.full_name or f"User {target_uid}") if user else f"User {target_uid}"
 
+        # 1. ลบประวัติแชททั้งหมด
         await session.execute(delete(ChatMessage).where(ChatMessage.user_id == target_uid))
+        # 2. ลบสลิปชำระเงินทั้งหมด
         await session.execute(delete(PaymentSlip).where(PaymentSlip.user_id == target_uid))
+        # 3. ลบประวัติการเติมวันทั้งหมด (Ledger)
+        await session.execute(delete(SubscriptionGrant).where(SubscriptionGrant.user_id == target_uid))
+        # 4. ลบสถานะสมาชิก Subscription
         await session.execute(delete(Subscription).where(Subscription.user_id == target_uid))
+        # 5. เคลียร์ข้อมูลการชวนเพื่อนของผู้ใช้อื่นที่ถูกชวนโดย user คนนี้
+        await session.execute(update(User).where(User.referred_by_id == target_uid).values(referred_by_id=None))
+        await session.execute(update(SubscriptionGrant).where(SubscriptionGrant.referred_friend_id == target_uid).values(referred_friend_id=None))
+        # 6. ลบแถว User ออกจากฐานข้อมูล
         await session.execute(delete(User).where(User.telegram_id == target_uid))
+        await session.commit()
 
+    # 7. เตะออกจาก Channel ทันที (หากเคยอยู่ในห้อง)
     try:
         await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, revoke_messages=False)
+        logger.info(f"Kicked User {target_uid} from Channel on reset.")
+    except Exception as e:
+        logger.debug(f"Could not ban user {target_uid} on reset (might not be in channel): {e}")
+
+    # 8. ปลดแบนจาก Blacklist ของ Channel ทันที เพื่อให้เป็นสถานะปกติที่สามารถรับลิงก์เชิญใหม่ได้ 100%
+    try:
         await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, only_if_banned=True)
-    except Exception:
-        pass
+        logger.info(f"Unbanned User {target_uid} in Channel on reset.")
+    except Exception as e:
+        logger.debug(f"Could not unban user {target_uid} on reset: {e}")
 
     resp_text = (
         f"🗑️ <b>ลบประวัติและรีเซ็ตบัญชี {user_name} (<code>{target_uid}</code>) สำเร็จแล้ว!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "📭 ลบประวัติแชท, สลิป, แพ็กเกจ และบัญชีผู้ใช้ทั้งหมดแล้ว\n"
-        "🚪 เตะออกจากห้อง VIP เรียบร้อยแล้ว (หากเคยอยู่)\n"
+        "📭 ลบประวัติแชท, สลิป, แพ็กเกจ, ประวัติเติมวัน และบัญชีผู้ใช้ทั้งหมดแล้ว\n"
+        "🚪 เตะออกจากห้อง VIP และปลดแบล็กลิสต์ใน Telegram ให้เรียบร้อยแล้ว\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "✨ <i>ผู้ใช้กลับเป็นผู้ใช้ใหม่ 100% สามารถพิมพ์ <code>/start</code> ในบอทเพื่อทดสอบรับลิงก์ใหม่ได้ทันทีครับ</i>"
+        "✨ <i>ผู้ใช้กลับเป็นผู้ใช้ใหม่ 100% เสมือนไม่เคยใช้งานมาก่อน สามารถพิมพ์ <code>/start</code> ในบอทเพื่อทดสอบรับสิทธิ์ทดลองหรือซื้อแพ็กเกจใหม่ได้ทันทีครับ</i>"
     )
 
     try:
@@ -2679,6 +2697,68 @@ async def handle_admin_do_reset_user_callback(callback: CallbackQuery, bot: Bot)
     except Exception:
         await callback.message.answer(text=resp_text, parse_mode="HTML")
     await callback.answer("✅ ลบและรีเซ็ตผู้ใช้เรียบร้อยแล้ว")
+
+
+@router.message(Command("reset_user", "delete_user", "wipe_user", "clear_user"))
+async def handle_admin_reset_user_command(message: Message):
+    """คำสั่งแอดมินสำหรับลบประวัติและรีเซ็ตบัญชีผู้ใช้ทั้งหมด: /reset_user <User ID หรือ @username>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/reset_user [User ID หรือ @username]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/reset_user 5125375696</code>\n"
+            "• <code>/reset_user @some_user</code>\n\n"
+            "⚠️ <i>คำสั่งนี้จะเปิดหน้าต่างยืนยันการลบประวัติ แชท สลิป สิทธิ์ และเตะออกจากห้อง VIP</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+
+    if not user:
+        if query.isdigit():
+            target_uid = int(query)
+            user_header = f"User {target_uid}"
+        else:
+            await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+            return
+    else:
+        target_uid = user.telegram_id
+        user_header = format_user_title(user.full_name, user.username, target_uid)
+
+    confirm_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⚠️ ยืนยันลบประวัติและบัญชีทั้งหมด", callback_data=f"admin:do_reset_user:{target_uid}"),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 ยกเลิก", callback_data="admin:cancel_reset"),
+            ]
+        ]
+    )
+
+    await message.answer(
+        f"⚠️ <b>ยืนยันการรีเซ็ตและลบข้อมูลผู้ใช้ทั้งหมด (Factory Reset)?</b>\n"
+        f"👤 <b>ผู้ใช้:</b> {user_header}\n"
+        f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n\n"
+        "• ประวัติการคุย (Chat Messages) ทั้งหมดจะถูกลบ\n"
+        "• สลิปการโอนเงิน (Payment Slips) ทั้งหมดจะถูกลบ\n"
+        "• ประวัติการเติมวันและสิทธิ์สมาชิก (Subscriptions & Grants) ทั้งหมดจะถูกลบ\n"
+        "• ผู้ใช้จะถูกเตะออกจากห้อง VIP ทันที และปลดแบนให้พร้อมเข้าใหม่\n"
+        "• บัญชีจะถูกลบออกจากระบบ (กลายเป็น User ใหม่ 100% เหมือนไม่เคยเข้าใช้มาก่อน)",
+        reply_markup=confirm_kb,
+        parse_mode="HTML",
+    )
 
 
 @router.callback_query(F.data == "admin:cancel_reset")

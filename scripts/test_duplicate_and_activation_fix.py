@@ -14,15 +14,22 @@ from bot.models.schema import User, Subscription, PaymentSlip, SlipStatus, SubSt
 from bot.services.database import get_session, init_db
 from bot.services.subscription import grant_subscription, activate_pending_subscription, subscription_status_label
 from bot.handlers.payment import process_truemoney_submission
-from bot.handlers.admin import handle_admin_approve_slip_callback
+from bot.handlers.admin import handle_admin_approve
+from sqlalchemy import select
 
 async def test_all_fixes():
     print("\n--- [INIT DB] ---")
     await init_db()
     config = get_settings()
 
+    import time
+    base_id = int(time.time() * 100) % 100000000
+    test_user_id = base_id + 1
+    trial_user_id = base_id + 2
+    fresh_user_id = base_id + 3
+    submit_uid = base_id + 4
+
     print("\n--- [TEST 1] Paid 12-Hour VIP for User with trial_used=True ---")
-    test_user_id = 888111
     async with get_session() as session:
         # Create user with trial_used = True (already used trial previously)
         user = User(telegram_id=test_user_id, username="vip12h_user", full_name="VIP 12H User", trial_used=True)
@@ -59,7 +66,6 @@ async def test_all_fixes():
         print(f"  1.2 Activate 12H VIP: PASS ✅ (status=ACTIVE, is_trial_active=False, hours_granted={diff_hours:.2f}h)")
 
     print("\n--- [TEST 2] Free Trial for User with trial_used=True (Should be Rejected) ---")
-    trial_user_id = 888222
     async with get_session() as session:
         trial_user = User(telegram_id=trial_user_id, username="trial_abuser", full_name="Trial Abuser", trial_used=True)
         session.add(trial_user)
@@ -84,7 +90,6 @@ async def test_all_fixes():
         print("  2.1 Reject Repeated Trial: PASS ✅ (returned None, trial abuse prevented)")
 
     print("\n--- [TEST 3] Free Trial for Fresh User with trial_used=False (Should Succeed) ---")
-    fresh_user_id = 888333
     async with get_session() as session:
         fresh_user = User(telegram_id=fresh_user_id, username="fresh_trial", full_name="Fresh Trial", trial_used=False)
         session.add(fresh_user)
@@ -112,8 +117,7 @@ async def test_all_fixes():
         print("  3.1 Activate Fresh Trial: PASS ✅ (status=ACTIVE, is_trial_active=True, user.trial_used=True)")
 
     print("\n--- [TEST 4] TrueMoney Angpao Submission Deduplication & Lock ---")
-    submit_uid = 888444
-    angpao_url = "https://gift.truemoney.com/campaign/?v=testdup123456789"
+    angpao_url = f"https://gift.truemoney.com/campaign/?v=testdup_{submit_uid}"
     mock_bot = MagicMock()
     mock_bot.send_message = AsyncMock()
 
@@ -161,7 +165,7 @@ async def test_all_fixes():
     # Get the slip ID created in Test 4
     async with get_session() as session:
         slip = (await session.execute(
-            session.query(PaymentSlip).filter_by(user_id=submit_uid)
+            select(PaymentSlip).where(PaymentSlip.user_id == submit_uid)
         )).scalars().first()
         slip_id = slip.id
 
@@ -170,12 +174,13 @@ async def test_all_fixes():
     mock_cb.from_user.id = 1001
     mock_cb.from_user.username = "admin1"
     mock_cb.from_user.full_name = "Admin 1"
+    mock_cb.message.chat.id = config.ADMIN_GROUP_ID
     mock_cb.message.caption = "Test Caption"
     mock_cb.message.text = None
     mock_cb.message.edit_caption = AsyncMock()
     mock_cb.answer = AsyncMock()
 
-    await handle_admin_approve_slip_callback(mock_cb, mock_bot)
+    await handle_admin_approve(mock_cb, mock_bot)
     assert mock_bot.unban_chat_member.call_count >= 1, "FAILED: unban_chat_member was not called before invite link!"
     unban_kwargs = mock_bot.unban_chat_member.call_args[1]
     assert unban_kwargs.get("only_if_banned") is True
