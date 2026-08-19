@@ -1,5 +1,7 @@
 import logging
 import html
+import asyncio
+from datetime import datetime, timezone
 from typing import Optional
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
@@ -283,27 +285,58 @@ async def process_broadcast_target(callback: CallbackQuery, state: FSMContext, b
 
     await callback.message.edit_text("⏳ กำลังเตรียมส่งข้อความ...")
 
+    now = datetime.now(timezone.utc)
     async with get_session() as session:
         if action == "all":
             users = (await session.execute(select(User))).scalars().all()
-        else:  # inactive
+        else:  # inactive / non-active members
             from bot.models.schema import Subscription, SubStatus
-            active_users_stmt = select(Subscription.user_id).where(Subscription.status == SubStatus.ACTIVE.value)
+            # สมาชิกที่ Active อยู่จริงในปัจจุบัน (สถานะ ACTIVE และยังไม่หมดเวลา)
+            active_users_stmt = select(Subscription.user_id).where(
+                Subscription.status == SubStatus.ACTIVE.value,
+                Subscription.expires_at > now,
+            )
             active_user_ids = (await session.execute(active_users_stmt)).scalars().all()
             stmt = select(User).where(User.telegram_id.notin_(active_user_ids))
             users = (await session.execute(stmt)).scalars().all()
+
+    total_target = len(users)
+    await callback.message.edit_text(f"⏳ <b>กำลังเริ่มส่งข้อความ ({total_target} คน)...</b>", parse_mode="HTML")
+
+    open_menu_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📱 เปิดเมนูหลัก VIP", callback_data="menu:main")]
+        ]
+    )
 
     success = 0
     fail = 0
     for u in users:
         try:
-            await bot.send_message(u.telegram_id, msg_text, parse_mode="HTML")
+            await bot.send_message(
+                chat_id=u.telegram_id,
+                text=msg_text,
+                reply_markup=open_menu_kb,
+                parse_mode="HTML",
+                disable_web_page_preview=False,
+            )
             success += 1
         except Exception:
             fail += 1
+        import asyncio
+        await asyncio.sleep(0.05)
 
     await state.clear()
-    await callback.message.answer(f"✅ <b>บรอดแคสต์เสร็จสิ้น!</b>\n━━━━━━━━━━━━━━━━━━━━\n• ส่งสำเร็จ: <b>{success} คน</b>\n• ส่งไม่สำเร็จ: <b>{fail} คน</b>", parse_mode="HTML")
+    target_label = "ผู้ใช้ทั้งหมด" if action == "all" else "ผู้ใช้ที่ยังไม่เป็น Active Member (หมดอายุ/ไม่เคยสมัคร)"
+    await callback.message.answer(
+        f"🎉 <b>บรอดแคสต์โปรโมชั่นเสร็จสิ้น!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>กลุ่มเป้าหมาย:</b> {target_label}\n"
+        f"👥 <b>เป้าหมายทั้งหมด:</b> {total_target} คน\n"
+        f"✅ <b>ส่งสำเร็จ:</b> <b>{success} คน</b>\n"
+        f"❌ <b>ส่งไม่สำเร็จ (บล็อกบอท/ลบบัญชี):</b> {fail} คน",
+        parse_mode="HTML",
+    )
 
 
 @router.message(PromoBroadcastStates.waiting_for_target)
