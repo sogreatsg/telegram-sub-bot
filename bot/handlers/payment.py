@@ -17,7 +17,7 @@ from aiogram.types import (
 from aiogram.filters import Command
 
 from bot.config import get_settings
-from bot.models.schema import PaymentSlip, SlipStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info
+from bot.models.schema import PaymentSlip, SlipStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info, format_plan_duration
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime

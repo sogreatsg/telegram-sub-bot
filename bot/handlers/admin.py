@@ -14,10 +14,10 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.config import get_settings
-from bot.models.schema import User, PaymentSlip, Subscription, SubscriptionGrant, ChatMessage, SlipStatus, SubStatus, PlanType, GrantType, PLAN_DETAILS, get_dynamic_plan_info
+from bot.models.schema import User, PaymentSlip, Subscription, SubscriptionGrant, ChatMessage, SlipStatus, SubStatus, PlanType, GrantType, PLAN_DETAILS, get_dynamic_plan_info, format_plan_duration
 from bot.services.database import get_session, get_or_create_user
 from bot.services.scheduler import build_active_members_report, sync_pending_members
-from bot.services.subscription import grant_subscription, subscription_status_label
+from bot.services.subscription import grant_subscription, subscription_status_label, parse_plan_days
 from bot.services.reconciliation import reconcile_user, reconcile_all_users, format_reconcile_formula
 from bot.services.chat_logger import log_chat_message
 from bot.handlers.user_menu import get_main_menu_keyboard
