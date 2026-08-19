@@ -16,6 +16,9 @@ from aiogram.types import (
 )
 from aiogram.filters import Command
 
+import asyncio
+from collections import defaultdict
+from sqlalchemy import select
 from bot.config import get_settings
 from bot.models.schema import PaymentSlip, SlipStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info, format_plan_duration
 from bot.services.database import get_session, get_or_create_user
@@ -25,6 +28,9 @@ from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
 logger = logging.getLogger(__name__)
 config = get_settings()
 router = Router(name="payment")
+
+# Concurrency lock ป้องกันการส่งสลิปหรือซองของขวัญซ้ำซ้อนในเวลาเดียวกัน
+submission_locks = defaultdict(asyncio.Lock)
 
 
 class PaymentStates(StatesGroup):
@@ -342,32 +348,49 @@ async def process_truemoney_submission(
     if not telegram_user:
         return
 
-    fsm_data = await state.get_data()
-    plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
-    plan_info = get_dynamic_plan_info(plan_key)
+    async with submission_locks[telegram_user.id]:
+        fsm_data = await state.get_data()
+        plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
+        plan_info = get_dynamic_plan_info(plan_key)
 
-    # 1. บันทึกลงฐานข้อมูล
-    async with get_session() as session:
-        user, _ = await get_or_create_user(
-            session=session,
-            telegram_id=telegram_user.id,
-            username=telegram_user.username,
-            full_name=telegram_user.full_name or telegram_user.first_name,
-        )
+        # 1. บันทึกลงฐานข้อมูล (ตรวจสอบรายการซ้ำก่อน)
+        async with get_session() as session:
+            # ป้องกันส่งซ้ำ: ตรวจสอบว่ามีสลิป/ลิงก์เดียวกันที่เพิ่งส่งเข้ามาและยัง PENDING อยู่หรือไม่
+            dup_stmt = select(PaymentSlip).where(
+                PaymentSlip.user_id == telegram_user.id,
+                PaymentSlip.file_id == angpao_url,
+                PaymentSlip.status == SlipStatus.PENDING.value,
+            )
+            existing_dup = (await session.execute(dup_stmt)).scalars().first()
+            if existing_dup:
+                await state.clear()
+                await message.answer(
+                    f"ℹ️ <b>คุณได้ส่งลิงก์ซองของขวัญนี้เข้าระบบไว้แล้วครับ (รายการ #{existing_dup.id})</b>\n\n"
+                    "ทีมงานแอดมินกำลังดำเนินการตรวจสอบและจะอนุมัติให้โดยเร็วครับ ขอบคุณครับ 🙏",
+                    parse_mode="HTML",
+                )
+                return
 
-        slip = PaymentSlip(
-            user_id=user.telegram_id,
-            file_id=angpao_url,
-            plan_type=plan_key,
-            payment_method="TRUEMONEY_ANGPAO",
-            status=SlipStatus.PENDING.value,
-        )
-        session.add(slip)
-        await session.flush()
-        slip_id = slip.id
+            user, _ = await get_or_create_user(
+                session=session,
+                telegram_id=telegram_user.id,
+                username=telegram_user.username,
+                full_name=telegram_user.full_name or telegram_user.first_name,
+            )
 
-    # 2. ล้างสถานะ FSM
-    await state.clear()
+            slip = PaymentSlip(
+                user_id=user.telegram_id,
+                file_id=angpao_url,
+                plan_type=plan_key,
+                payment_method="TRUEMONEY_ANGPAO",
+                status=SlipStatus.PENDING.value,
+            )
+            session.add(slip)
+            await session.flush()
+            slip_id = slip.id
+
+        # 2. ล้างสถานะ FSM
+        await state.clear()
 
     # 3. แจ้งผู้ใช้
     await message.answer(
@@ -468,28 +491,44 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
     photo = message.photo[-1]
     file_id = photo.file_id
 
-    # 1. บันทึกข้อมูลสลิปลงฐานข้อมูล
-    async with get_session() as session:
-        user, _ = await get_or_create_user(
-            session=session,
-            telegram_id=telegram_user.id,
-            username=telegram_user.username,
-            full_name=telegram_user.full_name or telegram_user.first_name,
-        )
+    async with submission_locks[telegram_user.id]:
+        # 1. บันทึกข้อมูลสลิปลงฐานข้อมูล (ตรวจรายการซ้ำ)
+        async with get_session() as session:
+            dup_stmt = select(PaymentSlip).where(
+                PaymentSlip.user_id == telegram_user.id,
+                PaymentSlip.file_id == file_id,
+                PaymentSlip.status == SlipStatus.PENDING.value,
+            )
+            existing_dup = (await session.execute(dup_stmt)).scalars().first()
+            if existing_dup:
+                await state.clear()
+                await message.answer(
+                    f"ℹ️ <b>คุณได้ส่งสลิปนี้เข้าระบบไว้แล้วครับ (รายการ #{existing_dup.id})</b>\n\n"
+                    "ทีมงานแอดมินกำลังดำเนินการตรวจสอบความถูกต้องครับ ขอบคุณครับ 🙏",
+                    parse_mode="HTML",
+                )
+                return
 
-        slip = PaymentSlip(
-            user_id=user.telegram_id,
-            file_id=file_id,
-            plan_type=plan_key,
-            payment_method="PROMPTPAY",
-            status=SlipStatus.PENDING.value,
-        )
-        session.add(slip)
-        await session.flush()
-        slip_id = slip.id
+            user, _ = await get_or_create_user(
+                session=session,
+                telegram_id=telegram_user.id,
+                username=telegram_user.username,
+                full_name=telegram_user.full_name or telegram_user.first_name,
+            )
 
-    # 2. ล้างสถานะ FSM
-    await state.clear()
+            slip = PaymentSlip(
+                user_id=user.telegram_id,
+                file_id=file_id,
+                plan_type=plan_key,
+                payment_method="PROMPTPAY",
+                status=SlipStatus.PENDING.value,
+            )
+            session.add(slip)
+            await session.flush()
+            slip_id = slip.id
+
+        # 2. ล้างสถานะ FSM
+        await state.clear()
 
     # 3. ส่งข้อความยืนยันให้ผู้ใช้
     await message.answer(
@@ -558,26 +597,44 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
     file_id = doc.file_id
     telegram_user = message.from_user
 
-    async with get_session() as session:
-        user, _ = await get_or_create_user(
-            session=session,
-            telegram_id=telegram_user.id,
-            username=telegram_user.username,
-            full_name=telegram_user.full_name or telegram_user.first_name,
-        )
+    async with submission_locks[telegram_user.id]:
+        # 1. บันทึกข้อมูลสลิปลงฐานข้อมูล (ตรวจรายการซ้ำ)
+        async with get_session() as session:
+            dup_stmt = select(PaymentSlip).where(
+                PaymentSlip.user_id == telegram_user.id,
+                PaymentSlip.file_id == file_id,
+                PaymentSlip.status == SlipStatus.PENDING.value,
+            )
+            existing_dup = (await session.execute(dup_stmt)).scalars().first()
+            if existing_dup:
+                await state.clear()
+                await message.answer(
+                    f"ℹ️ <b>คุณได้ส่งสลิปนี้เข้าระบบไว้แล้วครับ (รายการ #{existing_dup.id})</b>\n\n"
+                    "ทีมงานแอดมินกำลังดำเนินการตรวจสอบความถูกต้องครับ ขอบคุณครับ 🙏",
+                    parse_mode="HTML",
+                )
+                return
 
-        slip = PaymentSlip(
-            user_id=user.telegram_id,
-            file_id=file_id,
-            plan_type=plan_key,
-            payment_method="PROMPTPAY",
-            status=SlipStatus.PENDING.value,
-        )
-        session.add(slip)
-        await session.flush()
-        slip_id = slip.id
+            user, _ = await get_or_create_user(
+                session=session,
+                telegram_id=telegram_user.id,
+                username=telegram_user.username,
+                full_name=telegram_user.full_name or telegram_user.first_name,
+            )
 
-    await state.clear()
+            slip = PaymentSlip(
+                user_id=user.telegram_id,
+                file_id=file_id,
+                plan_type=plan_key,
+                payment_method="PROMPTPAY",
+                status=SlipStatus.PENDING.value,
+            )
+            session.add(slip)
+            await session.flush()
+            slip_id = slip.id
+
+        # 2. ล้างสถานะ FSM
+        await state.clear()
 
     await message.answer(
         f"✅ <b>ได้รับไฟล์สลิปการโอนเงินสำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"

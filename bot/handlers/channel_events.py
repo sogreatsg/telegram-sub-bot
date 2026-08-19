@@ -163,7 +163,12 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
                 new_expires_at = grant.new_expires_at
                 is_stack_extension = grant.is_stack_extension
                 plan_title = sub_to_activate.source_label or "สมาชิก VIP"
-                duration_str = f"{grant.granted_days} วัน" if grant.granted_days > 0 else f"{grant.granted_minutes} นาที"
+                if grant.granted_days > 0:
+                    duration_str = f"{grant.granted_days} วัน"
+                elif grant.granted_minutes >= 60 and grant.granted_minutes % 60 == 0:
+                    duration_str = f"{grant.granted_minutes // 60} ชั่วโมง"
+                else:
+                    duration_str = f"{grant.granted_minutes} นาที"
 
                 if user_obj and user_obj.referred_by_id and not getattr(user_obj, "referral_rewarded", False):
                     referred_by_to_award = user_obj.referred_by_id

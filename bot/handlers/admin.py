@@ -202,6 +202,20 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
             slip.admin_id = admin_user.id
             session.add(slip)
             target_user_id = slip.user_id
+
+            # ปิดสลิปซ้ำที่ส่งด้วย file_id / URL เดียวกันของผู้ใช้คนนี้ (ถ้ามี)
+            dup_slips_stmt = select(PaymentSlip).where(
+                PaymentSlip.user_id == target_user_id,
+                PaymentSlip.file_id == slip.file_id,
+                PaymentSlip.id != slip.id,
+                PaymentSlip.status == SlipStatus.PENDING.value,
+            )
+            dup_slips = (await session.execute(dup_slips_stmt)).scalars().all()
+            for ds in dup_slips:
+                ds.status = SlipStatus.APPROVED.value
+                ds.admin_id = admin_user.id
+                session.add(ds)
+
             requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
 
             plan_info = get_dynamic_plan_info(requested_plan)
@@ -288,6 +302,17 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 logger.warning(f"Could not send instant-activate DM to User ID={target_user_id}: {e}")
 
         else:
+            # ปลดแบนผู้ใช้ใน Channel ก่อนสร้างลิงก์เสมอ (ป้องกันกรณีเคยถูกเตะแล้วติด blacklist ใน Telegram)
+            try:
+                await bot.unban_chat_member(
+                    chat_id=config.CHANNEL_ID,
+                    user_id=target_user_id,
+                    only_if_banned=True,
+                )
+                logger.info(f"Auto-unbanned User {target_user_id} in Channel {config.CHANNEL_ID} before creating invite link.")
+            except Exception as e:
+                logger.debug(f"Could not unban User {target_user_id} before creating invite link: {e}")
+
             # สร้างลิงก์เชิญแบบ 1 ครั้งให้ผู้ใช้
             try:
                 invite_link_obj = await bot.create_chat_invite_link(

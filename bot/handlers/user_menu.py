@@ -275,6 +275,17 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
                 is_in_channel=False,
             )
 
+    # ปลดแบนผู้ใช้ใน Channel ก่อนสร้างลิงก์เสมอ (ป้องกันกรณีเคยถูกเตะแล้วติด blacklist ใน Telegram)
+    try:
+        await bot.unban_chat_member(
+            chat_id=config.CHANNEL_ID,
+            user_id=user_id,
+            only_if_banned=True,
+        )
+        logger.info(f"Auto-unbanned User {user_id} in Channel {config.CHANNEL_ID} before creating trial invite link.")
+    except Exception as e:
+        logger.debug(f"Could not unban User {user_id} before creating trial invite link: {e}")
+
     # สร้างลิงก์เชิญแบบใช้งานได้ 1 ครั้งสำหรับ Channel ส่วนตัว (หมดอายุภายใน 48 ชม. หากไม่กดเข้า)
     try:
         invite_link_obj = await bot.create_chat_invite_link(
@@ -550,13 +561,29 @@ async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
     from bot.handlers.payment import extract_truemoney_url
     angpao_url = extract_truemoney_url(message.text or "")
     if angpao_url:
+        # ตรวจสอบว่าผู้ใช้มีสลิปซองแดงที่เพิ่งส่งและรออนุมัติอยู่แล้วหรือไม่ (ป้องกันส่งซ้ำซ้อน)
+        async with get_session() as session:
+            dup_stmt = select(PaymentSlip).where(
+                PaymentSlip.user_id == user_id,
+                PaymentSlip.file_id == angpao_url,
+                PaymentSlip.status == SlipStatus.PENDING.value,
+            )
+            existing_dup = (await session.execute(dup_stmt)).scalars().first()
+            if existing_dup:
+                await message.answer(
+                    f"ℹ️ <b>ระบบได้รับลิงก์ซองของขวัญนี้ไว้แล้วครับ (รายการ #{existing_dup.id})</b>\n\n"
+                    "ทีมงานแอดมินกำลังดำเนินการตรวจสอบและจะอนุมัติให้โดยเร็วครับ ขอบคุณครับ 🙏",
+                    parse_mode="HTML",
+                )
+                return
+
         await log_chat_message(user_id=user_id, sender_role="USER", message_text=f"[ส่งลิงก์ซองแดงนอกขั้นตอน]: {angpao_url}")
         
         # 1. แจ้งเตือนผู้ใช้ให้ไปเลือกแพ็กเกจก่อน
         await message.answer(
             "⚠️ <b>กรุณาเลือกแพ็กเกจก่อนส่งลิงก์ซองของขวัญครับ</b>\n\n"
             "เนื่องจากระบบต้องการทราบแพ็กเกจ VIP ที่คุณต้องการสมัคร\n"
-            "👉 <b>กรุณาพิมพ์ /start</b> แล้วกดเลือกแพ็กเกจ (3 วัน, 10 วัน, 30 วัน หรือ โปรโมชั่น)\n"
+            "👉 <b>กรุณาพิมพ์ /start</b> แล้วกดเลือกแพ็กเกจ (12 ชั่วโมง, 3 วัน, 10 วัน, 30 วัน หรือ โปรโมชั่น)\n"
             "จากนั้นเลือกช่องทาง <b>'🧧 ส่งซองของขวัญ TrueMoney'</b> แล้วค่อยส่งลิงก์เข้ามาครับ 🙏",
             parse_mode="HTML",
         )

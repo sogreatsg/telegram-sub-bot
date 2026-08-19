@@ -152,7 +152,12 @@ async def sync_pending_members(bot: Bot) -> dict:
                 continue
 
             plan_title = grant.subscription.source_label or "สมาชิก VIP"
-            duration_str = f"{grant.granted_days} วัน" if grant.granted_days > 0 else f"{grant.granted_minutes} นาที"
+            if grant.granted_days > 0:
+                duration_str = f"{grant.granted_days} วัน"
+            elif grant.granted_minutes >= 60 and grant.granted_minutes % 60 == 0:
+                duration_str = f"{grant.granted_minutes // 60} ชั่วโมง"
+            else:
+                duration_str = f"{grant.granted_minutes} นาที"
             joined_time = now
             final_expires_at = grant.new_expires_at
 

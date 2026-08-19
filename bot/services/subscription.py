@@ -96,7 +96,10 @@ def subscription_status_label(sub: Optional[Subscription]) -> Tuple[str, str]:
         if sub.pending_days > 0:
             quota_str = f"{sub.pending_days} วัน ({sub.pending_days * 24} ชั่วโมง)"
         elif sub.pending_minutes > 0:
-            quota_str = f"{sub.pending_minutes} นาที"
+            if sub.pending_minutes >= 60 and sub.pending_minutes % 60 == 0:
+                quota_str = f"{sub.pending_minutes // 60} ชั่วโมง"
+            else:
+                quota_str = f"{sub.pending_minutes} นาที"
         else:
             quota_str = "-"
     elif sub.expires_at:
@@ -249,7 +252,7 @@ async def activate_pending_subscription(
     if (sub.pending_days or 0) <= 0 and (sub.pending_minutes or 0) <= 0:
         return None
 
-    is_trial_only = sub.pending_days == 0 and sub.pending_minutes > 0
+    is_trial_only = (sub.pending_days == 0 and sub.pending_minutes > 0 and not bool(sub.pending_has_value))
     if is_trial_only:
         # กันการใช้สิทธิ์ทดลองซ้ำ (เช่น ลิงก์เก่าที่หลุดมาใช้ทีหลัง หลังจากใช้สิทธิ์ไปแล้วทางอื่น)
         user = await session.get(User, user_id)
