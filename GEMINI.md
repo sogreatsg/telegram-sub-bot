@@ -21,3 +21,7 @@
   - Synchronize the command description in `handle_admin_menu_command` (`admin_menu_text`).
   - If the command is a primary administrative tool, consider adding a quick-access Inline Keyboard button.
   - Ensure syntax examples and descriptions in the `/admin` menu are 100% accurate.
+
+## 5. 🔇 Communication Style & Feedback Rules
+* **No Evaluation or Feedback Questions:** Do not end responses with evaluation, rating, or confirmation questions (e.g., "ดีไหมครับ", "ถูกใจไหมครับ", "มีอะไรให้ปรับไหมครับ", "feedback").
+* **Direct & Concise Delivery:** Provide answers, technical analysis, and code implementations directly and concisely without asking follow-up evaluation questions unless strictly necessary for requirements.
