@@ -19,16 +19,23 @@ async def test_expiration_warning():
     print("\n--- [INIT DB] ---")
     await init_db()
 
+    from sqlalchemy import text
+    async with get_session() as session:
+        await session.execute(text("DELETE FROM subscriptions;"))
+        await session.execute(text("DELETE FROM users;"))
+        await session.commit()
+
     base_id = int(time.time() * 100) % 100000000
     user_12h_early = base_id + 10
     user_12h_due = base_id + 20
-    user_30d_due = base_id + 30
+    user_30d_due_24h = base_id + 30
+    user_30d_due_1h = base_id + 40
 
     now = datetime.now(timezone.utc)
 
     print("\n--- [SETUP TEST USERS] ---")
     async with get_session() as session:
-        # User 1: 12H VIP with 11 hours remaining (Joined 1 hour ago) -> Should NOT warn
+        # User 1: 12H VIP with 11 hours remaining -> Should NOT warn
         u1 = User(telegram_id=user_12h_early, username="u12h_early", full_name="12H Early User")
         session.add(u1)
         sub1 = Subscription(
@@ -38,11 +45,12 @@ async def test_expiration_warning():
             expires_at=now + timedelta(hours=11),
             source_label="สมาชิก ⚡ VIP 12 ชั่วโมง",
             warned_1d=False,
+            warned_1h=False,
             is_trial_active=False,
         )
         session.add(sub1)
 
-        # User 2: 12H VIP with 45 minutes remaining (Joined 11h 15m ago) -> Should WARN
+        # User 2: 12H VIP with 45 minutes remaining -> Should get 1-hour WARN
         u2 = User(telegram_id=user_12h_due, username="u12h_due", full_name="12H Due User")
         session.add(u2)
         sub2 = Subscription(
@@ -52,23 +60,40 @@ async def test_expiration_warning():
             expires_at=now + timedelta(minutes=45),
             source_label="สมาชิก ⚡ VIP 12 ชั่วโมง",
             warned_1d=False,
+            warned_1h=False,
             is_trial_active=False,
         )
         session.add(sub2)
 
-        # User 3: 30D VIP with 20 hours remaining (Joined 29d 4h ago) -> Should WARN (<=24h)
-        u3 = User(telegram_id=user_30d_due, username="u30d_due", full_name="30D Due User")
+        # User 3: 30D VIP with 20 hours remaining -> Should get 24-hour WARN
+        u3 = User(telegram_id=user_30d_due_24h, username="u30d_24h", full_name="30D 24h Due User")
         session.add(u3)
         sub3 = Subscription(
-            user_id=user_30d_due,
+            user_id=user_30d_due_24h,
             status=SubStatus.ACTIVE.value,
             joined_at=now - timedelta(days=29, hours=4),
             expires_at=now + timedelta(hours=20),
             source_label="สมาชิก 🥇 VIP 30 วัน",
             warned_1d=False,
+            warned_1h=False,
             is_trial_active=False,
         )
         session.add(sub3)
+
+        # User 4: 30D VIP with 45 minutes remaining (already got 24h warning) -> Should get 1-hour WARN
+        u4 = User(telegram_id=user_30d_due_1h, username="u30d_1h", full_name="30D 1h Due User")
+        session.add(u4)
+        sub4 = Subscription(
+            user_id=user_30d_due_1h,
+            status=SubStatus.ACTIVE.value,
+            joined_at=now - timedelta(days=29, hours=23, minutes=15),
+            expires_at=now + timedelta(minutes=45),
+            source_label="สมาชิก 🥇 VIP 30 วัน",
+            warned_1d=True,
+            warned_1h=False,
+            is_trial_active=False,
+        )
+        session.add(sub4)
 
         await session.commit()
 
@@ -79,26 +104,32 @@ async def test_expiration_warning():
     await check_expiring_soon_subscriptions(mock_bot)
 
     # Verify mock_bot sent messages
-    # User 1 (12H early) should NOT be in sent messages
-    # User 2 (12H due, 45m remaining) and User 3 (30D due, 20h remaining) SHOULD be sent
-    assert mock_bot.send_message.call_count == 2, f"Expected 2 warnings, got {mock_bot.send_message.call_count}"
+    # User 1 (12H early) should NOT be warned
+    # User 2 (12H due, 45m left) SHOULD be warned (1h warn)
+    # User 3 (30D due, 20h left) SHOULD be warned (24h warn)
+    # User 4 (30D due, 45m left) SHOULD be warned (1h warn)
+    assert mock_bot.send_message.call_count == 3, f"Expected 3 warnings, got {mock_bot.send_message.call_count}"
 
     sent_targets = [call[1]["chat_id"] for call in mock_bot.send_message.call_args_list]
     assert user_12h_early not in sent_targets, "FAILED: 12H Early user was warned prematurely!"
     assert user_12h_due in sent_targets, "FAILED: 12H Due user was not warned!"
-    assert user_30d_due in sent_targets, "FAILED: 30D Due user was not warned!"
-    print("  1.1 Short plan filtering: PASS ✅ (12H user with 11h left skipped, 45m left warned)")
-    print("  1.2 Long plan 24h warning: PASS ✅ (30D user with 20h left warned)")
+    assert user_30d_due_24h in sent_targets, "FAILED: 30D 24h user was not warned!"
+    assert user_30d_due_1h in sent_targets, "FAILED: 30D 1h user was not warned!"
+    print("  1.1 12H plan filtering: PASS ✅ (11h left skipped, 45m left got 1-hour warning)")
+    print("  1.2 30D plan 24h warning: PASS ✅ (20h left got 24-hour warning)")
+    print("  1.3 30D plan 1h warning: PASS ✅ (45m left got 1-hour warning even after 24h warning was sent)")
 
-    # Verify warned_1d flags in database
+    # Verify warning flags in database
     async with get_session() as session:
         s1 = await session.get(Subscription, user_12h_early)
         s2 = await session.get(Subscription, user_12h_due)
-        s3 = await session.get(Subscription, user_30d_due)
-        assert s1.warned_1d is False
-        assert s2.warned_1d is True
-        assert s3.warned_1d is True
-        print("  1.3 Database warned_1d state: PASS ✅ (s1=False, s2=True, s3=True)")
+        s3 = await session.get(Subscription, user_30d_due_24h)
+        s4 = await session.get(Subscription, user_30d_due_1h)
+        assert s1.warned_1d is False and s1.warned_1h is False
+        assert s2.warned_1h is True
+        assert s3.warned_1d is True and s3.warned_1h is False
+        assert s4.warned_1d is True and s4.warned_1h is True
+        print("  1.4 Database warning flags: PASS ✅ (s1: 0/0, s2: 1h, s3: 24h, s4: 24h+1h)")
 
     print("\n--- [TEST 2] Verify Notification Button Callbacks (No Spinner Hang) ---")
     mock_state = MagicMock()
@@ -149,7 +180,7 @@ async def test_expiration_warning():
     assert cb_my_status.message.edit_text.call_count == 1
     print("  2.3 Callback menu:my_status: PASS ✅ (answered and rendered status view)")
 
-    print("\n🎉 ALL EXPIRATION WARNING & BUTTON FIX TESTS PASSED 100%!")
+    print("\n🎉 ALL 2-TIER EXPIRATION WARNING & BUTTON TESTS PASSED 100%!")
 
 if __name__ == "__main__":
     asyncio.run(test_expiration_warning())

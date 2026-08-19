@@ -246,13 +246,24 @@ async def sync_pending_members(bot: Bot) -> dict:
 async def check_expiring_soon_subscriptions(bot: Bot) -> None:
     """
     ตรวจสอบสมาชิกที่กำลังจะหมดอายุล่วงหน้า และส่งข้อความแจ้งเตือนทาง DM แนะนำให้ต่ออายุ
-    - แพ็กเกจระยะยาว (> 24 ชม. เช่น 3 วัน, 10 วัน, 30 วัน): แจ้งเตือนล่วงหน้า 24 ชั่วโมง
-    - แพ็กเกจระยะสั้น (<= 24 ชม. เช่น 12 ชั่วโมง): แจ้งเตือนล่วงหน้า 1 ชั่วโมงก่อนหมดอายุ
+    1. แจ้งเตือนล่วงหน้า 24 ชั่วโมง: สำหรับแพ็กเกจระยะยาว (> 24 ชม.) ที่เหลือเวลา <= 24 ชม. และยังไม่ได้เตือน 24h
+    2. แจ้งเตือนล่วงหน้า 1 ชั่วโมง (ส่งให้ทุกแพ็กเกจ): เมื่อเหลือเวลา <= 1 ชม. และยังไม่ได้เตือน 1h
     """
     now = datetime.now(timezone.utc)
     one_day_later = now + timedelta(hours=24)
+    one_hour_later = now + timedelta(hours=1)
+
+    renew_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💳 ต่ออายุสมาชิก VIP", callback_data="menu:packages"),
+                InlineKeyboardButton(text="📊 เช็คสถานะ", callback_data="menu:my_status"),
+            ],
+        ]
+    )
 
     async with get_session() as session:
+        # ดึงสมาชิก Active ที่ยังไม่หมดอายุและไม่ใช่ Trial
         stmt = (
             select(Subscription)
             .options(selectinload(Subscription.user))
@@ -261,57 +272,59 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
                 Subscription.expires_at.is_not(None),
                 Subscription.expires_at > now,
                 Subscription.expires_at <= one_day_later,
-                Subscription.warned_1d == False,
                 Subscription.is_trial_active == False,
             )
         )
-        expiring_subs = (await session.execute(stmt)).scalars().all()
+        active_subs = (await session.execute(stmt)).scalars().all()
 
-        if not expiring_subs:
+        if not active_subs:
             return
 
-        for sub in expiring_subs:
-            # คำนวณระยะเวลารวมของแพ็กเกจ (total duration)
-            joined_ref = ensure_utc(sub.joined_at) or ensure_utc(sub.created_at) or now
-            total_duration = (ensure_utc(sub.expires_at) - joined_ref).total_seconds()
-            is_short_plan = total_duration <= (24 * 3600)  # แพ็กเกจ 12 ชม. หรือ <= 24 ชม.
-
-            # ถ้าเป็นแพ็กเกจระยะสั้น (เช่น 12 ชั่วโมง) ให้แจ้งเตือนเมื่อเหลือเวลา <= 1 ชั่วโมงเท่านั้น
-            if is_short_plan:
-                one_hour_later = now + timedelta(hours=1)
-                if ensure_utc(sub.expires_at) > one_hour_later:
-                    # ยังเหลือเวลามากกว่า 1 ชั่วโมง -> ข้ามไปก่อน รอเตือนตอนเหลือ 1 ชั่วโมง
-                    continue
-
+        for sub in active_subs:
             user_id = sub.user_id
             user_obj = sub.user
             plan_title = sub.source_label or "สมาชิก VIP"
-
+            user_name = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
             expires_at_thai = format_thai_datetime(sub.expires_at)
             time_rem = format_remaining_time(sub.expires_at)
-            user_name = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
 
-            # มาร์กว่าได้ส่งแจ้งเตือนแล้ว
-            sub.warned_1d = True
+            expires_at_utc = ensure_utc(sub.expires_at)
+            joined_ref = ensure_utc(sub.joined_at) or ensure_utc(sub.created_at) or now
+            total_duration = (expires_at_utc - joined_ref).total_seconds()
+            is_long_plan = total_duration > (24 * 3600)  # แพ็กเกจ > 24 ชม. (เช่น 3 วัน, 10 วัน, 30 วัน)
+
+            warn_type = None  # "1h" หรือ "1d"
+
+            # --- ด่านที่ 1: ตรวจสอบแจ้งเตือน 1 ชั่วโมง (ส่งให้ทุกแพ็กเกจเมื่อเหลือ <= 1 ชม.) ---
+            if expires_at_utc <= one_hour_later:
+                if not getattr(sub, "warned_1h", False):
+                    warn_type = "1h"
+                    sub.warned_1h = True
+                    sub.warned_1d = True  # มาร์ก 1d เป็น True ด้วยเพื่อไม่ให้ส่งซ้ำ
+            # --- ด่านที่ 2: ตรวจสอบแจ้งเตือน 24 ชั่วโมง (เฉพาะแพ็กเกจระยะยาว > 24 ชม.) ---
+            elif is_long_plan and expires_at_utc <= one_day_later:
+                if not sub.warned_1d:
+                    warn_type = "1d"
+                    sub.warned_1d = True
+
+            if not warn_type:
+                continue
+
             session.add(sub)
 
+            if warn_type == "1h":
+                warn_headline = f"🚨 <b>[แจ้งเตือนด่วน] แพ็กเกจสมาชิก VIP ของคุณจะหมดอายุในอีก {time_rem} (1 ชั่วโมงสุดท้าย)!</b>"
+            else:
+                warn_headline = f"⚠️ <b>[แจ้งเตือน] แพ็กเกจสมาชิก VIP ของคุณจะหมดอายุในอีก {time_rem}!</b>"
+
             warn_text = (
-                f"⚠️ <b>[แจ้งเตือน] แพ็กเกจสมาชิก VIP ของคุณจะหมดอายุในอีก {time_rem}!</b>\n\n"
+                f"{warn_headline}\n\n"
                 f"เรียนคุณ {user_name} 👋\n"
                 f"แพ็กเกจ <b>{plan_title}</b> ของคุณกำลังจะหมดอายุใน:\n"
                 f"📅 <code>{expires_at_thai} น.</code> (เหลือเวลาประมาณ {time_rem})\n\n"
                 "✨ <b>เพื่อการรับชมและเข้าถึง Channel VIP อย่างต่อเนื่อง:</b>\n"
                 "คุณสามารถต่อเวลาสะสมล่วงหน้าได้ทันที โดยพิมพ์ <b>/start</b> หรือกดปุ่ม <b>'💳 ต่ออายุสมาชิก VIP'</b> ด้านล่างนี้ครับ\n\n"
                 "💡 <i>(วันใหม่จะถูกนำไปบวกเพิ่มสะสมกับเวลาที่เหลืออยู่อัตโนมัติ โดยคุณไม่ต้องออกจากห้อง VIP ครับ)</i>"
-            )
-
-            renew_keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(text="💳 ต่ออายุสมาชิก VIP", callback_data="menu:packages"),
-                        InlineKeyboardButton(text="📊 เช็คสถานะ", callback_data="menu:my_status"),
-                    ],
-                ]
             )
 
             try:
@@ -321,7 +334,7 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
                     reply_markup=renew_keyboard,
                     parse_mode="HTML",
                 )
-                logger.info(f"Sent expiration warning DM ({time_rem} remaining) to User ID={user_id}.")
+                logger.info(f"Sent {warn_type} expiration warning DM ({time_rem} remaining) to User ID={user_id}.")
             except TelegramForbiddenError:
                 logger.info(f"User ID={user_id} has blocked the bot. Skipping warning.")
             except Exception as e:

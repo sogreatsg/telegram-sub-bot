@@ -235,6 +235,9 @@ class Subscription(Base):
     warned_1d: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )
+    warned_1h: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     stale_alerted: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False
     )

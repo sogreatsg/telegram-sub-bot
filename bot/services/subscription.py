@@ -198,6 +198,7 @@ async def grant_subscription(
         new_expires_at = compute_new_expiry(sub.expires_at, now, total_days, total_minutes)
         sub.expires_at = new_expires_at
         sub.warned_1d = False
+        sub.warned_1h = False
         sub.source_label = source_label
         sub.pending_days = 0
         sub.pending_minutes = 0
@@ -217,6 +218,7 @@ async def grant_subscription(
         sub.is_trial_active = is_trial and total_days == 0
         sub.source_label = source_label
         sub.warned_1d = False
+        sub.warned_1h = False
         sub.pending_days = 0
         sub.pending_minutes = 0
         sub.pending_has_value = False
@@ -285,6 +287,7 @@ async def activate_pending_subscription(
     sub.expires_at = new_expires_at
     sub.is_trial_active = is_trial_only
     sub.warned_1d = False
+    sub.warned_1h = False
     sub.pending_days = 0
     sub.pending_minutes = 0
     sub.pending_has_value = False
