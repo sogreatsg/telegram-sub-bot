@@ -26,7 +26,8 @@ class Base(DeclarativeBase):
 class PlanType(str, enum.Enum):
     """Subscription plan types."""
     TRIAL_15M = "TRIAL_15M"
-    VIP_1D = "VIP_1D"
+    VIP_12H = "VIP_12H"
+    VIP_1D = "VIP_1D"  # Backward compatibility alias
     VIP_3D = "VIP_3D"
     VIP_10D = "VIP_10D"
     VIP_30D = "VIP_30D"
@@ -36,11 +37,22 @@ class PlanType(str, enum.Enum):
 
 
 PLAN_DETAILS = {
-    PlanType.VIP_1D.value: {
-        "name": "VIP 1 วัน",
-        "badge": "⚡ VIP 1 วัน",
+    PlanType.VIP_12H.value: {
+        "name": "VIP 12 ชั่วโมง",
+        "badge": "⚡ VIP 12 ชั่วโมง",
         "price": 100,
-        "days": 1,
+        "days": 0,
+        "hours": 12,
+        "minutes": 720,
+        "qr_filename": "qr_100.png",
+    },
+    PlanType.VIP_1D.value: {
+        "name": "VIP 12 ชั่วโมง",
+        "badge": "⚡ VIP 12 ชั่วโมง",
+        "price": 100,
+        "days": 0,
+        "hours": 12,
+        "minutes": 720,
         "qr_filename": "qr_100.png",
     },
     PlanType.VIP_3D.value: {
@@ -48,6 +60,8 @@ PLAN_DETAILS = {
         "badge": "🥉 VIP 3 วัน",
         "price": 300,
         "days": 3,
+        "hours": 0,
+        "minutes": 0,
         "qr_filename": "qr_300.png",
     },
     PlanType.VIP_10D.value: {
@@ -55,6 +69,8 @@ PLAN_DETAILS = {
         "badge": "🥈 VIP 10 วัน",
         "price": 500,
         "days": 10,
+        "hours": 0,
+        "minutes": 0,
         "qr_filename": "qr_500.png",
     },
     PlanType.VIP_30D.value: {
@@ -62,6 +78,8 @@ PLAN_DETAILS = {
         "badge": "🥇 VIP 30 วัน",
         "price": 1000,
         "days": 30,
+        "hours": 0,
+        "minutes": 0,
         "qr_filename": "qr_1000.png",
     },
     PlanType.REFERRAL_VIP.value: {
@@ -69,6 +87,8 @@ PLAN_DETAILS = {
         "badge": "🎁 VIP ชวนเพื่อน",
         "price": 0,
         "days": 1,
+        "hours": 0,
+        "minutes": 0,
         "qr_filename": "",
     },
     PlanType.MONTHLY_30D.value: {
@@ -76,6 +96,8 @@ PLAN_DETAILS = {
         "badge": "🥇 VIP 30 วัน",
         "price": 1000,
         "days": 30,
+        "hours": 0,
+        "minutes": 0,
         "qr_filename": "qr_payment.png",
     },
     PlanType.PROMOTION.value: {
@@ -83,9 +105,21 @@ PLAN_DETAILS = {
         "badge": "🔥 โปรโมชั่นพิเศษ",
         "price": 0,
         "days": 0,
+        "hours": 0,
+        "minutes": 0,
         "qr_filename": "",
     },
 }
+
+def format_plan_duration(plan_info: dict) -> str:
+    """แปลงระยะเวลาของแพ็กเกจเป็นข้อความภาษาไทย เช่น '12 ชั่วโมง', '3 วัน'"""
+    if plan_info.get("days", 0) > 0:
+        return f"{plan_info['days']} วัน"
+    if plan_info.get("hours", 0) > 0:
+        return f"{plan_info['hours']} ชั่วโมง"
+    if plan_info.get("minutes", 0) > 0:
+        return f"{plan_info['minutes']} นาที"
+    return f"{plan_info.get('days', 0)} วัน"
 
 def get_dynamic_plan_info(plan_key: str) -> dict:
     plan_info = PLAN_DETAILS.get(plan_key, PLAN_DETAILS.get(PlanType.VIP_30D.value, {})).copy()

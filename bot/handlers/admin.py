@@ -205,7 +205,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
             requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
 
             plan_info = get_dynamic_plan_info(requested_plan)
-            additional_days = plan_info["days"]
+            additional_days, additional_minutes = parse_plan_days(requested_plan)
             grant_type_value = GrantType.PROMOTION.value if requested_plan == PlanType.PROMOTION.value else GrantType.PURCHASE.value
 
             # ตรวจสอบสถานะจริงใน Channel (ใช้แค่ตัดสินใจว่าต้องออก invite link ใหม่ให้หรือไม่
@@ -222,6 +222,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 session,
                 user_id=target_user_id,
                 days=additional_days,
+                minutes=additional_minutes,
                 source_label=f"สมาชิก {plan_info['badge']}",
                 grant_type=grant_type_value,
                 has_value=True,
@@ -232,13 +233,13 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
 
             if is_stack_extension:
                 logger.info(
-                    f"Approve slip #{slip_id}: Extended active sub for User {target_user_id} by +{additional_days} days. "
+                    f"Approve slip #{slip_id}: Extended active sub for User {target_user_id} by +{additional_days}d {additional_minutes}m. "
                     f"New expires_at: {new_expires_at}"
                 )
 
         plan_info = get_dynamic_plan_info(requested_plan)
         plan_badge = plan_info["badge"]
-        plan_desc = f"{plan_info['days']} วัน"
+        plan_desc = format_plan_duration(plan_info)
         user_dm_sent = False
 
         if is_stack_extension and new_expires_at:

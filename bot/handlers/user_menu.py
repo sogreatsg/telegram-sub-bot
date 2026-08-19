@@ -39,8 +39,8 @@ def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup
         ],
         [
             InlineKeyboardButton(
-                text="⚡ VIP 1 วัน — 100 บาท",
-                callback_data="menu:subscribe:VIP_1D",
+                text="⚡ VIP 12 ชั่วโมง — 100 บาท",
+                callback_data="menu:subscribe:VIP_12H",
             ),
         ],
         [
@@ -165,7 +165,7 @@ async def handle_start(message: Message, state: FSMContext):
         "เข้าถึงเนื้อหาสุดพิเศษใน Channel VIP ส่วนตัว พร้อมการอัปเดตแบบเรียลไทม์\n\n"
         "🌟 <b>กรุณาเลือกแพ็กเกจที่ต้องการด้านล่าง:</b>\n"
         "• <b>⏱️ ทดลองใช้ฟรี 15 นาที</b>: ทดลองเข้าชม Channel ฟรี 1 ครั้ง\n"
-        "• <b>⚡ VIP 1 วัน</b>: ราคา 100 บาท\n"
+        "• <b>⚡ VIP 12 ชั่วโมง</b>: ราคา 100 บาท\n"
         "• <b>🥉 VIP 3 วัน</b>: ราคา 300 บาท\n"
         "• <b>🥈 VIP 10 วัน</b>: ราคา 500 บาท\n"
         "• <b>🥇 VIP 30 วัน</b>: ราคา 1,000 บาท\n\n"

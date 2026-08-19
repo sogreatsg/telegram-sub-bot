@@ -138,13 +138,14 @@ async def handle_subscribe_plan_button(callback: CallbackQuery, state: FSMContex
             plan_key = PlanType.VIP_30D.value
 
     plan_info = get_dynamic_plan_info(plan_key)
+    duration_str = format_plan_duration(plan_info)
     await state.clear()
 
     method_text = (
         f"💳 <b>เลือกช่องทางชำระเงิน — {plan_info['badge']}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 <b>ยอดชำระ:</b> <b>{plan_info['price']:,} บาท</b>\n"
-        f"⏳ <b>ระยะเวลาสมาชิก:</b> <b>{plan_info['days']} วันเต็ม</b>\n"
+        f"⏳ <b>ระยะเวลาสมาชิก:</b> <b>{duration_str}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🌟 <b>กรุณาเลือกช่องทางที่คุณต้องการชำระเงิน:</b>\n\n"
         "1️⃣ <b>📲 สแกน QR Code</b>\n"
@@ -189,6 +190,7 @@ async def handle_payment_method_promptpay(callback: CallbackQuery, state: FSMCon
 
     plan_key = callback.data.split(":")[-1]
     plan_info = get_dynamic_plan_info(plan_key)
+    duration_str = format_plan_duration(plan_info)
 
     await state.set_state(PaymentStates.waiting_for_slip)
     await state.update_data(plan_type=plan_key, payment_method="PROMPTPAY")
@@ -260,7 +262,7 @@ async def handle_payment_method_truemoney(callback: CallbackQuery, state: FSMCon
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📦 <b>แพ็กเกจ:</b> <b>{plan_info['badge']}</b>\n"
         f"💰 <b>ยอดเงินที่ต้องสร้างซอง:</b> <b>{plan_info['price']:,} บาท</b> (ระบุยอดให้ตรงเท่านั้น)\n"
-        f"⏳ <b>ระยะเวลา:</b> <b>{plan_info['days']} วันเต็ม</b>\n"
+        f"⏳ <b>ระยะเวลา:</b> <b>{format_plan_duration(plan_info)}</b>\n"
         f"👥 <b>การตั้งค่าซอง:</b> สุ่มยอดเงินเท่ากัน / จำนวนผู้รับ <b>1 คน</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📝 <b>วิธีสร้างและส่งซองของขวัญ TrueMoney:</b>\n"
@@ -396,7 +398,7 @@ async def process_truemoney_submission(
         f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
         f"📦 <b>แพ็กเกจที่ขอ:</b> <b>{plan_info['badge']} ({plan_info['price']:,} บาท)</b>\n"
-        f"⏳ <b>ระยะเวลา:</b> {plan_info['days']} วัน\n"
+        f"⏳ <b>ระยะเวลา:</b> {format_plan_duration(plan_info)}\n"
         f"📅 <b>เวลาที่ส่ง:</b> <code>{submitted_time_thai} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"🔗 <b>ลิงก์ซองของขวัญ (TrueMoney Angpao):</b>\n"
@@ -512,7 +514,7 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
         f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
         f"📦 <b>แพ็กเกจที่ขอ:</b> <b>{plan_info['badge']} ({plan_info['price']:,} บาท)</b>\n"
-        f"⏳ <b>ระยะเวลา:</b> {plan_info['days']} วัน\n"
+        f"⏳ <b>ระยะเวลา:</b> {format_plan_duration(plan_info)}\n"
         f"📅 <b>เวลาที่ส่ง:</b> <code>{submitted_time_thai} น.</code>\n\n"
         "👉 <b>กรุณาตรวจสอบสลิปและเลือกการดำเนินการด้านล่าง:</b>"
     )
@@ -597,7 +599,7 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
         f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
         f"📦 <b>แพ็กเกจที่ขอ:</b> <b>{plan_info['badge']} ({plan_info['price']:,} บาท)</b>\n"
-        f"⏳ <b>ระยะเวลา:</b> {plan_info['days']} วัน\n"
+        f"⏳ <b>ระยะเวลา:</b> {format_plan_duration(plan_info)}\n"
         f"📅 <b>เวลาที่ส่ง:</b> <code>{submitted_time_thai} น.</code>\n\n"
         "👉 <b>กรุณาตรวจสอบสลิปและเลือกการดำเนินการด้านล่าง:</b>"
     )

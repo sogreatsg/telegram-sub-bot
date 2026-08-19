@@ -36,7 +36,12 @@ def parse_plan_days(plan_type: str) -> Tuple[int, int]:
         return 1, 0
 
     if plan_type in PLAN_DETAILS:
-        return get_dynamic_plan_info(plan_type)["days"], 0
+        info = get_dynamic_plan_info(plan_type)
+        days = info.get("days", 0)
+        minutes = info.get("minutes", 0)
+        if "hours" in info and info["hours"] > 0 and not minutes:
+            minutes = info["hours"] * 60
+        return days, minutes
 
     if plan_type.startswith("PROMOTION_"):
         try:
