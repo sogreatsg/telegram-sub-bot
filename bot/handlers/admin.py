@@ -1824,21 +1824,10 @@ async def handle_admin_reset_trial_command(message: Message, bot: Bot):
     user_name = html.escape(user.full_name or f"User {target_uid}")
     user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
 
-    resp = (
-        "🔄 <b>รีเซ็ตสิทธิ์ทดลองฟรี (Trial) สำเร็จ!</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
-        f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
-        f"⏱️ <b>สถานะ Trial:</b> คืนสิทธิ์แล้ว (trial_used = False)\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "✨ <i>ผู้ใช้สามารถกดรับสิทธิ์ทดลองฟรี 15 นาทีจากเมนู <code>/start</code> ได้อีกครั้งทันทีครับ</i>"
-    )
-    await message.answer(resp, parse_mode="HTML")
-
-    # ส่งข้อความแจ้งเตือนผู้ใช้พร้อมปุ่มทดลองใช้ใหม่
+    # ส่งข้อความแจ้งเตือนผู้ใช้พร้อมปุ่มทดลองใช้ใหม่ และปุ่มเข้าเมนูหลัก /start
     user_notify_text = (
-        "🔄 <b>แอดมินได้ทำการรีเซ็ตสิทธิ์ทดลองใช้งานให้คุณแล้ว</b>\n\n"
-        "คุณสามารถกดปุ่ม <b>'ทดลองใหม่'</b> ด้านล่างนี้เพื่อรับสิทธิ์และออกลิงก์ทดลองใช้ฟรี 15 นาทีได้เลยค่ะ"
+        "🔄 <b>แอดมินได้ทำการรีเซ็ตสิทธิ์ทดลองใช้งานฟรี 15 นาทีให้คุณเรียบร้อยแล้ว</b>\n\n"
+        "✨ คุณสามารถพิมพ์ <code>/start</code> หรือกดปุ่ม <b>'⏱️ ทดลองใช้ฟรี 15 นาที'</b> ด้านล่างนี้เพื่อเริ่มต้นทดลองใช้งานใหม่อีกครั้งได้ทันทีครับ"
     )
     trial_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -1847,13 +1836,36 @@ async def handle_admin_reset_trial_command(message: Message, bot: Bot):
                     text="⏱️ ทดลองใช้ฟรี 15 นาที (ทดลองใหม่)",
                     callback_data="menu:trial"
                 )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏠 เมนูหลัก /start",
+                    callback_data="menu:main"
+                )
             ]
         ]
     )
+    dm_sent = False
     try:
         await bot.send_message(chat_id=target_uid, text=user_notify_text, reply_markup=trial_keyboard, parse_mode="HTML")
+        await log_chat_message(user_id=target_uid, sender_role="BOT", message_text=user_notify_text)
+        dm_sent = True
     except Exception as e:
         logger.error(f"Failed to notify user {target_uid} about trial reset: {e}")
+
+    dm_status = "ส่งข้อความแจ้งเตือนผู้ใช้เรียบร้อยแล้ว ✅" if dm_sent else "ไม่สามารถส่ง DM แจ้งผู้ใช้ได้ (อาจบล็อกบอท) ⚠️"
+
+    resp = (
+        "🔄 <b>รีเซ็ตสิทธิ์ทดลองฟรี (Trial) สำเร็จ!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
+        f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
+        f"⏱️ <b>สถานะ Trial:</b> คืนสิทธิ์แล้ว (trial_used = False)\n"
+        f"📩 <b>DM แจ้งเตือน:</b> {dm_status}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✨ <i>ผู้ใช้สามารถกดรับสิทธิ์ทดลองฟรี 15 นาทีจากเมนู <code>/start</code> ได้อีกครั้งทันทีครับ</i>"
+    )
+    await message.answer(resp, parse_mode="HTML")
 
 
 get_subscription_quota_and_label = subscription_status_label
@@ -2587,9 +2599,43 @@ async def handle_admin_reset_trial_callback(callback: CallbackQuery, bot: Bot):
             pass
 
     user_name = html.escape(user.full_name or f"User {target_uid}")
+
+    # ส่งข้อความแจ้งเตือนผู้ใช้พร้อมปุ่มทดลองใช้ใหม่ และปุ่มเข้าเมนูหลัก /start
+    user_notify_text = (
+        "🔄 <b>แอดมินได้ทำการรีเซ็ตสิทธิ์ทดลองใช้งานฟรี 15 นาทีให้คุณเรียบร้อยแล้ว</b>\n\n"
+        "✨ คุณสามารถพิมพ์ <code>/start</code> หรือกดปุ่ม <b>'⏱️ ทดลองใช้ฟรี 15 นาที'</b> ด้านล่างนี้เพื่อเริ่มต้นทดลองใช้งานใหม่อีกครั้งได้ทันทีครับ"
+    )
+    trial_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⏱️ ทดลองใช้ฟรี 15 นาที (ทดลองใหม่)",
+                    callback_data="menu:trial"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🏠 เมนูหลัก /start",
+                    callback_data="menu:main"
+                )
+            ]
+        ]
+    )
+    dm_sent = False
+    try:
+        await bot.send_message(chat_id=target_uid, text=user_notify_text, reply_markup=trial_keyboard, parse_mode="HTML")
+        await log_chat_message(user_id=target_uid, sender_role="BOT", message_text=user_notify_text)
+        dm_sent = True
+    except Exception as e:
+        logger.error(f"Failed to notify user {target_uid} about trial reset: {e}")
+
+    dm_status = "ส่งข้อความแจ้งเตือนผู้ใช้เรียบร้อยแล้ว ✅" if dm_sent else "ไม่สามารถส่ง DM แจ้งผู้ใช้ได้ (อาจบล็อกบอท) ⚠️"
+
     await callback.message.answer(
         f"🔄 <b>รีเซ็ตสิทธิ์ทดลองฟรี (Trial) สำหรับ {user_name} (<code>{target_uid}</code>) สำเร็จ!</b>\n"
-        "✨ <i>ผู้ใช้สามารถกดรับสิทธิ์ทดลองฟรี 15 นาทีจากเมนู /start ได้อีกครั้งทันทีครับ</i>",
+        f"📩 <b>DM แจ้งเตือน:</b> {dm_status}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✨ <i>ผู้ใช้สามารถกดรับสิทธิ์ทดลองฟรี 15 นาทีจากเมนู <code>/start</code> ได้อีกครั้งทันทีครับ</i>",
         parse_mode="HTML"
     )
     await callback.answer("✅ รีเซ็ตสิทธิ์ Trial เรียบร้อยแล้ว")
