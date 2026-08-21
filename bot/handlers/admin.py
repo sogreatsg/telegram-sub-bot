@@ -30,6 +30,15 @@ config = get_settings()
 router = Router(name="admin")
 
 
+def is_admin_chat(chat_id: int) -> bool:
+    """ตรวจสอบว่าเป็นกลุ่มแอดมินหรือไม่ (รองรับทั้งรูปแบบมีและไม่มี -100)"""
+    target = config.ADMIN_GROUP_ID
+    if chat_id == target:
+        return True
+    str_chat = str(chat_id).replace("-100", "").replace("-", "")
+    str_target = str(target).replace("-100", "").replace("-", "")
+    return str_chat == str_target
+
 
 def format_time_remaining(expires_at: datetime) -> str:
     """แปลงเวลาคงเหลือให้อ่านง่ายเป็นภาษาไทย"""
@@ -533,56 +542,49 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "👑 <b>เมนูคำสั่งผู้ดูแลระบบ (Admin Panel & Commands)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 <b>1. ตรวจสอบสมาชิก & รายงาน:</b>\n"
-        "• <code>/reconcile</code> หรือ <code>/reconcile_preview</code> — 🔍 พรีวิวสรุปยอดและสูตรคำนวณวันหมดอายุจริง (พร้อมเลือกปรับรายบุคคล/ปรับทั้งหมด)\n"
-        "• <code>/reconcile_all</code> — ⚡ กระทบยอดและปรับวันหมดอายุของสมาชิกทุกคนทั้งระบบทันที (ลดสถิติโบนัสเพื่อนซ้ำซ้อน)\n"
-        "• <code>/audit_user [User ID หรือ @username]</code> — 🔍 ตรวจสอบยอดและกระทบยอดเวลาสมาชิกรายบุคคล (พร้อมปุ่มกด Reconcile)\n"
-        "• <code>/top_referrals</code> หรือ <code>/top_refs</code> — 🏆 ดูอันดับผู้ใช้งานที่ชวนเพื่อนได้มากที่สุด (Leaderboard) เรียงจากมากไปน้อย\n"
-        "• <code>/summary</code> หรือ <code>/report</code> — ดูสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบยอดสมาชิกใน Channel จริง\n"
-        "• <code>/users_lasted</code> หรือ <code>/users_latest</code> — ดูรายชื่อผู้ใช้ที่สมัครใหม่ล่าสุด 10 คนแบบรวดเร็ว\n"
-        "• <code>/users</code> หรือ <code>/users [หน้า]</code> — ดูประวัติผู้ใช้งานย้อนหลังทั้งหมดในระบบ พร้อมปุ่มเลื่อนหน้า\n"
-        "• <code>/user [User ID หรือ @username]</code> — ดูประวัติเจาะลึกเฉพาะราย (เวลาออกลิงก์, เวลากดเข้าห้อง, เวลาหมดอายุ, สลิปโอนเงิน)\n\n"
-        "💬 <b>2. ดูประวัติการคุย & ตอบกลับผู้ใช้:</b>\n"
-        "• <code>/chat [User ID หรือ @username] [จำนวน]</code> — ดูประวัติการสนทนาย้อนหลังระหว่าง User กับ Bot\n"
-        "• <code>/reply [User ID หรือ @username] [ข้อความ]</code> — ส่งข้อความตอบกลับผู้ใช้ทาง DM ในนามทีมงานแอดมิน\n"
-        "• <code>/close_chat [User ID หรือ @username]</code> — ✅ ปิดจบการสนทนา / ทำเครื่องหมายว่าตอบแล้ว เพื่อหยุดการแจ้งเตือนเตือนซ้ำข้อความค้างตอบ\n\n"
-        "📢 <b>3. บรอดแคสต์ & ส่งข้อความหาผู้ใช้:</b>\n"
-        "• <code>/broadcast_count</code> — ตรวจสอบยอดผู้ใช้ทั้งหมดที่สามารถบรอดแคสต์ไปหาได้\n"
-        "• <code>/broadcast_menu</code> — บรอดแคสต์เมนูหลัก /start ล่าสุด (พร้อมปุ่มชวนเพื่อน/โปรโมชั่น) ให้ผู้ใช้ทุกคน\n"
-        "• <code>/broadcast [ข้อความ]</code> (หรือ Reply รูป) — บรอดแคสต์ข้อความข่าวสารหรือโปรโมชั่นให้ทุกคน\n"
-        "• <code>/send_menu [User ID หรือ @username]</code> — ส่ง Template เมนูหลัก /start ล่าสุดให้เฉพาะบุคคล\n\n"
-        "🔄 <b>4. ซิงค์และกู้คืนสมาชิกตกหล่น:</b>\n"
-        "• <code>/sync</code> หรือ <code>/sync_channel</code> — ตรวจเช็คผู้ใช้ที่ค้าง PENDING ทั้งหมด หากพบว่าอยู่ใน Channel แล้วจะเปิดใช้งาน ACTIVE และเริ่มนับเวลาให้ทันที (พร้อมเตะคนที่หมดเวลาแล้ว)\n"
-        "• <code>/deep_scan</code> — สแกนผู้ใช้ทั้งหมดในระบบแบบเจาะลึก หากพบว่ามีคนหมดอายุแต่ยังค้างอยู่ในห้องจะกวาดล้างเตะออกทันที\n\n"
-        "⚙️ <b>5. ตรวจสอบระบบ & สิทธิ์บอท:</b>\n"
-        "• <code>/admin</code> หรือ <code>/admin_help</code> — 👑 แสดงหน้ารวมเมนูคำสั่งแอดมินและปุ่มลัดทั้งหมดนี้\n"
-        "• <code>/audit</code> หรือ <code>/check</code> — ตรวจสอบสิทธิ์ของ Bot ใน Channel VIP (สิทธิ์ Ban Users, สิทธิ์สร้าง Invite Links) และสถานะการเชื่อมต่อ\n"
-        "• <code>/revoke_primary</code> — สั่งเพิกถอนและสร้าง Primary Link ใหม่ของ Channel\n"
-        "• <code>/revoke_link [Link]</code> — สั่งเพิกถอนลิงก์เชิญ (Invite Link) เฉพาะเจาะจง\n"
-        "• <code>/version</code> — ตรวจสอบเวอร์ชันและ Uptime ของบอท\n\n"
-        "🛠️ <b>6. จัดการสมาชิกใน Channel:</b>\n"
-        "• <code>/add_vip [User ID หรือ @username] [จำนวนวัน เช่น 30]</code> — ➕ เพิ่ม/ต่อเวลาสะสม VIP ให้ผู้ใช้ด้วยตนเอง (ส่ง DM แจ้งเตือนผู้ใช้)\n"
-        "• <code>/deduct_vip [User ID หรือ @username] [จำนวนวันที่ลด]</code> — ➖ ลดวันสมาชิก VIP ตามจำนวนที่ระบุ (🔇 ไม่ส่ง DM บอก User)\n"
-        "• <code>/set_vip [User ID หรือ @username] [จำนวนวัน]</code> — 🎯 ปรับตั้งค่าจำนวนวันคงเหลือใหม่ตามต้องการโดยตรง (🔇 ไม่ส่ง DM บอก User)\n"
-        "• <code>/kick [User ID]</code> — สั่งเตะ (Soft-Kick) ผู้ใช้ออกจาก Channel VIP ทันที พร้อมอัปเดตสถานะในระบบ\n\n"
-        "🗑️ <b>7. รีเซ็ต & ลบประวัติผู้ใช้ (สำหรับทดสอบระบบ):</b>\n"
-        "• <code>/reset_user [User ID หรือ @username]</code> — ลบประวัติแชท สลิป สิทธิ์ และบัญชีผู้ใช้ทั้งหมด พร้อมเตะออกจากห้อง VIP เพื่อให้เริ่มใหม่เป็นผู้ใช้ใหม่ 100%\n"
-        "• <code>/reset_trial [User ID หรือ @username]</code> — รีเซ็ตเฉพาะสิทธิ์ทดลองใช้ฟรี 15 นาที ให้ผู้ใช้กดรับสิทธิ์ใหม่ได้ทันที\n\n"
-        "🎁 <b>8. ระบบโปรโมชั่น (Promotion System):</b>\n"
-        "• /promotion — ดูสถานะโปรโมชั่นปัจจุบัน (เปิด/ปิด ราคา และจำนวนวัน)\n"
-        "• /promotion_setting — ⚙️ ตั้งค่าราคาและจำนวนวันของโปรโมชั่น (รองรับราคา 100, 300, 500, 1000 บาท)\n"
-        "• /promotion_on / /promotion_off — 🟢 เปิด / 🔴 ปิด ระบบโปรโมชั่นสำหรับผู้ใช้\n"
-        "• /promo_broadcast — 📢 บรอดแคสต์ข้อความโปรโมชั่นให้ผู้ใช้ (ทั้งหมด/คนหมดอายุ/รายคน)\n\n"
-        "👥 <b>9. ระบบแนะนำเพื่อน (Referral System):</b>\n"
-        "• /referral หรือ /ref — ดูสถานะระบบแนะนำเพื่อน (เปิด/ปิด) และสถิติรวม\n"
-        "• /referral_on หรือ /ref_on — 🟢 เปิดใช้งานระบบแนะนำเพื่อน (แสดงปุ่มในเมนู /start และแจกโบนัส VIP)\n"
-        "• /referral_off หรือ /ref_off — 🔴 ปิดใช้งานระบบแนะนำเพื่อน (ซ่อนปุ่ม และไม่แจกโบนัสวัน)\n"
-        "• /top_refs — 🏆 ดูอันดับผู้ใช้งานที่ชวนเพื่อนได้มากที่สุด\n\n"
-        "⏱️ <b>10. ระบบทดลองใช้งานฟรี (Trial System):</b>\n"
-        "• /trial หรือ /trial_status — ดูสถานะระบบทดลองใช้งานฟรี (เปิด/ปิด) และสถิติ\n"
-        "• /trial_on — 🟢 เปิดใช้งานระบบทดลองใช้งานฟรี 15 นาที (แสดงปุ่มในเมนู /start)\n"
-        "• /trial_off — 🔴 ปิดใช้งานระบบทดลองใช้งานฟรี 15 นาที (ซ่อนปุ่ม และปิดรับสิทธิ์)\n\n"
+        "• <code>/reconcile</code> — 🔍 พรีวิวสรุปยอด & กระทบยอดวันหมดอายุจริง\n"
+        "• <code>/reconcile_all</code> — ⚡ ปรับวันหมดอายุของสมาชิกทุกคนทั้งระบบทันที\n"
+        "• <code>/audit_user [User ID/@user]</code> — 🔍 ตรวจสอบยอดเวลาสมาชิกรายคน\n"
+        "• <code>/top_refs</code> — 🏆 ดูอันดับผู้ใช้งานที่ชวนเพื่อนได้มากที่สุด\n"
+        "• <code>/summary</code> — ดูสรุปสมาชิก Active ปัจจุบันใน Channel\n"
+        "• <code>/users_latest</code> — ดูรายชื่อผู้ใช้สมัครใหม่ 10 คนล่าสุด\n"
+        "• <code>/users [หน้า]</code> — ดูประวัติผู้ใช้งานทั้งหมดในระบบ\n"
+        "• <code>/user [User ID/@user]</code> — ดูประวัติเจาะลึกเฉพาะราย (สลิป/วันหมดอายุ)\n\n"
+        "💬 <b>2. แชท & ตอบกลับผู้ใช้:</b>\n"
+        "• <code>/chat [User ID/@user]</code> — ดูประวัติการสนทนา User กับ Bot\n"
+        "• <code>/reply [User ID/@user] [ข้อความ]</code> — ตอบกลับผู้ใช้ทาง DM\n"
+        "• <code>/close_chat [User ID/@user]</code> — ✅ ปิดจบการสนทนา/หยุดเตือนค้างตอบ\n\n"
+        "📢 <b>3. บรอดแคสต์:</b>\n"
+        "• <code>/broadcast_count</code> — ตรวจสอบยอดผู้ใช้ที่บรอดแคสต์ได้\n"
+        "• <code>/broadcast_menu</code> — บรอดแคสต์เมนู /start ล่าสุดให้ทุกคน\n"
+        "• <code>/broadcast [ข้อความ]</code> — บรอดแคสต์ข้อความข่าวสารให้ทุกคน\n"
+        "• <code>/send_menu [User ID/@user]</code> — ส่งเมนู /start ให้เฉพาะบุคคล\n\n"
+        "🔄 <b>4. ซิงค์สมาชิก:</b>\n"
+        "• <code>/sync</code> — ตรวจเช็คผู้ใช้ค้าง PENDING และเริ่มนับเวลาให้ทันที\n"
+        "• <code>/deep_scan</code> — กวาดล้างเตะผู้ใช้ที่หมดอายุแต่ยังค้างในห้อง\n\n"
+        "⚙️ <b>5. ระบบ & สิทธิ์บอท:</b>\n"
+        "• <code>/admin</code> — 👑 แสดงหน้ารวมเมนูคำสั่งแอดมินนี้\n"
+        "• <code>/audit</code> — ตรวจสอบสิทธิ์ของ Bot ใน Channel VIP\n"
+        "• <code>/revoke_primary</code> — เพิกถอนและสร้าง Primary Link ใหม่\n"
+        "• <code>/version</code> — ตรวจสอบเวอร์ชันและ Uptime\n\n"
+        "🛠️ <b>6. จัดการวันสมาชิก:</b>\n"
+        "• <code>/add_vip [User ID/@user] [จำนวนวัน]</code> — ➕ เพิ่มวัน VIP (ส่ง DM บอก User)\n"
+        "• <code>/deduct_vip [User ID/@user] [จำนวนวัน]</code> — ➖ ลดวัน VIP (ไม่ส่ง DM)\n"
+        "• <code>/set_vip [User ID/@user] [จำนวนวัน]</code> — 🎯 ตั้งค่าวันคงเหลือใหม่โดยตรง\n"
+        "• <code>/kick [User ID]</code> — สั่งเตะออกจาก Channel VIP ทันที\n\n"
+        "🗑️ <b>7. รีเซ็ตข้อมูล:</b>\n"
+        "• <code>/reset_user [User ID/@user]</code> — ล้างข้อมูลผู้ใช้ทั้งหมดเพื่อเริ่มใหม่\n"
+        "• <code>/reset_trial [User ID/@user]</code> — รีเซ็ตสิทธิ์ทดลองฟรีให้ผู้ใช้\n\n"
+        "🎁 <b>8. ระบบโปรโมชั่น:</b>\n"
+        "• <code>/promotion</code> (หรือ <code>/promotion_on</code> / <code>/promotion_off</code>) — เปิด/ปิด/ดูสถานะ\n"
+        "• <code>/promotion_setting</code> — ตั้งค่าราคาและจำนวนวัน\n"
+        "• <code>/promo_broadcast</code> — บรอดแคสต์โปรโมชั่น\n\n"
+        "👥 <b>9. ระบบแนะนำเพื่อน:</b>\n"
+        "• <code>/referral</code> (หรือ <code>/referral_on</code> / <code>/referral_off</code>) — เปิด/ปิด/ดูสถานะ\n\n"
+        "⏱️ <b>10. ระบบทดลองฟรี:</b>\n"
+        "• <code>/trial</code> (หรือ <code>/trial_on</code> / <code>/trial_off</code>) — เปิด/ปิด/ดูสถานะ\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 <i>สามารถกดปุ่มลัดด้านล่างเพื่อใช้งานเมนูหลักได้ทันทีครับ</i>"
+        "💡 <i>แตะปุ่มด่วนด้านล่างเพื่อใช้งานเมนูหลักได้ทันทีครับ</i>"
     )
 
     keyboard = InlineKeyboardMarkup(
@@ -618,11 +620,21 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
 @router.message(Command("admin", "admin_help", "help_admin"))
 async def handle_admin_menu_command(message: Message):
     """คำสั่งแสดงเมนูคำสั่งแอดมินทั้งหมด: /admin (เฉพาะใน Admin Group เท่านั้น)"""
-    if message.chat.id != config.ADMIN_GROUP_ID:
+    if not is_admin_chat(message.chat.id):
+        if message.chat.type == "private":
+            await message.answer(
+                "⚠️ <b>คำสั่ง /admin ใช้งานได้เฉพาะในกลุ่มแอดมิน (Admin Group) เท่านั้นครับ</b>\n\n"
+                "กรุณาพิมพ์คำสั่งนี้ในกลุ่ม Admin Group ของคุณครับ 🙏",
+                parse_mode="HTML"
+            )
         return
 
     admin_menu_text, keyboard = get_admin_menu_text_and_kb()
-    await message.answer(text=admin_menu_text, reply_markup=keyboard, parse_mode="HTML")
+    try:
+        await message.answer(text=admin_menu_text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Failed to send admin menu: {e}", exc_info=True)
+        await message.answer(f"❌ <b>เกิดข้อผิดพลาดในการเปิดเมนูแอดมิน:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
 
 
 @router.callback_query(F.data == "admin_menu:summary")
@@ -3385,9 +3397,11 @@ async def show_referral_status(message_or_callback):
         await message_or_callback.answer(text=text, reply_markup=kb, parse_mode="HTML")
 
 
-@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("referral", "ref", "referral_setting", "ref_setting", "referral_status", "ref_status"))
+@router.message(Command("referral", "ref", "referral_setting", "ref_setting", "referral_status", "ref_status"))
 async def handle_referral_command(message: Message):
     """คำสั่งดูสถานะหรือควบคุมระบบแนะนำเพื่อน: /referral [on/off]"""
+    if not is_admin_chat(message.chat.id):
+        return
     args = (message.text or "").split()[1:]
     if not args:
         await show_referral_status(message)
@@ -3406,17 +3420,21 @@ async def handle_referral_command(message: Message):
         await show_referral_status(message)
 
 
-@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("referral_on", "ref_on"))
+@router.message(Command("referral_on", "ref_on"))
 async def handle_referral_on_command(message: Message):
     """คำสั่งเปิดใช้งานระบบแนะนำเพื่อน: /referral_on"""
+    if not is_admin_chat(message.chat.id):
+        return
     update_referral_settings(is_active=True)
     text, kb = await get_referral_status_text_and_kb()
     await message.answer(f"✅ <b>เปิดใช้งานระบบแนะนำเพื่อนเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
 
 
-@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("referral_off", "ref_off"))
+@router.message(Command("referral_off", "ref_off"))
 async def handle_referral_off_command(message: Message):
     """คำสั่งปิดใช้งานระบบแนะนำเพื่อน: /referral_off"""
+    if not is_admin_chat(message.chat.id):
+        return
     update_referral_settings(is_active=False)
     text, kb = await get_referral_status_text_and_kb()
     await message.answer(f"❌ <b>ปิดใช้งานระบบแนะนำเพื่อนเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
@@ -3425,7 +3443,7 @@ async def handle_referral_off_command(message: Message):
 @router.callback_query(F.data == "admin_menu:referral")
 async def handle_admin_menu_referral_callback(callback: CallbackQuery):
     """จัดการปุ่มลัด [👥 ระบบชวนเพื่อน] ในเมนู Admin"""
-    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+    if not is_admin_chat(callback.message.chat.id):
         await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
     await callback.answer()
@@ -3435,7 +3453,7 @@ async def handle_admin_menu_referral_callback(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("ref_action:"))
 async def handle_ref_action_callback(callback: CallbackQuery):
     """จัดการ Quick Actions ปุ่มลัดเปิด/ปิด Referral"""
-    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+    if not is_admin_chat(callback.message.chat.id):
         await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
 
@@ -3455,7 +3473,7 @@ async def handle_ref_action_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "admin_menu:main")
 async def handle_admin_menu_main_callback(callback: CallbackQuery):
     """จัดการปุ่มลัดกลับสู่เมนูหลัก Admin"""
-    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+    if not is_admin_chat(callback.message.chat.id):
         await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
     await callback.answer()
@@ -3521,9 +3539,11 @@ async def show_trial_status(message_or_callback):
         await message_or_callback.answer(text=text, reply_markup=kb, parse_mode="HTML")
 
 
-@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("trial", "trial_status", "trial_setting"))
+@router.message(Command("trial", "trial_status", "trial_setting"))
 async def handle_trial_command(message: Message):
     """คำสั่งดูสถานะหรือควบคุมระบบทดลองฟรี: /trial [on/off]"""
+    if not is_admin_chat(message.chat.id):
+        return
     args = (message.text or "").split()[1:]
     if not args:
         await show_trial_status(message)
@@ -3542,17 +3562,21 @@ async def handle_trial_command(message: Message):
         await show_trial_status(message)
 
 
-@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("trial_on"))
+@router.message(Command("trial_on"))
 async def handle_trial_on_command(message: Message):
     """คำสั่งเปิดใช้งานระบบทดลองฟรี: /trial_on"""
+    if not is_admin_chat(message.chat.id):
+        return
     update_trial_settings(is_active=True)
     text, kb = await get_trial_status_text_and_kb()
     await message.answer(f"✅ <b>เปิดใช้งานระบบทดลองใช้งานฟรีเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
 
 
-@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("trial_off"))
+@router.message(Command("trial_off"))
 async def handle_trial_off_command(message: Message):
     """คำสั่งปิดใช้งานระบบทดลองฟรี: /trial_off"""
+    if not is_admin_chat(message.chat.id):
+        return
     update_trial_settings(is_active=False)
     text, kb = await get_trial_status_text_and_kb()
     await message.answer(f"❌ <b>ปิดใช้งานระบบทดลองใช้งานฟรีเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
@@ -3561,7 +3585,7 @@ async def handle_trial_off_command(message: Message):
 @router.callback_query(F.data == "admin_menu:trial")
 async def handle_admin_menu_trial_callback(callback: CallbackQuery):
     """จัดการปุ่มลัด [⏱️ ระบบทดลองฟรี] ในเมนู Admin"""
-    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+    if not is_admin_chat(callback.message.chat.id):
         await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
     await callback.answer()
@@ -3571,7 +3595,7 @@ async def handle_admin_menu_trial_callback(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("trial_action:"))
 async def handle_trial_action_callback(callback: CallbackQuery):
     """จัดการ Quick Actions ปุ่มลัดเปิด/ปิด Trial"""
-    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+    if not is_admin_chat(callback.message.chat.id):
         await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
 
