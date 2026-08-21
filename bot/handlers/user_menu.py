@@ -18,6 +18,7 @@ from bot.models.schema import User, Subscription, SubStatus, GrantType
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
 from bot.services.referral import get_referral_link, get_share_url, is_referral_active
+from bot.services.trial import is_trial_active
 from bot.services.subscription import grant_subscription, subscription_status_label
 from typing import Optional
 
@@ -27,20 +28,30 @@ router = Router(name="user_menu")
 
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
 
-def get_main_menu_keyboard(trial_available: bool = True, referral_available: Optional[bool] = None) -> InlineKeyboardMarkup:
-    """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard พร้อมแพ็กเกจ และระบบชวนเพื่อน (หากเปิดใช้งาน)"""
+def get_main_menu_keyboard(
+    trial_available: bool = True,
+    referral_available: Optional[bool] = None,
+    trial_enabled: Optional[bool] = None,
+) -> InlineKeyboardMarkup:
+    """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard พร้อมแพ็กเกจ (และปุ่มทดลองฟรี/ชวนเพื่อน หากเปิดใช้งาน)"""
     if referral_available is None:
         referral_available = is_referral_active()
+    if trial_enabled is None:
+        trial_enabled = is_trial_active()
 
-    trial_button_text = "⏱️ ทดลองใช้ฟรี 15 นาที" if trial_available else "⏱️ ทดลองฟรี (ใช้สิทธิ์แล้ว)"
-    
-    keyboard = [
-        [
+    keyboard = []
+
+    # แสดงปุ่มทดลองฟรีเฉพาะเมื่อระบบทดลองฟรีเปิดใช้งานอยู่
+    if trial_enabled:
+        trial_button_text = "⏱️ ทดลองใช้ฟรี 15 นาที" if trial_available else "⏱️ ทดลองฟรี (ใช้สิทธิ์แล้ว)"
+        keyboard.append([
             InlineKeyboardButton(
                 text=trial_button_text,
                 callback_data="menu:trial",
             )
-        ],
+        ])
+
+    keyboard.extend([
         [
             InlineKeyboardButton(
                 text="⚡ VIP 12 ชั่วโมง — 100 บาท",
@@ -65,7 +76,8 @@ def get_main_menu_keyboard(trial_available: bool = True, referral_available: Opt
                 callback_data="menu:subscribe:VIP_30D",
             ),
         ],
-    ]
+    ])
+
     if referral_available:
         keyboard.append([
             InlineKeyboardButton(
@@ -73,6 +85,7 @@ def get_main_menu_keyboard(trial_available: bool = True, referral_available: Opt
                 callback_data="menu:referral",
             ),
         ])
+
     keyboard.extend([
         [
             InlineKeyboardButton(
@@ -167,11 +180,12 @@ async def handle_start(message: Message, state: FSMContext):
         logger.error(f"Error checking user in handle_start: {e}", exc_info=True)
 
     first_name_safe = html.escape(telegram_user.first_name or "")
+    trial_bullet = "• <b>⏱️ ทดลองใช้ฟรี 15 นาที</b>: ทดลองเข้าชม Channel ฟรี 1 ครั้ง\n" if is_trial_active() else ""
     welcome_text = (
         f"👋 <b>ยินดีต้อนรับสู่ระบบสมาชิก BareLive, {first_name_safe}!</b>\n\n"
         "เข้าถึงเนื้อหาสุดพิเศษใน Channel VIP ส่วนตัว พร้อมการอัปเดตแบบเรียลไทม์\n\n"
         "🌟 <b>กรุณาเลือกแพ็กเกจที่ต้องการด้านล่าง:</b>\n"
-        "• <b>⏱️ ทดลองใช้ฟรี 15 นาที</b>: ทดลองเข้าชม Channel ฟรี 1 ครั้ง\n"
+        f"{trial_bullet}"
         "• <b>⚡ VIP 12 ชั่วโมง</b>: ราคา 100 บาท\n"
         "• <b>🥉 VIP 3 วัน</b>: ราคา 300 บาท\n"
         "• <b>🥈 VIP 10 วัน</b>: ราคา 500 บาท\n"
@@ -236,6 +250,24 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
     """จัดการคำขอทดลองใช้งานฟรี"""
     await state.clear()
     if not callback.from_user:
+        return
+
+    if not is_trial_active():
+        await callback.answer("⚠️ ระบบทดลองใช้ฟรีปิดให้บริการชั่วคราว", show_alert=True)
+        disabled_text = (
+            "⚠️ <b>ระบบทดลองใช้งานฟรีปิดให้บริการชั่วคราว</b>\n\n"
+            "ขณะนี้ระบบทดลองใช้งานฟรี 15 นาที ปิดให้บริการชั่วคราว ขออภัยในความไม่สะดวกครับ\n\n"
+            "คุณสามารถเลือกสมัครสมาชิก VIP ได้จากเมนูหลักครับ"
+        )
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    text=disabled_text,
+                    reply_markup=get_back_to_menu_keyboard(),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
         return
 
     user_id = callback.from_user.id
@@ -450,14 +482,20 @@ async def handle_my_status(callback: CallbackQuery, state: FSMContext):
 
     status_text = f"📊 <b>สถานะการเป็นสมาชิกของคุณ</b>\n\n"
     status_text += f"👤 <b>Telegram ID:</b> <code>{user_id}</code>\n"
-    status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n"
-    status_text += f"🎁 <b>โบนัสชวนเพื่อน:</b> ชวนสำเร็จ {user.referral_count or 0} คน (รับโบนัสสะสม {user.referral_bonus_days or 0} วัน)\n\n"
+    if is_trial_active():
+        status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n"
+    if is_referral_active():
+        status_text += f"🎁 <b>โบนัสชวนเพื่อน:</b> ชวนสำเร็จ {user.referral_count or 0} คน (รับโบนัสสะสม {user.referral_bonus_days or 0} วัน)\n"
+    status_text += "\n"
 
     plan_label, quota_str = subscription_status_label(sub)
 
     if not sub:
         status_text += "🔴 <b>สถานะ:</b> ไม่มีแพ็กเกจที่ใช้งานอยู่\n"
-        status_text += "คุณสามารถเริ่มทดลองใช้ฟรี หรือสมัครสมาชิกได้จากเมนูด้านล่างครับ"
+        if is_trial_active():
+            status_text += "คุณสามารถเริ่มทดลองใช้ฟรี หรือสมัครสมาชิกได้จากเมนูด้านล่างครับ"
+        else:
+            status_text += "คุณสามารถเลือกสมัครแพ็กเกจสมาชิก VIP ได้จากเมนูด้านล่างครับ"
     elif sub.status == SubStatus.ACTIVE.value:
         status_text += "🟢 <b>สถานะ:</b> กำลังใช้งาน (ACTIVE)\n"
         status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"
@@ -494,16 +532,22 @@ async def handle_help(callback: CallbackQuery, state: FSMContext):
     if not callback.message:
         return
 
-    help_text = (
-        "❓ <b>วิธีใช้งาน & คำถามที่พบบ่อย (FAQ)</b>\n\n"
-        "• <b>การทดลองใช้ฟรีทำงานอย่างไร?</b>\n"
-        "กดปุ่ม 'ทดลองใช้ฟรี' บอทจะส่งลิงก์เชิญแบบ 1 ครั้งให้คุณ "
-        "โดยเวลานับถอยหลังจะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel\n\n"
-        "• <b>ระบบแนะนำเพื่อน (รับ VIP ฟรี 1 วัน):</b>\n"
-        "กดปุ่ม '🎁 ชวนเพื่อนรับ VIP ฟรี' คัดลอกลิงก์ส่งให้เพื่อน "
-        "เมื่อเพื่อนกดเข้าทดลองใช้งาน Channel คุณจะได้รับ VIP ฟรี +1 วันทันที (สะสมวันได้เรื่อยๆ!)\n\n"
+    help_parts = ["❓ <b>วิธีใช้งาน & คำถามที่พบบ่อย (FAQ)</b>\n"]
+    if is_trial_active():
+        help_parts.append(
+            "• <b>การทดลองใช้ฟรีทำงานอย่างไร?</b>\n"
+            "กดปุ่ม 'ทดลองใช้ฟรี' บอทจะส่งลิงก์เชิญแบบ 1 ครั้งให้คุณ "
+            "โดยเวลานับถอยหลังจะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel\n"
+        )
+    if is_referral_active():
+        help_parts.append(
+            "• <b>ระบบแนะนำเพื่อน (รับ VIP ฟรี 1 วัน):</b>\n"
+            "กดปุ่ม '🎁 ชวนเพื่อนรับ VIP ฟรี' คัดลอกลิงก์ส่งให้เพื่อน "
+            "เมื่อเพื่อนกดเข้าทดลองใช้งาน Channel คุณจะได้รับ VIP ฟรี +1 วันทันที (สะสมวันได้เรื่อยๆ!)\n"
+        )
+    help_parts.append(
         "• <b>ขั้นตอนการสมัครสมาชิก VIP:</b>\n"
-        "1. เลือกแพ็กเกจที่ต้องการ (3 วัน 300฿, 10 วัน 500฿ หรือ 30 วัน 1,000฿)\n"
+        "1. เลือกแพ็กเกจที่ต้องการ (12 ชม. 100฿, 3 วัน 300฿, 10 วัน 500฿ หรือ 30 วัน 1,000฿)\n"
         "2. เลือกช่องทางชำระเงิน:\n"
         "   • <b>📲 สแกน QR Code:</b> สแกนจ่ายและส่งรูปสลิปเข้ามาในแชท\n"
         "   • <b>🧧 ซองของขวัญ TrueMoney:</b> สร้างซองแดงและส่งลิงก์ซองเข้ามาในแชท\n\n"
@@ -515,6 +559,7 @@ async def handle_help(callback: CallbackQuery, state: FSMContext):
         "/status - ตรวจสอบสถานะและเวลาสมาชิกคงเหลือ\n"
         "/cancel - ยกเลิกการทำรายการหรือการทำงานปัจจุบัน"
     )
+    help_text = "\n".join(help_parts)
 
     await callback.message.edit_text(
         text=help_text,
@@ -543,14 +588,20 @@ async def handle_status_command(message: Message, state: FSMContext):
 
     status_text = f"📊 <b>สถานะการเป็นสมาชิกของคุณ</b>\n\n"
     status_text += f"👤 <b>Telegram ID:</b> <code>{user_id}</code>\n"
-    status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n"
-    status_text += f"🎁 <b>โบนัสชวนเพื่อน:</b> ชวนสำเร็จ {user.referral_count or 0} คน (รับโบนัสสะสม {user.referral_bonus_days or 0} วัน)\n\n"
+    if is_trial_active():
+        status_text += f"⏱️ <b>สิทธิ์ทดลองฟรี:</b> {'ใช้สิทธิ์แล้ว' if user.trial_used else 'ยังไม่เคยใช้ (พร้อมใช้งาน)'}\n"
+    if is_referral_active():
+        status_text += f"🎁 <b>โบนัสชวนเพื่อน:</b> ชวนสำเร็จ {user.referral_count or 0} คน (รับโบนัสสะสม {user.referral_bonus_days or 0} วัน)\n"
+    status_text += "\n"
 
     plan_label, quota_str = subscription_status_label(sub)
 
     if not sub or sub.status in (SubStatus.EXPIRED.value, SubStatus.KICKED.value, SubStatus.KICK_FAILED.value):
         status_text += "🔴 <b>สถานะ:</b> ไม่มีแพ็กเกจที่ใช้งานอยู่\n"
-        status_text += "พิมพ์ /start เพื่อทดลองใช้ฟรี หรือสมัครสมาชิก VIP"
+        if is_trial_active():
+            status_text += "พิมพ์ /start เพื่อทดลองใช้ฟรี หรือสมัครสมาชิก VIP"
+        else:
+            status_text += "พิมพ์ /start เพื่อสมัครสมาชิก VIP"
     elif sub.status == SubStatus.ACTIVE.value:
         status_text += "🟢 <b>สถานะ:</b> กำลังใช้งาน (ACTIVE)\n"
         status_text += f"📦 <b>แพ็กเกจ:</b> {plan_label}\n"

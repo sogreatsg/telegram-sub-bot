@@ -21,6 +21,7 @@ from bot.services.subscription import grant_subscription, subscription_status_la
 from bot.services.reconciliation import reconcile_user, reconcile_all_users, format_reconcile_formula
 from bot.services.chat_logger import log_chat_message
 from bot.services.referral import is_referral_active, update_referral_settings
+from bot.services.trial import is_trial_active, update_trial_settings
 from bot.handlers.user_menu import get_main_menu_keyboard
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title, format_remaining_time
 
@@ -576,6 +577,10 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "• /referral_on หรือ /ref_on — 🟢 เปิดใช้งานระบบแนะนำเพื่อน (แสดงปุ่มในเมนู /start และแจกโบนัส VIP)\n"
         "• /referral_off หรือ /ref_off — 🔴 ปิดใช้งานระบบแนะนำเพื่อน (ซ่อนปุ่ม และไม่แจกโบนัสวัน)\n"
         "• /top_refs — 🏆 ดูอันดับผู้ใช้งานที่ชวนเพื่อนได้มากที่สุด\n\n"
+        "⏱️ <b>10. ระบบทดลองใช้งานฟรี (Trial System):</b>\n"
+        "• /trial หรือ /trial_status — ดูสถานะระบบทดลองใช้งานฟรี (เปิด/ปิด) และสถิติ\n"
+        "• /trial_on — 🟢 เปิดใช้งานระบบทดลองใช้งานฟรี 15 นาที (แสดงปุ่มในเมนู /start)\n"
+        "• /trial_off — 🔴 ปิดใช้งานระบบทดลองใช้งานฟรี 15 นาที (ซ่อนปุ่ม และปิดรับสิทธิ์)\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "💡 <i>สามารถกดปุ่มลัดด้านล่างเพื่อใช้งานเมนูหลักได้ทันทีครับ</i>"
     )
@@ -601,6 +606,9 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
             [
                 InlineKeyboardButton(text="🎁 ตั้งค่าโปรโมชั่น", callback_data="admin_menu:promotion"),
                 InlineKeyboardButton(text="👥 ระบบชวนเพื่อน", callback_data="admin_menu:referral"),
+            ],
+            [
+                InlineKeyboardButton(text="⏱️ ระบบทดลองฟรี", callback_data="admin_menu:trial"),
             ],
         ]
     )
@@ -3456,6 +3464,128 @@ async def handle_admin_menu_main_callback(callback: CallbackQuery):
         await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
     except Exception:
         await callback.message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+async def get_trial_status_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
+    """สร้างข้อความสรุปสถานะระบบทดลองใช้งานฟรีและ Inline Keyboard สำหรับ Admin"""
+    is_active = is_trial_active()
+    status_str = f"🟢 เปิดใช้งาน (Active) — แสดงปุ่มทดลองฟรี {config.TRIAL_DURATION_MINUTES} นาที ในเมนู /start" if is_active else "🔴 ปิดใช้งาน (Disabled) — ซ่อนปุ่ม และปิดการขอรับสิทธิ์ทดลองฟรี"
+
+    async with get_session() as session:
+        total_users = (await session.execute(select(func.count(User.telegram_id)))).scalar() or 0
+        trial_used_count = (await session.execute(
+            select(func.count(User.telegram_id)).where(User.trial_used == True)
+        )).scalar() or 0
+        never_trial_count = total_users - trial_used_count
+
+    text = (
+        "⏱️ <b>ระบบจัดการการทดลองใช้งานฟรี (Trial System Management)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>สถานะปัจจุบัน:</b> {status_str}\n"
+        f"⏳ <b>ระยะเวลาทดลอง:</b> <b>{config.TRIAL_DURATION_MINUTES} นาที</b>\n\n"
+        "📈 <b>สถิติผู้ใช้งาน:</b>\n"
+        f"• 👥 ผู้ใช้ทั้งหมด: <b>{total_users:,} คน</b>\n"
+        f"• ✅ เคยใช้สิทธิ์ทดลองแล้ว: <b>{trial_used_count:,} คน</b>\n"
+        f"• ⏳ ยังไม่เคยใช้สิทธิ์: <b>{never_trial_count:,} คน</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📋 <b>คำสั่งสำหรับควบคุมระบบ:</b>\n"
+        "• <code>/trial_on</code> — 🟢 เปิดใช้งานระบบทดลองฟรี (แสดงปุ่มในเมนู /start)\n"
+        "• <code>/trial_off</code> — 🔴 ปิดใช้งานระบบทดลองฟรี (ซ่อนปุ่ม และปิดรับสิทธิ์)\n"
+        "• <code>/reset_trial [User ID หรือ @username]</code> — รีเซ็ตสิทธิ์ทดลองฟรีให้ผู้ใช้รายคน\n"
+        "• <code>/trial</code> — 🔄 ดูสถานะระบบทดลองฟรี\n\n"
+        "💡 <i>แตะปุ่มด่วนด้านล่างเพื่อเปิด/ปิดระบบได้ทันที:</i>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🟢 เปิดทดลองฟรี", callback_data="trial_action:on"),
+            InlineKeyboardButton(text="🔴 ปิดทดลองฟรี", callback_data="trial_action:off"),
+        ],
+        [
+            InlineKeyboardButton(text="🔄 รีเฟรชสถานะ", callback_data="admin_menu:trial"),
+            InlineKeyboardButton(text="🔙 กลับสู่เมนูแอดมิน", callback_data="admin_menu:main"),
+        ]
+    ])
+    return text, kb
+
+
+async def show_trial_status(message_or_callback):
+    """ส่งหรือแก้ไขข้อความแสดงสถานะระบบทดลองฟรี"""
+    text, kb = await get_trial_status_text_and_kb()
+    if isinstance(message_or_callback, CallbackQuery):
+        try:
+            await message_or_callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await message_or_callback.message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message_or_callback.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("trial", "trial_status", "trial_setting"))
+async def handle_trial_command(message: Message):
+    """คำสั่งดูสถานะหรือควบคุมระบบทดลองฟรี: /trial [on/off]"""
+    args = (message.text or "").split()[1:]
+    if not args:
+        await show_trial_status(message)
+        return
+
+    subcmd = args[0].lower()
+    if subcmd in ("on", "enable", "start", "open"):
+        update_trial_settings(is_active=True)
+        text, kb = await get_trial_status_text_and_kb()
+        await message.answer(f"✅ <b>เปิดใช้งานระบบทดลองใช้งานฟรีเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+    elif subcmd in ("off", "disable", "stop", "close"):
+        update_trial_settings(is_active=False)
+        text, kb = await get_trial_status_text_and_kb()
+        await message.answer(f"❌ <b>ปิดใช้งานระบบทดลองใช้งานฟรีเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+    else:
+        await show_trial_status(message)
+
+
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("trial_on"))
+async def handle_trial_on_command(message: Message):
+    """คำสั่งเปิดใช้งานระบบทดลองฟรี: /trial_on"""
+    update_trial_settings(is_active=True)
+    text, kb = await get_trial_status_text_and_kb()
+    await message.answer(f"✅ <b>เปิดใช้งานระบบทดลองใช้งานฟรีเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("trial_off"))
+async def handle_trial_off_command(message: Message):
+    """คำสั่งปิดใช้งานระบบทดลองฟรี: /trial_off"""
+    update_trial_settings(is_active=False)
+    text, kb = await get_trial_status_text_and_kb()
+    await message.answer(f"❌ <b>ปิดใช้งานระบบทดลองใช้งานฟรีเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin_menu:trial")
+async def handle_admin_menu_trial_callback(callback: CallbackQuery):
+    """จัดการปุ่มลัด [⏱️ ระบบทดลองฟรี] ในเมนู Admin"""
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+    await callback.answer()
+    await show_trial_status(callback)
+
+
+@router.callback_query(F.data.startswith("trial_action:"))
+async def handle_trial_action_callback(callback: CallbackQuery):
+    """จัดการ Quick Actions ปุ่มลัดเปิด/ปิด Trial"""
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    action = callback.data.split(":")[1]
+    if action == "on":
+        update_trial_settings(is_active=True)
+        await callback.answer("✅ เปิดใช้งานระบบทดลองฟรีเรียบร้อยแล้ว")
+        text, kb = await get_trial_status_text_and_kb()
+        await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+    elif action == "off":
+        update_trial_settings(is_active=False)
+        await callback.answer("❌ ปิดใช้งานระบบทดลองฟรีเรียบร้อยแล้ว")
+        text, kb = await get_trial_status_text_and_kb()
+        await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.message(Command("revoke_primary", "reset_primary_link", "revoke_channel_link"))
