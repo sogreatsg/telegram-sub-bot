@@ -20,6 +20,7 @@ from bot.services.scheduler import build_active_members_report, sync_pending_mem
 from bot.services.subscription import grant_subscription, subscription_status_label, parse_plan_days
 from bot.services.reconciliation import reconcile_user, reconcile_all_users, format_reconcile_formula
 from bot.services.chat_logger import log_chat_message
+from bot.services.referral import is_referral_active, update_referral_settings
 from bot.handlers.user_menu import get_main_menu_keyboard
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title, format_remaining_time
 
@@ -525,12 +526,8 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
         await callback.answer(f"❌ เกิดข้อผิดพลาด: {e}", show_alert=True)
 
 
-@router.message(Command("admin", "admin_help", "help_admin"))
-async def handle_admin_menu_command(message: Message):
-    """คำสั่งแสดงเมนูคำสั่งแอดมินทั้งหมด: /admin (เฉพาะใน Admin Group เท่านั้น)"""
-    if message.chat.id != config.ADMIN_GROUP_ID:
-        return
-
+def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
+    """สร้างข้อความเมนูหลักและคีย์บอร์ดสำหรับ Admin Panel"""
     admin_menu_text = (
         "👑 <b>เมนูคำสั่งผู้ดูแลระบบ (Admin Panel & Commands)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -574,6 +571,11 @@ async def handle_admin_menu_command(message: Message):
         "• /promotion_setting — ⚙️ ตั้งค่าราคาและจำนวนวันของโปรโมชั่น (รองรับราคา 100, 300, 500, 1000 บาท)\n"
         "• /promotion_on / /promotion_off — 🟢 เปิด / 🔴 ปิด ระบบโปรโมชั่นสำหรับผู้ใช้\n"
         "• /promo_broadcast — 📢 บรอดแคสต์ข้อความโปรโมชั่นให้ผู้ใช้ (ทั้งหมด/คนหมดอายุ/รายคน)\n\n"
+        "👥 <b>9. ระบบแนะนำเพื่อน (Referral System):</b>\n"
+        "• /referral หรือ /ref — ดูสถานะระบบแนะนำเพื่อน (เปิด/ปิด) และสถิติรวม\n"
+        "• /referral_on หรือ /ref_on — 🟢 เปิดใช้งานระบบแนะนำเพื่อน (แสดงปุ่มในเมนู /start และแจกโบนัส VIP)\n"
+        "• /referral_off หรือ /ref_off — 🔴 ปิดใช้งานระบบแนะนำเพื่อน (ซ่อนปุ่ม และไม่แจกโบนัสวัน)\n"
+        "• /top_refs — 🏆 ดูอันดับผู้ใช้งานที่ชวนเพื่อนได้มากที่สุด\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "💡 <i>สามารถกดปุ่มลัดด้านล่างเพื่อใช้งานเมนูหลักได้ทันทีครับ</i>"
     )
@@ -598,10 +600,20 @@ async def handle_admin_menu_command(message: Message):
             ],
             [
                 InlineKeyboardButton(text="🎁 ตั้งค่าโปรโมชั่น", callback_data="admin_menu:promotion"),
+                InlineKeyboardButton(text="👥 ระบบชวนเพื่อน", callback_data="admin_menu:referral"),
             ],
         ]
     )
+    return admin_menu_text, keyboard
 
+
+@router.message(Command("admin", "admin_help", "help_admin"))
+async def handle_admin_menu_command(message: Message):
+    """คำสั่งแสดงเมนูคำสั่งแอดมินทั้งหมด: /admin (เฉพาะใน Admin Group เท่านั้น)"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    admin_menu_text, keyboard = get_admin_menu_text_and_kb()
     await message.answer(text=admin_menu_text, reply_markup=keyboard, parse_mode="HTML")
 
 
@@ -3301,6 +3313,149 @@ async def handle_admin_menu_top_referrals_callback(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"Error handling admin_menu:top_referrals: {e}", exc_info=True)
         await callback.message.answer(f"❌ <b>เกิดข้อผิดพลาดในการโหลดอันดับชวนเพื่อน:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
+
+async def get_referral_status_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
+    """สร้างข้อความสรุปสถานะระบบแนะนำเพื่อนและ Inline Keyboard สำหรับ Admin"""
+    is_active = is_referral_active()
+    status_str = "🟢 เปิดใช้งาน (Active) — แสดงปุ่มในเมนู /start และแจกโบนัส VIP เมื่อเพื่อนเข้าห้อง" if is_active else "🔴 ปิดใช้งาน (Disabled) — ซ่อนปุ่ม และไม่แจกโบนัสวันแม้มีคนเข้าผ่านลิงก์"
+
+    async with get_session() as session:
+        # สถิติรวม Referral ทั้งระบบ
+        total_referrers = (await session.execute(
+            select(func.count(User.telegram_id)).where(func.coalesce(User.referral_count, 0) > 0)
+        )).scalar() or 0
+        total_friends_joined = (await session.execute(
+            select(func.coalesce(func.sum(User.referral_count), 0)).where(func.coalesce(User.referral_count, 0) > 0)
+        )).scalar() or 0
+        total_bonus_days = (await session.execute(
+            select(func.coalesce(func.sum(User.referral_bonus_days), 0)).where(func.coalesce(User.referral_bonus_days, 0) > 0)
+        )).scalar() or 0
+
+    text = (
+        "👥 <b>ระบบจัดการการแนะนำเพื่อน (Referral System Management)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>สถานะปัจจุบัน:</b> {status_str}\n\n"
+        "📈 <b>สถิติรวมทั้งระบบ:</b>\n"
+        f"• 👑 ผู้แนะนำทั้งหมด: <b>{total_referrers:,} คน</b>\n"
+        f"• 👥 เพื่อนที่ชวนสำเร็จ: <b>{total_friends_joined:,} คน</b>\n"
+        f"• 🏆 โบนัส VIP ที่แจกไปแล้ว: <b>{total_bonus_days:,} วัน</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📋 <b>คำสั่งสำหรับควบคุมระบบ:</b>\n"
+        "• <code>/referral_on</code> หรือ <code>/ref_on</code> — 🟢 เปิดใช้งานระบบชวนเพื่อน (แสดงปุ่มในเมนู /start)\n"
+        "• <code>/referral_off</code> หรือ <code>/ref_off</code> — 🔴 ปิดใช้งานระบบชวนเพื่อน (ซ่อนปุ่ม และไม่ให้วันโบนัส)\n"
+        "• <code>/top_refs</code> — 🏆 ดูตารางอันดับผู้ใช้ที่ชวนเพื่อนมากที่สุด (Leaderboard)\n"
+        "• <code>/referral</code> — 🔄 ดูสถานะระบบแนะนำเพื่อน\n\n"
+        "💡 <i>แตะปุ่มด่วนด้านล่างเพื่อเปิด/ปิดระบบได้ทันที:</i>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🟢 เปิดระบบชวนเพื่อน", callback_data="ref_action:on"),
+            InlineKeyboardButton(text="🔴 ปิดระบบชวนเพื่อน", callback_data="ref_action:off"),
+        ],
+        [
+            InlineKeyboardButton(text="🏆 ดูอันดับผู้ชวน (/top_refs)", callback_data="admin_menu:top_referrals"),
+            InlineKeyboardButton(text="🔄 รีเฟรชสถานะ", callback_data="admin_menu:referral"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 กลับสู่เมนูแอดมิน", callback_data="admin_menu:main"),
+        ]
+    ])
+    return text, kb
+
+
+async def show_referral_status(message_or_callback):
+    """ส่งหรือแก้ไขข้อความแสดงสถานะระบบแนะนำเพื่อน"""
+    text, kb = await get_referral_status_text_and_kb()
+    if isinstance(message_or_callback, CallbackQuery):
+        try:
+            await message_or_callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await message_or_callback.message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message_or_callback.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("referral", "ref", "referral_setting", "ref_setting", "referral_status", "ref_status"))
+async def handle_referral_command(message: Message):
+    """คำสั่งดูสถานะหรือควบคุมระบบแนะนำเพื่อน: /referral [on/off]"""
+    args = (message.text or "").split()[1:]
+    if not args:
+        await show_referral_status(message)
+        return
+
+    subcmd = args[0].lower()
+    if subcmd in ("on", "enable", "start", "open"):
+        update_referral_settings(is_active=True)
+        text, kb = await get_referral_status_text_and_kb()
+        await message.answer(f"✅ <b>เปิดใช้งานระบบแนะนำเพื่อนเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+    elif subcmd in ("off", "disable", "stop", "close"):
+        update_referral_settings(is_active=False)
+        text, kb = await get_referral_status_text_and_kb()
+        await message.answer(f"❌ <b>ปิดใช้งานระบบแนะนำเพื่อนเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+    else:
+        await show_referral_status(message)
+
+
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("referral_on", "ref_on"))
+async def handle_referral_on_command(message: Message):
+    """คำสั่งเปิดใช้งานระบบแนะนำเพื่อน: /referral_on"""
+    update_referral_settings(is_active=True)
+    text, kb = await get_referral_status_text_and_kb()
+    await message.answer(f"✅ <b>เปิดใช้งานระบบแนะนำเพื่อนเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, Command("referral_off", "ref_off"))
+async def handle_referral_off_command(message: Message):
+    """คำสั่งปิดใช้งานระบบแนะนำเพื่อน: /referral_off"""
+    update_referral_settings(is_active=False)
+    text, kb = await get_referral_status_text_and_kb()
+    await message.answer(f"❌ <b>ปิดใช้งานระบบแนะนำเพื่อนเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin_menu:referral")
+async def handle_admin_menu_referral_callback(callback: CallbackQuery):
+    """จัดการปุ่มลัด [👥 ระบบชวนเพื่อน] ในเมนู Admin"""
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+    await callback.answer()
+    await show_referral_status(callback)
+
+
+@router.callback_query(F.data.startswith("ref_action:"))
+async def handle_ref_action_callback(callback: CallbackQuery):
+    """จัดการ Quick Actions ปุ่มลัดเปิด/ปิด Referral"""
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    action = callback.data.split(":")[1]
+    if action == "on":
+        update_referral_settings(is_active=True)
+        await callback.answer("✅ เปิดใช้งานระบบแนะนำเพื่อนเรียบร้อยแล้ว")
+        text, kb = await get_referral_status_text_and_kb()
+        await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+    elif action == "off":
+        update_referral_settings(is_active=False)
+        await callback.answer("❌ ปิดใช้งานระบบแนะนำเพื่อนเรียบร้อยแล้ว")
+        text, kb = await get_referral_status_text_and_kb()
+        await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin_menu:main")
+async def handle_admin_menu_main_callback(callback: CallbackQuery):
+    """จัดการปุ่มลัดกลับสู่เมนูหลัก Admin"""
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+    await callback.answer()
+    text, kb = get_admin_menu_text_and_kb()
+    try:
+        await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text=text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.message(Command("revoke_primary", "reset_primary_link", "revoke_channel_link"))

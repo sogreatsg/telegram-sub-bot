@@ -1,8 +1,10 @@
 import logging
 import html
+import json
+import os
 import urllib.parse
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Optional, Dict, Any
 from aiogram import Bot
 from sqlalchemy import select
 
@@ -15,6 +17,41 @@ from bot.services.subscription import grant_subscription
 logger = logging.getLogger(__name__)
 config = get_settings()
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
+
+# จัดเก็บการตั้งค่า Referral ใน data/referral_settings.json
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REFERRAL_SETTINGS_FILE = os.path.join(BASE_DIR, "data", "referral_settings.json")
+
+
+def get_referral_settings() -> Dict[str, Any]:
+    """ดึงการตั้งค่าระบบแนะนำเพื่อนจากไฟล์ JSON"""
+    if not os.path.exists(REFERRAL_SETTINGS_FILE):
+        return {"is_active": False}
+    try:
+        with open(REFERRAL_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"is_active": False}
+
+
+def save_referral_settings(settings: Dict[str, Any]) -> None:
+    """บันทึกการตั้งค่าระบบแนะนำเพื่อนลงไฟล์ JSON"""
+    os.makedirs(os.path.dirname(REFERRAL_SETTINGS_FILE), exist_ok=True)
+    with open(REFERRAL_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False, indent=4)
+
+
+def update_referral_settings(is_active: bool = None) -> None:
+    """อัปเดตสถานะเปิด/ปิด ระบบแนะนำเพื่อน"""
+    settings = get_referral_settings()
+    if is_active is not None:
+        settings["is_active"] = is_active
+    save_referral_settings(settings)
+
+
+def is_referral_active() -> bool:
+    """ตรวจสอบว่าระบบแนะนำเพื่อนเปิดใช้งานอยู่หรือไม่"""
+    return bool(get_referral_settings().get("is_active", False))
 
 
 def get_referral_link(bot_username: str, user_id: int) -> str:
@@ -38,14 +75,29 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
     มอบรางวัล VIP ฟรี 1 วัน (+24 ชม.) ให้แก่ผู้แนะนำเมื่อเพื่อนเข้า Channel สำเร็จครั้งแรก
     รองรับการสะสมวัน (Day Stacking) ต่อเนื่องตามจำนวนเพื่อนที่ชวนได้
     ป้องกันการให้ซ้ำซ้อน (Idempotent): เพื่อน 1 คนให้โบนัสผู้แนะนำได้เพียง 1 ครั้งเท่านั้น
+    หากระบบ Referral ปิดอยู่ (is_referral_active() is False) จะไม่แจกโบนัส และตัดสิทธิ์เพื่อนคนนี้ไม่ให้ได้โบนัสย้อนหลัง
     """
     if not referrer_id or referrer_id == friend_user.telegram_id:
         return False
 
-    now = datetime.now(timezone.utc)
     friend_id = friend_user.telegram_id
+    now = datetime.now(timezone.utc)
     friend_name = html.escape(friend_user.full_name or f"User {friend_id}")
     friend_handle = f"@{friend_user.username}" if friend_user.username else f"ID: {friend_id}"
+
+    # ตรวจสอบสถานะเปิด/ปิด ระบบ Referral (ถ้าปิดอยู่ จะไม่แจกวันโบนัส และตัดสิทธิ์เพื่อนคนนี้ทันที)
+    if not is_referral_active():
+        logger.info(
+            f"Referral system is currently disabled. Skipping reward for friend User {friend_id} -> Referrer {referrer_id}. "
+            "Invalidating referral attribution."
+        )
+        async with get_session() as session:
+            friend_db = await session.get(User, friend_id)
+            if friend_db:
+                friend_db.referred_by_id = None
+                friend_db.referral_rewarded = True
+                session.add(friend_db)
+        return False
 
     invite_url = None
 

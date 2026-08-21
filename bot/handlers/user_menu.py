@@ -17,8 +17,9 @@ from bot.config import get_settings
 from bot.models.schema import User, Subscription, SubStatus, GrantType
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
-from bot.services.referral import get_referral_link, get_share_url
+from bot.services.referral import get_referral_link, get_share_url, is_referral_active
 from bot.services.subscription import grant_subscription, subscription_status_label
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -26,8 +27,11 @@ router = Router(name="user_menu")
 
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
 
-def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup:
-    """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard พร้อมแพ็กเกจ และระบบชวนเพื่อน"""
+def get_main_menu_keyboard(trial_available: bool = True, referral_available: Optional[bool] = None) -> InlineKeyboardMarkup:
+    """สร้างปุ่มเมนูหลักแบบ Interactive Inline Keyboard พร้อมแพ็กเกจ และระบบชวนเพื่อน (หากเปิดใช้งาน)"""
+    if referral_available is None:
+        referral_available = is_referral_active()
+
     trial_button_text = "⏱️ ทดลองใช้ฟรี 15 นาที" if trial_available else "⏱️ ทดลองฟรี (ใช้สิทธิ์แล้ว)"
     
     keyboard = [
@@ -61,12 +65,15 @@ def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup
                 callback_data="menu:subscribe:VIP_30D",
             ),
         ],
-        [
+    ]
+    if referral_available:
+        keyboard.append([
             InlineKeyboardButton(
                 text="🎁 ชวนเพื่อนรับ VIP ฟรี (+1 วัน/คน)",
                 callback_data="menu:referral",
             ),
-        ],
+        ])
+    keyboard.extend([
         [
             InlineKeyboardButton(
                 text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)",
@@ -83,7 +90,7 @@ def get_main_menu_keyboard(trial_available: bool = True) -> InlineKeyboardMarkup
                 callback_data="menu:help",
             ),
         ],
-    ]
+    ])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
@@ -134,9 +141,9 @@ async def handle_start(message: Message, state: FSMContext):
     if not message.from_user:
         return
 
-    # ตรวจสอบ Payload Deep Link เช่น /start ref_123456789
+    # ตรวจสอบ Payload Deep Link เช่น /start ref_123456789 (เฉพาะเมื่อระบบ Referral เปิดใช้งาน)
     referrer_id = None
-    if message.text:
+    if message.text and is_referral_active():
         parts = message.text.strip().split()
         if len(parts) > 1 and parts[1].startswith("ref_"):
             try:
@@ -336,6 +343,23 @@ async def handle_referral_menu(callback: CallbackQuery, bot: Bot, state: FSMCont
     """แสดงหน้าต่างระบบชวนเพื่อน (Referral System) พร้อมลิงก์เฉพาะตัวและสถิติ"""
     await state.clear()
     if not callback.from_user or not callback.message:
+        return
+
+    if not is_referral_active():
+        await callback.answer("⚠️ ระบบแนะนำเพื่อนปิดใช้งานชั่วคราว", show_alert=True)
+        disabled_text = (
+            "⚠️ <b>ระบบแนะนำเพื่อนปิดใช้งานชั่วคราว</b>\n\n"
+            "ขณะนี้ระบบแนะนำเพื่อนรับ VIP ฟรีปิดใช้งานอยู่ ขออภัยในความไม่สะดวกครับ\n\n"
+            "คุณสามารถเลือกดูแพ็กเกจสมาชิก VIP ปกติได้จากเมนูหลักครับ"
+        )
+        try:
+            await callback.message.edit_text(
+                text=disabled_text,
+                reply_markup=get_back_to_menu_keyboard(),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
         return
 
     user_id = callback.from_user.id
