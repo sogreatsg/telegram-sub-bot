@@ -37,7 +37,15 @@ from bot.services.channel_service import (
     format_user_channel_presence,
 )
 from bot.handlers.user_menu import get_main_menu_keyboard
-from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title, format_remaining_time
+from bot.utils.time_utils import (
+    BANGKOK_TZ,
+    format_thai_datetime,
+    ensure_utc,
+    split_text_chunks,
+    format_user_title,
+    format_remaining_time,
+    parse_duration_input,
+)
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -576,10 +584,10 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "• <code>/audit</code> — ตรวจสอบสิทธิ์ของ Bot ใน Channel VIP\n"
         "• <code>/revoke_primary</code> — เพิกถอนและสร้าง Primary Link ใหม่\n"
         "• <code>/version</code> — ตรวจสอบเวอร์ชันและ Uptime\n\n"
-        "🛠️ <b>6. จัดการวันสมาชิก:</b>\n"
-        "• <code>/add_vip [User ID/@user] [จำนวนวัน]</code> — ➕ เพิ่มวัน VIP (ส่ง DM บอก User)\n"
-        "• <code>/deduct_vip [User ID/@user] [จำนวนวัน]</code> — ➖ ลดวัน VIP (ไม่ส่ง DM)\n"
-        "• <code>/set_vip [User ID/@user] [จำนวนวัน]</code> — 🎯 ตั้งค่าวันคงเหลือใหม่โดยตรง\n"
+        "🛠️ <b>6. จัดการเวลาสมาชิก:</b>\n"
+        "• <code>/add_vip [User ID/@user] [เวลา เช่น 30, 12h, 1d 6h]</code> — ➕ เพิ่มเวลา VIP (ส่ง DM บอก User)\n"
+        "• <code>/deduct_vip [User ID/@user] [เวลา เช่น 7, 12h, 1d]</code> — ➖ ลดเวลา VIP (ไม่ส่ง DM)\n"
+        "• <code>/set_vip [User ID/@user] [เวลา เช่น 30, 12h, 0]</code> — 🎯 ตั้งค่าเวลาคงเหลือใหม่โดยตรง\n"
         "• <code>/move_user [User ID/@user]</code> — 🚀 ย้ายสมาชิกไป Channel ใหม่ (ส่งลิงก์ 7 วัน)\n"
         "• <code>/unmove_user [User ID/@user]</code> — 🔄 ย้ายสมาชิกกลับ Channel เดิม\n"
         "• <code>/kick [User ID]</code> — สั่งเตะออกจาก Channel VIP ทันที\n\n"
@@ -1420,32 +1428,30 @@ async def handle_admin_kick_command(message: Message, bot: Bot):
 
 @router.message(Command("add_vip"))
 async def handle_admin_add_vip_command(message: Message, bot: Bot):
-    """คำสั่งแอดมินสำหรับเพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง (รองรับสะสมวัน): /add_vip <User ID หรือ @username> [จำนวนวัน]"""
-    if message.chat.id != config.ADMIN_GROUP_ID:
+    """คำสั่งแอดมินสำหรับเพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง (รองรับทั้งวันและชั่วโมง): /add_vip <User ID หรือ @username> [ระยะเวลา เช่น 30, 12h, 1d 6h]"""
+    if not is_admin_chat(message.chat.id):
         return
 
-    args = (message.text or "").split()
+    args = (message.text or "").split(maxsplit=2)
     if len(args) < 2:
         await message.answer(
-            "❌ <b>วิธีใช้งาน:</b> <code>/add_vip [User ID หรือ @username] [จำนวนวัน เช่น 30]</code>\n"
+            "❌ <b>วิธีใช้งาน:</b> <code>/add_vip [User ID หรือ @username] [ระยะเวลา เช่น 30, 30d, 12h, 1d 12h]</code>\n"
             "ตัวอย่าง:\n"
-            "• <code>/add_vip 5125375696 30</code>\n"
-            "• <code>/add_vip @numiruuna 30</code>",
+            "• <code>/add_vip 5125375696 30</code> (เพิ่ม 30 วัน)\n"
+            "• <code>/add_vip @numiruuna 12h</code> (เพิ่ม 12 ชั่วโมง)\n"
+            "• <code>/add_vip @numiruuna 1d 12h</code> (เพิ่ม 1 วัน 12 ชั่วโมง)\n"
+            "• <code>/add_vip 5125375696 30m</code> (เพิ่ม 30 นาที)",
             parse_mode="HTML",
         )
         return
 
     query = args[1].strip().lstrip("@")
-    days = 30
-    if len(args) >= 3:
-        try:
-            days = int(args[2])
-            if days <= 0:
-                await message.answer("❌ จำนวนวันต้องมากกว่า 0 วัน", parse_mode="HTML")
-                return
-        except ValueError:
-            await message.answer("❌ จำนวนวันต้องเป็นตัวเลขเท่านั้น", parse_mode="HTML")
-            return
+    dur_text = args[2].strip() if len(args) >= 3 else "30"
+    try:
+        days, minutes, duration_label = parse_duration_input(dur_text, allow_zero=False)
+    except ValueError as ve:
+        await message.answer(f"❌ {ve}", parse_mode="HTML")
+        return
 
     now = datetime.now(timezone.utc)
     is_stack_extension = False
@@ -1498,7 +1504,8 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
             session,
             user_id=target_uid,
             days=days,
-            source_label=f"VIP {days} วัน (Admin เพิ่ม)",
+            minutes=minutes,
+            source_label=f"VIP {duration_label} (Admin เพิ่ม)",
             grant_type=GrantType.ADMIN_GRANT.value,
             has_value=True,
             is_in_channel=is_in_channel,
@@ -1506,7 +1513,7 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         is_stack_extension = grant.is_stack_extension
         new_expires_at = grant.new_expires_at
         if is_stack_extension:
-            logger.info(f"Admin add_vip: Extended active sub for User {target_uid} by +{days} days in {target_channel_label}. New expires_at: {new_expires_at}")
+            logger.info(f"Admin add_vip: Extended active sub for User {target_uid} by +{duration_label} in {target_channel_label}. New expires_at: {new_expires_at}")
 
         await session.commit()
 
@@ -1526,12 +1533,12 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
 
     # ส่ง DM หาผู้ใช้ (สำหรับ /add_vip)
     exp_thai = format_thai_datetime(new_expires_at) if new_expires_at else "-"
-    time_rem = format_time_remaining(new_expires_at) if new_expires_at else f"{days} วัน"
+    time_rem = format_time_remaining(new_expires_at) if new_expires_at else duration_label
 
     try:
         if is_stack_extension:
             dm_text = (
-                f"🎉 <b>คุณได้รับการต่อเวลาสมาชิก VIP (+{days} วัน) จากทีมงานเรียบร้อยแล้ว!</b>\n"
+                f"🎉 <b>คุณได้รับการต่อเวลาสมาชิก VIP (+{duration_label}) จากทีมงานเรียบร้อยแล้ว!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 f"⏳ <b>วันหมดอายุใหม่ของคุณ:</b> <code>{exp_thai} น.</code>\n"
                 f"⏰ <b>เวลาคงเหลือรวม:</b> {time_rem}\n"
@@ -1540,13 +1547,13 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
             )
         elif is_in_channel:
             dm_text = (
-                f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({days} วัน) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
+                f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({duration_label}) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
                 f"⏳ <b>หมดอายุวันที่:</b> <code>{exp_thai} น.</code>\n\n"
                 f"💡 <i>คุณอยู่ใน {target_channel_label} อยู่แล้ว ใช้งานได้ทันทีโดยไม่ต้องกดลิงก์ใหม่ครับ!</i>"
             )
         else:
             dm_text = (
-                f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({days} วัน) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
+                f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({duration_label}) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
                 f"⏳ <b>หมดอายุวันที่:</b> <code>{exp_thai} น.</code>\n\n"
                 f"🔗 <b>ลิงก์เข้าร่วม {target_channel_label}:</b>\n{invite_url}"
             )
@@ -1563,22 +1570,22 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         resp = (
             "✅ <b>ต่อเวลาสะสม VIP สำเร็จ!</b>\n\n"
             f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-            f"➕ <b>เพิ่มเวลา:</b> +{days} วัน\n"
+            f"➕ <b>เพิ่มเวลา:</b> +{duration_label}\n"
             f"⏳ <b>วันหมดอายุใหม่:</b> <code>{exp_thai} น.</code> (คงเหลือ {time_rem})\n"
-            "ℹ️ <i>ผู้ใช้มีแพ็กเกจ Active อยู่แล้ว ระบบบวกวันเพิ่มให้ทันทีโดยไม่ต้องกดเข้าใหม่</i>"
+            "ℹ️ <i>ผู้ใช้มีแพ็กเกจ Active อยู่แล้ว ระบบบวกเวลาเพิ่มให้ทันทีโดยไม่ต้องกดเข้าใหม่</i>"
         )
     elif is_in_channel:
         resp = (
             "✅ <b>เพิ่มสิทธิ์ VIP เรียบร้อยแล้ว!</b>\n\n"
             f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-            f"📅 <b>ระยะเวลา:</b> {days} วัน (หมดอายุ: <code>{exp_thai} น.</code>)\n"
+            f"📅 <b>ระยะเวลา:</b> {duration_label} (หมดอายุ: <code>{exp_thai} น.</code>)\n"
             "ℹ️ <i>ผู้ใช้อยู่ใน Channel อยู่แล้ว เปิดใช้งาน ACTIVE ให้ทันที ไม่ต้องออก invite link</i>"
         )
     else:
         resp = (
             "✅ <b>เพิ่มสิทธิ์ VIP เรียบร้อยแล้ว!</b>\n\n"
             f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-            f"📅 <b>ระยะเวลา:</b> {days} วัน (หมดอายุ: <code>{exp_thai} น.</code>)\n"
+            f"📅 <b>ระยะเวลา:</b> {duration_label} (หมดอายุ: <code>{exp_thai} น.</code>)\n"
             f"🔗 <b>Invite Link:</b> <code>{invite_url}</code>"
         )
     await message.answer(resp, parse_mode="HTML")
@@ -1586,30 +1593,28 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
 
 @router.message(Command("deduct_vip", "reduce_vip", "minus_vip", "del_days", "remove_vip"))
 async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
-    """คำสั่งแอดมินสำหรับลดวันสมาชิก VIP โดยไม่มีการส่งข้อความหาผู้ใช้: /deduct_vip <User ID หรือ @username> <จำนวนวันที่ลด>"""
-    if message.chat.id != config.ADMIN_GROUP_ID:
+    """คำสั่งแอดมินสำหรับลดเวลาสมาชิก VIP โดยไม่มีการส่งข้อความหาผู้ใช้: /deduct_vip <User ID หรือ @username> <ระยะเวลา เช่น 7, 7d, 12h, 1d 12h>"""
+    if not is_admin_chat(message.chat.id):
         return
 
-    args = (message.text or "").split()
+    args = (message.text or "").split(maxsplit=2)
     if len(args) < 3:
         await message.answer(
-            "❌ <b>วิธีใช้งาน:</b> <code>/deduct_vip [User ID หรือ @username] [จำนวนวันที่ต้องการลด]</code>\n"
+            "❌ <b>วิธีใช้งาน:</b> <code>/deduct_vip [User ID หรือ @username] [ระยะเวลาที่ต้องการลด เช่น 7, 7d, 12h, 1d 12h]</code>\n"
             "ตัวอย่าง:\n"
-            "• <code>/deduct_vip 5125375696 7</code>\n"
-            "• <code>/deduct_vip @numiruuna 5</code>\n\n"
-            "🔇 <i>คำสั่งนี้จะปรับลดยอดวันในระบบทันที โดย<b>ไม่มีการส่งข้อความ DM ไปหาผู้ใช้</b></i>",
+            "• <code>/deduct_vip 5125375696 7</code> (ลด 7 วัน)\n"
+            "• <code>/deduct_vip @numiruuna 12h</code> (ลด 12 ชั่วโมง)\n"
+            "• <code>/deduct_vip @numiruuna 1d 6h</code> (ลด 1 วัน 6 ชั่วโมง)\n\n"
+            "🔇 <i>คำสั่งนี้จะปรับลดยอดเวลาในระบบทันที โดย<b>ไม่มีการส่งข้อความ DM ไปหาผู้ใช้</b></i>",
             parse_mode="HTML",
         )
         return
 
     query = args[1].strip().lstrip("@")
     try:
-        days_to_deduct = int(args[2])
-        if days_to_deduct <= 0:
-            await message.answer("❌ จำนวนวันที่ต้องการลดต้องมากกว่า 0 วัน", parse_mode="HTML")
-            return
-    except ValueError:
-        await message.answer("❌ จำนวนวันที่ต้องการลดต้องเป็นตัวเลขจำนวนเต็มบวกเท่านั้น", parse_mode="HTML")
+        days_to_deduct, minutes_to_deduct, duration_label = parse_duration_input(args[2].strip(), allow_zero=False)
+    except ValueError as ve:
+        await message.answer(f"❌ {ve}", parse_mode="HTML")
         return
 
     now = datetime.now(timezone.utc)
@@ -1635,7 +1640,7 @@ async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
             return
 
         old_expires_at = ensure_utc(sub.expires_at)
-        new_expires_at = old_expires_at - timedelta(days=days_to_deduct)
+        new_expires_at = old_expires_at - timedelta(days=days_to_deduct, minutes=minutes_to_deduct)
 
         if new_expires_at <= now:
             sub_status_new = SubStatus.EXPIRED.value
@@ -1646,12 +1651,12 @@ async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
         sub.status = sub_status_new
         session.add(sub)
 
-        # บันทึก Grant ประวัติการลดวัน
+        # บันทึก Grant ประวัติการลดเวลา
         session.add(SubscriptionGrant(
             user_id=target_uid,
             days=-days_to_deduct,
-            minutes=0,
-            source_label=f"Admin ลดวัน (-{days_to_deduct} วัน)",
+            minutes=-minutes_to_deduct,
+            source_label=f"Admin ลดเวลา (-{duration_label})",
             grant_type=GrantType.ADMIN_GRANT.value,
             has_value=False,
         ))
@@ -1665,10 +1670,10 @@ async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
     status_label = subscription_status_label(sub_status_new)
 
     resp = (
-        "➖ <b>ลดวันสมาชิก VIP สำเร็จ!</b>\n"
+        "➖ <b>ลดเวลาสมาชิก VIP สำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-        f"➖ <b>จำนวนวันที่ลด:</b> <b>-{days_to_deduct} วัน</b>\n"
+        f"➖ <b>จำนวนเวลาที่ลด:</b> <b>-{duration_label}</b>\n"
         f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
         f"🎯 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
         f"📊 <b>สถานะแพ็กเกจ:</b> <b>{status_label}</b>\n"
@@ -1680,30 +1685,33 @@ async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
 
 @router.message(Command("set_vip", "set_days", "set_expiry", "override_vip"))
 async def handle_admin_set_vip_command(message: Message, bot: Bot):
-    """คำสั่งแอดมินสำหรับปรับตั้งค่าจำนวนวันคงเหลือของสมาชิก VIP โดยตรง (ไม่มีการส่ง DM หาผู้ใช้): /set_vip <User ID หรือ @username> <จำนวนวัน>"""
-    if message.chat.id != config.ADMIN_GROUP_ID:
+    """คำสั่งแอดมินสำหรับปรับตั้งค่าเวลาคงเหลือของสมาชิก VIP โดยตรง (ไม่มีการส่ง DM หาผู้ใช้): /set_vip <User ID หรือ @username> <ระยะเวลา เช่น 30, 30d, 12h, 1d 12h, 0>"""
+    if not is_admin_chat(message.chat.id):
         return
 
-    args = (message.text or "").split()
+    args = (message.text or "").split(maxsplit=2)
     if len(args) < 3:
         await message.answer(
-            "❌ <b>วิธีใช้งาน:</b> <code>/set_vip [User ID หรือ @username] [จำนวนวัน เช่น 30]</code>\n"
+            "❌ <b>วิธีใช้งาน:</b> <code>/set_vip [User ID หรือ @username] [ระยะเวลา เช่น 30, 30d, 12h, 1d 12h, 0]</code>\n"
             "ตัวอย่าง:\n"
             "• <code>/set_vip 5125375696 30</code> (ตั้งให้เหลือ 30 วันนับจากตอนนี้)\n"
+            "• <code>/set_vip @numiruuna 12h</code> (ตั้งให้เหลือ 12 ชั่วโมงนับจากตอนนี้)\n"
+            "• <code>/set_vip @numiruuna 1d 6h</code> (ตั้งให้เหลือ 1 วัน 6 ชั่วโมง)\n"
             "• <code>/set_vip @numiruuna 0</code> (ตั้งให้หมดอายุทันที)\n\n"
-            "🔇 <i>คำสั่งนี้จะปรับตั้งค่ายอดวันในระบบทันที โดย<b>ไม่มีการส่งข้อความ DM ไปหาผู้ใช้</b></i>",
+            "🔇 <i>คำสั่งนี้จะปรับตั้งค่ายอดเวลาในระบบทันที โดย<b>ไม่มีการส่งข้อความ DM ไปหาผู้ใช้</b></i>",
             parse_mode="HTML",
         )
         return
 
     query = args[1].strip().lstrip("@")
     try:
-        exact_days = int(args[2])
-    except ValueError:
-        await message.answer("❌ จำนวนวันต้องเป็นตัวเลขจำนวนเต็มเท่านั้น", parse_mode="HTML")
+        exact_days, exact_minutes, duration_label = parse_duration_input(args[2].strip(), allow_zero=True)
+    except ValueError as ve:
+        await message.answer(f"❌ {ve}", parse_mode="HTML")
         return
 
     now = datetime.now(timezone.utc)
+    is_positive = (exact_days > 0 or exact_minutes > 0)
 
     async with get_session() as session:
         if query.isdigit():
@@ -1730,9 +1738,9 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
         if not sub:
             sub = Subscription(
                 user_id=target_uid,
-                status=SubStatus.ACTIVE.value if exact_days > 0 else SubStatus.EXPIRED.value,
+                status=SubStatus.ACTIVE.value if is_positive else SubStatus.EXPIRED.value,
                 joined_at=now,
-                expires_at=now + timedelta(days=exact_days) if exact_days > 0 else now,
+                expires_at=now + timedelta(days=exact_days, minutes=exact_minutes) if is_positive else now,
                 created_at=now,
             )
             session.add(sub)
@@ -1740,8 +1748,8 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
         else:
             old_expires_at = ensure_utc(sub.expires_at) if sub.expires_at else None
 
-        if exact_days > 0:
-            new_expires_at = now + timedelta(days=exact_days)
+        if is_positive:
+            new_expires_at = now + timedelta(days=exact_days, minutes=exact_minutes)
             sub_status_new = SubStatus.ACTIVE.value
             if not sub.joined_at:
                 sub.joined_at = now
@@ -1757,32 +1765,31 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
         sub.pending_since = None
         session.add(sub)
 
-        # บันทึก Grant ประวัติการกำหนดวัน
+        # บันทึก Grant ประวัติการกำหนดเวลา
         session.add(SubscriptionGrant(
             user_id=target_uid,
             days=exact_days,
-            minutes=0,
-            source_label=f"Admin กำหนดวันตรง ({exact_days} วัน)",
+            minutes=exact_minutes,
+            source_label=f"Admin กำหนดเวลาตรง ({duration_label})",
             grant_type=GrantType.ADMIN_GRANT.value,
-            has_value=True if exact_days > 0 else False,
+            has_value=True if is_positive else False,
         ))
 
         await session.commit()
 
-    old_exp_thai = format_thai_datetime(old_expires_at) if old_expires_at else "ไม่มี"
+    old_exp_thai = format_thai_datetime(old_expires_at) if old_expires_at else "ไม่มีข้อมูลเดิม"
     new_exp_thai = format_thai_datetime(new_expires_at)
     time_rem = format_time_remaining(new_expires_at)
     user_header = format_user_title(user.full_name, user.username, target_uid)
     status_label = subscription_status_label(sub_status_new)
 
     resp = (
-        "🎯 <b>ปรับตั้งค่าวันสมาชิก VIP สำเร็จ!</b>\n"
+        "⚙️ <b>กำหนดเวลาสมาชิก VIP ตรงสำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-        f"📅 <b>กำหนดเวลาคงเหลือ:</b> <b>{exact_days} วัน</b> (นับจากปัจจุบัน)\n"
+        f"🎯 <b>ตั้งเวลาคงเหลือ:</b> <b>{duration_label}</b> (นับจากตอนนี้)\n"
         f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
-        f"🎯 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
-        f"📊 <b>สถานะแพ็กเกจ:</b> <b>{status_label}</b>\n"
+        f"🚀 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🔇 <i>หมายเหตุ: ไม่มีการส่งข้อความ DM แจ้งเตือนไปยังผู้ใช้</i>"
     )

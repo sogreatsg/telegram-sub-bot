@@ -121,3 +121,75 @@ def format_remaining_time(expires_at: Optional[datetime]) -> str:
         parts.append(f"{seconds} วินาที")
     
     return " ".join(parts)
+
+
+def parse_duration_input(text: str, allow_zero: bool = False) -> tuple[int, int, str]:
+    """
+    แปลงข้อความระยะเวลาที่แอดมินระบุ รองรับทั้งวัน, ชั่วโมง และ นาที เช่น:
+    - '30' หรือ '30d' หรือ '30D' หรือ '30วัน' -> (30, 0, '30 วัน')
+    - '12h' หรือ '12H' หรือ '12ชม' หรือ '12ชั่วโมง' -> (0, 720, '12 ชั่วโมง')
+    - '1d 12h' หรือ '1วัน 12ชั่วโมง' หรือ '1d12h' -> (1, 720, '1 วัน 12 ชั่วโมง')
+    - '45m' หรือ '45นาที' -> (0, 45, '45 นาที')
+    - '0' (เมื่อ allow_zero=True) -> (0, 0, '0 วัน')
+
+    คืนค่า (days, total_minutes, formatted_label)
+    """
+    import re
+    clean = text.strip().lower()
+    if not clean:
+        raise ValueError("ไม่ได้ระบุระยะเวลา")
+
+    if clean in ("0", "0d", "0h", "0m", "0วัน", "0ชั่วโมง", "0ชม", "0นาที"):
+        if allow_zero:
+            return 0, 0, "0 วัน"
+        raise ValueError("ระยะเวลาต้องมากกว่า 0")
+
+    # กรณีเป็นตัวเลขจำนวนเต็มล้วน เช่น '30' หรือ '7' -> ถือว่าเป็นจำนวนวัน
+    if clean.isdigit():
+        d = int(clean)
+        if d <= 0 and not allow_zero:
+            raise ValueError("จำนวนวันต้องมากกว่า 0")
+        return d, 0, f"{d} วัน"
+
+    # ใช้ Regex ตรวจหา patterns วัน, ชั่วโมง, นาที
+    pattern = re.compile(
+        r'(?:(?P<days>\d+)\s*(?:d|day|days|วัน))|'
+        r'(?:(?P<hours>\d+)\s*(?:h|hr|hrs|hour|hours|ชม|ชั่วโมง))|'
+        r'(?:(?P<minutes>\d+)\s*(?:m|min|mins|minute|minutes|นาที))',
+        re.IGNORECASE
+    )
+
+    days = 0
+    total_minutes = 0
+    matches = list(pattern.finditer(clean))
+
+    if not matches:
+        raise ValueError(
+            f"รูปแบบระยะเวลาไม่ถูกต้อง: '{text}'\n"
+            "ตัวอย่างที่ถูกต้อง: <code>30</code>, <code>30d</code>, <code>12h</code>, <code>1d 12h</code>, <code>30วัน</code>"
+        )
+
+    for match in matches:
+        if match.group('days'):
+            days += int(match.group('days'))
+        if match.group('hours'):
+            total_minutes += int(match.group('hours')) * 60
+        if match.group('minutes'):
+            total_minutes += int(match.group('minutes'))
+
+    if days == 0 and total_minutes == 0 and not allow_zero:
+        raise ValueError("ระยะเวลาต้องมากกว่า 0")
+
+    parts = []
+    if days > 0:
+        parts.append(f"{days} วัน")
+    if total_minutes > 0:
+        hrs = total_minutes // 60
+        mins = total_minutes % 60
+        if hrs > 0:
+            parts.append(f"{hrs} ชั่วโมง")
+        if mins > 0:
+            parts.append(f"{mins} นาที")
+
+    label = " ".join(parts) if parts else ("0 วัน" if allow_zero else "0 นาที")
+    return days, total_minutes, label
