@@ -788,16 +788,43 @@ async def handle_admin_sync_command(message: Message, bot: Bot):
         await message.answer(text=sync_msg, parse_mode="HTML")
 
 
-@router.message(Command("report", "summary"))
+@router.message(Command("report", "summary", "stats", "members"))
+@router.message(F.text.lower().in_(["report", "summary", "รายงาน", "/report", "/summary"]))
 async def handle_admin_report_command(message: Message, bot: Bot):
-    """คำสั่งดูรายงานสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบ Channel Member จริง (เฉพาะใน Admin Group)"""
-    if message.chat.id != config.ADMIN_GROUP_ID:
-        return
+    """คำสั่งดูรายงานสรุปสมาชิก Active ปัจจุบัน พร้อมเปรียบเทียบ Channel Member จริง (ใน Admin Group หรือ DM สำหรับแอดมิน)"""
+    if not is_admin_chat(message.chat.id):
+        # หากส่งใน DM ส่วนตัว ตรวจสอบว่าเป็นแอดมินในกลุ่ม Admin หรือไม่
+        is_admin_user = False
+        if message.from_user:
+            try:
+                cm = await bot.get_chat_member(chat_id=config.ADMIN_GROUP_ID, user_id=message.from_user.id)
+                if cm.status in ("creator", "administrator"):
+                    is_admin_user = True
+            except Exception:
+                pass
+        if not is_admin_user:
+            return
 
-    report_text = await build_active_members_report(bot=bot)
-    chunks = split_text_chunks(report_text, max_chunk_size=3800)
-    for chunk in chunks:
-        await message.answer(text=chunk, parse_mode="HTML")
+    status_msg = await message.answer("⏳ <i>กำลังประมวลผลรายงานสรุปสมาชิก...</i>", parse_mode="HTML")
+    try:
+        report_text = await build_active_members_report(bot=bot)
+        chunks = split_text_chunks(report_text, max_chunk_size=3800)
+        if chunks:
+            try:
+                await status_msg.edit_text(text=chunks[0], parse_mode="HTML")
+            except Exception:
+                await message.answer(text=chunks[0], parse_mode="HTML")
+            for chunk in chunks[1:]:
+                await message.answer(text=chunk, parse_mode="HTML")
+        else:
+            await status_msg.edit_text("ℹ️ <i>ไม่มีข้อมูลรายงานสมาชิกในระบบ</i>", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error generating active members report: {e}", exc_info=True)
+        err_msg = f"❌ <b>เกิดข้อผิดพลาดในการสร้างรายงาน:</b>\n<code>{html.escape(str(e))}</code>"
+        try:
+            await status_msg.edit_text(text=err_msg, parse_mode="HTML")
+        except Exception:
+            await message.answer(text=err_msg, parse_mode="HTML")
 
 
 async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[InlineKeyboardMarkup]]:

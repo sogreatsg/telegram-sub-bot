@@ -585,7 +585,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
         )
         pending_subs = (await session.execute(stmt_pending)).scalars().all()
 
-        # ตรวจสอบสถานะว่าอยู่ในห้อง Channel ใดจริงหรือไม่ (รองรับการอยู่ทั้ง 2 ห้องพร้อมกัน)
+        # ตรวจสอบสถานะว่าอยู่ในห้อง Channel ใดจริงหรือไม่ (รองรับการอยู่ทั้ง 2 ห้องพร้อมกัน แบบ Concurrency)
         in_channel_active_subs = []
         left_channel_active_subs = []
         user_channels_map = {}
@@ -593,10 +593,24 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
         primary_only_count = 0
         secondary_only_count = 0
 
-        if bot:
+        if bot and unique_active_subs:
+            sem = asyncio.Semaphore(10)
+
+            async def _check_one(sub_item):
+                async with sem:
+                    try:
+                        in_cids, _, _ = await check_user_presence_all_channels(bot, sub_item.user_id)
+                        return sub_item.user_id, in_cids
+                    except Exception as ex:
+                        logger.warning(f"Failed to check channel presence for user {sub_item.user_id}: {ex}")
+                        return sub_item.user_id, []
+
+            presence_results = await asyncio.gather(*[_check_one(s) for s in unique_active_subs])
+            for uid, in_cids in presence_results:
+                user_channels_map[uid] = in_cids
+
             for sub in unique_active_subs:
-                in_cids, _, _ = await check_user_presence_all_channels(bot, sub.user_id)
-                user_channels_map[sub.user_id] = in_cids
+                in_cids = user_channels_map.get(sub.user_id, [])
                 if len(in_cids) > 0:
                     in_channel_active_subs.append(sub)
                     if len(in_cids) >= 2:
