@@ -11,7 +11,7 @@ from bot.models.schema import User, Subscription, SubStatus
 from bot.services.database import get_session, get_or_create_user
 from bot.services.referral import award_referral_bonus
 from bot.services.subscription import activate_pending_subscription
-from bot.services.channel_service import is_target_channel, is_secondary_channel, get_channel_label
+from bot.services.channel_service import is_target_channel, is_secondary_channel, get_channel_label, fetch_channel_title
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -193,8 +193,10 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
     user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
     full_name_safe = html.escape(user.full_name or "")
     start_time_thai = format_thai_datetime(now)
-    expires_at_thai = format_thai_datetime(new_expires_at) if new_expires_at else "ไม่ระบุ"
-    channel_label = get_channel_label(event.chat.id)
+    try:
+        channel_label = await fetch_channel_title(bot, event.chat.id)
+    except Exception:
+        channel_label = get_channel_label(event.chat.id)
     is_sec_join = is_secondary_channel(event.chat.id)
 
     if sub_to_activate:

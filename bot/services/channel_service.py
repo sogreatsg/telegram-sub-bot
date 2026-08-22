@@ -26,7 +26,7 @@ def is_target_channel(chat_id: int) -> bool:
     return False
 
 
-def is_secondary_channel(chat_id: int) -> bool:
+def is_secondary_channel(chat_id: int | str) -> bool:
     """ตรวจสอบว่าเป็น Channel ใหม่ (Secondary / Target Channel) หรือไม่"""
     if not config.SECONDARY_CHANNEL_ID:
         return False
@@ -44,13 +44,15 @@ def get_all_target_channel_ids() -> List[int]:
 def get_user_target_channel_id(user: Optional[User]) -> int:
     """
     คืนค่า Channel ID เป้าหมายของผู้ใช้คนนี้:
-    - หากผู้ใช้เคยถูกย้ายไปยังห้องใหม่ (is_moved_to_secondary=True หรือ assigned_channel='SECONDARY')
-      และมีการตั้งค่า SECONDARY_CHANNEL_ID ไว้ -> คืนค่า SECONDARY_CHANNEL_ID
-    - มิฉะนั้น คืนค่า Primary CHANNEL_ID ตามปกติ
+    - หากมีการตั้งค่า SECONDARY_CHANNEL_ID (โหมดใช้งาน Channel ใหม่ V.2):
+      * หากผู้ใช้ถูกแอดมินกำหนดล็อคให้อยู่ห้องเดิมแบบเจาะจง (assigned_channel == 'PRIMARY_EXPLICIT') -> คืนค่า Primary CHANNEL_ID
+      * นอกเหนือจากนั้นทั้งหมด (ผู้ใช้ใหม่, สมัครใหม่, ขอทดลองใช้, ย้ายห้องแล้ว) -> คืนค่า SECONDARY_CHANNEL_ID (BareLive V.2)
+    - หากไม่มี SECONDARY_CHANNEL_ID -> คืนค่า Primary CHANNEL_ID ตามปกติ
     """
-    if user and (getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", "PRIMARY") == "SECONDARY"):
-        if config.SECONDARY_CHANNEL_ID:
-            return config.SECONDARY_CHANNEL_ID
+    if config.SECONDARY_CHANNEL_ID:
+        if user and getattr(user, "assigned_channel", None) == "PRIMARY_EXPLICIT":
+            return config.CHANNEL_ID
+        return config.SECONDARY_CHANNEL_ID
     return config.CHANNEL_ID
 
 

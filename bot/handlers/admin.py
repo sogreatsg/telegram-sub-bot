@@ -2050,7 +2050,7 @@ async def handle_admin_unmove_user_command(message: Message):
             return
 
         user.is_moved_to_secondary = False
-        user.assigned_channel = "PRIMARY"
+        user.assigned_channel = "PRIMARY_EXPLICIT"
         session.add(user)
         await session.commit()
 
@@ -2239,8 +2239,8 @@ get_subscription_quota_and_label = subscription_status_label
 def build_admin_user_action_keyboard(user: Optional[User], user_id: int) -> InlineKeyboardMarkup:
     """สร้าง Inline Keyboard ปุ่มลัดสำหรับจัดการสมาชิกในเมนู /user"""
     is_moved = False
-    if user:
-        is_moved = getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", "PRIMARY") == "SECONDARY"
+    if user and config.SECONDARY_CHANNEL_ID:
+        is_moved = getattr(user, "assigned_channel", None) != "PRIMARY_EXPLICIT"
 
     sec_title = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
     pri_title = get_channel_label(config.CHANNEL_ID)
@@ -2466,7 +2466,9 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     resp.append(f"💬 ตอบกลับข้อความ: <code>/reply {user.telegram_id} </code>")
     resp.append(f"➕ เพิ่ม VIP (30 วัน): <code>/add_vip {user.telegram_id} 30</code>")
 
-    is_moved = getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", "PRIMARY") == "SECONDARY"
+    is_moved = False
+    if user and config.SECONDARY_CHANNEL_ID:
+        is_moved = getattr(user, "assigned_channel", None) != "PRIMARY_EXPLICIT"
     sec_title = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
     pri_title = get_channel_label(config.CHANNEL_ID)
 
@@ -3078,7 +3080,7 @@ async def handle_admin_quick_unmove_callback(callback: CallbackQuery, bot: Bot):
             return
 
         user.is_moved_to_secondary = False
-        user.assigned_channel = "PRIMARY"
+        user.assigned_channel = "PRIMARY_EXPLICIT"
         session.add(user)
         await session.commit()
 
