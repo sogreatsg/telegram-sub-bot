@@ -613,10 +613,13 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
             f"<i>(อยู่ในห้อง {total_in_channel} คน | ออกจากห้อง {total_left} คน)</i>\n"
         )
 
+        channel_name = get_channel_label(config.CHANNEL_ID)
+        sec_channel_name = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
+
         if channel_member_count is not None:
-            report += f"📱 <b>จำนวนสมาชิกใน Channel เดิม ({config.CHANNEL_ID}):</b> <b>{channel_member_count} คน</b>\n"
+            report += f"📱 <b>จำนวนสมาชิกใน {channel_name} (<code>{config.CHANNEL_ID}</code>):</b> <b>{channel_member_count} คน</b>\n"
         if sec_channel_member_count is not None:
-            report += f"🌟 <b>จำนวนสมาชิกใน Channel ใหม่ ({config.SECONDARY_CHANNEL_ID}):</b> <b>{sec_channel_member_count} คน</b>\n"
+            report += f"🌟 <b>จำนวนสมาชิกใน {sec_channel_name} (<code>{config.SECONDARY_CHANNEL_ID}</code>):</b> <b>{sec_channel_member_count} คน</b>\n"
 
         if total_pending > 0:
             report += f"🟡 <b>สมาชิกรอกดเข้าร่วม (Pending):</b> <b>{total_pending} คน</b>\n"
@@ -657,10 +660,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 if bot:
                     found_cid = user_channel_map.get(sub.user_id)
                     if found_cid:
-                        if is_secondary_channel(found_cid):
-                            channel_badge = "🌟 ใน Channel ใหม่"
-                        else:
-                            channel_badge = "🟢 ใน Channel เดิม"
+                        channel_badge = f"🟢 ใน {get_channel_label(found_cid)}"
                     else:
                         channel_badge = "⚪ ออกจากห้องแล้ว"
                 else:
@@ -681,7 +681,8 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 p_user = psub.user
                 p_u_header = format_user_title(p_user.full_name if p_user else None, p_user.username if p_user else None, psub.user_id)
                 quota_str = f"{psub.pending_days} วัน" if psub.pending_days > 0 else f"{psub.pending_minutes} นาที"
-                target_note = " (Channel ใหม่)" if (p_user and getattr(p_user, "is_moved_to_secondary", False)) else ""
+                target_cid = get_user_target_channel_id(p_user)
+                target_note = f" ({get_channel_label(target_cid)})" if p_user else ""
                 report += (
                     f"<b>{p_idx}.</b> {p_u_header}\n"
                     f"   • <b>โควต้ารอใช้งาน:</b> {quota_str} ({psub.source_label}){target_note}\n"

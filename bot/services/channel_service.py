@@ -54,11 +54,38 @@ def get_user_target_channel_id(user: Optional[User]) -> int:
     return config.CHANNEL_ID
 
 
-def get_channel_label(chat_id: int) -> str:
-    """คืนค่าป้ายชื่อ Channel สำหรับแสดงผลใน Log และข้อความแจ้งเตือน"""
+_channel_title_cache: Dict[str, str] = {}
+
+
+def get_channel_label(chat_id: int | str) -> str:
+    """คืนค่าชื่อ Channel จริงสำหรับแสดงผลในข้อความแจ้งเตือนและเมนู (เช่น 'BareLive' หรือ 'BareLive V.2')"""
+    norm_id = _normalize_chat_id(chat_id)
+    if norm_id in _channel_title_cache:
+        return _channel_title_cache[norm_id]
     if is_secondary_channel(chat_id):
-        return "Channel ใหม่ (Target Channel)"
-    return "Channel VIP (เดิม)"
+        return "BareLive V.2"
+    return "BareLive"
+
+
+async def fetch_channel_title(bot: Bot, chat_id: int | str) -> str:
+    """ดึงชื่อ Channel จริงจาก Telegram API พร้อมบันทึกลง cache"""
+    norm_id = _normalize_chat_id(chat_id)
+    if norm_id in _channel_title_cache:
+        return _channel_title_cache[norm_id]
+    try:
+        chat = await bot.get_chat(chat_id=int(chat_id))
+        if chat and chat.title:
+            _channel_title_cache[norm_id] = chat.title
+            return chat.title
+    except Exception:
+        pass
+    return get_channel_label(chat_id)
+
+
+def set_channel_title(chat_id: int | str, title: str) -> None:
+    """บันทึกชื่อ Channel ลงใน cache"""
+    if title:
+        _channel_title_cache[_normalize_chat_id(chat_id)] = title
 
 
 async def kick_user_from_channel(bot: Bot, chat_id: int, user_id: int) -> Tuple[bool, Optional[str]]:

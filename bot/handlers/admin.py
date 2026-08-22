@@ -1844,12 +1844,13 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
     # ส่ง DM ให้ผู้ใช้
     user_header = format_user_title(user.full_name, user.username, target_uid)
     expire_thai = format_thai_datetime(invite_expire)
+    target_channel_title = get_channel_label(config.SECONDARY_CHANNEL_ID)
     user_dm_sent = False
 
     user_move_text = (
-        "🎉 <b>คุณได้รับคำเชิญให้ย้ายเข้าสู่ VIP Channel ห้องใหม่!</b>\n"
+        f"🎉 <b>คุณได้รับคำเชิญให้ย้ายเข้าสู่ {target_channel_title}!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "แอดมินได้ส่งลิงก์เชิญพิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่เรียบร้อยแล้วครับ 🚀\n\n"
+        f"แอดมินได้ส่งลิงก์เชิญพิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่ (<b>{target_channel_title}</b>) เรียบร้อยแล้วครับ 🚀\n\n"
         f"🔗 <b>ลิงก์เชิญส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
         f"⏳ <b>ลิงก์หมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1858,7 +1859,7 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
 
     join_kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 เข้าร่วม Channel ใหม่ ตอนนี้", url=invite_url)]
+            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_title} ตอนนี้", url=invite_url)]
         ]
     )
 
@@ -1878,7 +1879,7 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
         await log_chat_message(
             user_id=target_uid,
             sender_role="BOT",
-            message_text=f"[ระบบส่งลิงก์ย้าย Channel ใหม่ (อายุ 7 วัน): {invite_url}]"
+            message_text=f"[ระบบส่งลิงก์ย้าย {target_channel_title} (อายุ 7 วัน): {invite_url}]"
         )
     except Exception:
         pass
@@ -1888,13 +1889,13 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
         f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
-        f"📢 <b>Channel เป้าหมายใหม่:</b> <b>Channel ใหม่</b> (<code>{config.SECONDARY_CHANNEL_ID}</code>)\n"
+        f"📢 <b>Channel เป้าหมาย:</b> <b>{target_channel_title}</b> (<code>{config.SECONDARY_CHANNEL_ID}</code>)\n"
         f"⏳ <b>อายุลิงก์เชิญ:</b> 7 วัน (หมดอายุ: <code>{expire_thai} น.</code>)\n"
         f"🔗 <b>Invite Link:</b>\n<code>{invite_url}</code>\n"
         f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "ℹ️ <i>บันทึกสถานะผู้ใช้เป็น Channel ใหม่เรียบร้อย การซื้อ/ต่ออายุในอนาคตจะส่งลิงก์ห้องใหม่ให้อัตโนมัติ</i>\n"
-        "<i>เมื่อผู้ใช้กดเข้าร่วมห้องใหม่ ระบบจะส่งแจ้งเตือนเข้ากลุ่มแอดมินทันที</i>"
+        f"ℹ️ <i>บันทึกสถานะผู้ใช้เป็น {target_channel_title} เรียบร้อย การซื้อ/ต่ออายุในอนาคตจะส่งลิงก์ห้องนี้ให้อัตโนมัติ</i>\n"
+        "<i>เมื่อผู้ใช้กดเข้าร่วมห้อง ระบบจะส่งแจ้งเตือนเข้ากลุ่มแอดมินทันที</i>"
     )
 
     await message.answer(admin_reply, parse_mode="HTML", disable_web_page_preview=True)
@@ -1928,11 +1929,12 @@ async def handle_admin_unmove_user_command(message: Message):
         session.add(user)
         await session.commit()
 
+    primary_title = get_channel_label(config.CHANNEL_ID)
     user_header = format_user_title(user.full_name, user.username, user.telegram_id)
     await message.answer(
-        f"🔄 <b>ย้ายผู้ใช้กลับสู่ Channel หลักเดิมเรียบร้อย!</b>\n\n"
+        f"🔄 <b>ย้ายผู้ใช้กลับสู่ {primary_title} เรียบร้อย!</b>\n\n"
         f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-        f"📢 <b>Channel ประจำตัว:</b> Channel เดิม (<code>{config.CHANNEL_ID}</code>)",
+        f"📢 <b>Channel ประจำตัว:</b> <b>{primary_title}</b> (<code>{config.CHANNEL_ID}</code>)",
         parse_mode="HTML"
     )
 

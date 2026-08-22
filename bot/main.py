@@ -10,6 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from bot.config import get_settings
 from bot.services.database import init_db, close_db
 from bot.services.scheduler import setup_scheduler
+from bot.services.channel_service import set_channel_title
 from bot.handlers import (
     user_menu_router,
     payment_router,
@@ -119,6 +120,11 @@ async def main() -> None:
 
         # ตรวจสอบสิทธิ์ของบอทใน Target Channel
         try:
+            primary_chat = await bot.get_chat(chat_id=config.CHANNEL_ID)
+            if primary_chat and primary_chat.title:
+                set_channel_title(config.CHANNEL_ID, primary_chat.title)
+                logger.info(f"Primary Channel Title: '{primary_chat.title}' ({config.CHANNEL_ID})")
+
             bot_chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=bot_user.id)
             logger.info(f"Bot status in Primary Channel {config.CHANNEL_ID}: {bot_chat_member.status}")
             if bot_chat_member.status not in ("administrator", "creator"):
@@ -132,6 +138,11 @@ async def main() -> None:
         if config.SECONDARY_CHANNEL_ID:
             logger.info(f"Secondary/Target Channel ID: {config.SECONDARY_CHANNEL_ID}")
             try:
+                sec_chat = await bot.get_chat(chat_id=config.SECONDARY_CHANNEL_ID)
+                if sec_chat and sec_chat.title:
+                    set_channel_title(config.SECONDARY_CHANNEL_ID, sec_chat.title)
+                    logger.info(f"Secondary Channel Title: '{sec_chat.title}' ({config.SECONDARY_CHANNEL_ID})")
+
                 sec_chat_member = await bot.get_chat_member(chat_id=config.SECONDARY_CHANNEL_ID, user_id=bot_user.id)
                 logger.info(f"Bot status in Secondary Channel {config.SECONDARY_CHANNEL_ID}: {sec_chat_member.status}")
                 if sec_chat_member.status not in ("administrator", "creator"):
