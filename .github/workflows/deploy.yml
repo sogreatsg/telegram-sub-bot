@@ -31,6 +31,16 @@ jobs:
             # (bot/version.json is gitignored and rebuilt fresh on every deploy).
             python3 scripts/generate_version.py
 
+            # Ensure SECONDARY_CHANNEL_ID is present in .env on server
+            if [ -f .env ]; then
+              if grep -q "^SECONDARY_CHANNEL_ID=" .env; then
+                sed -i 's/^SECONDARY_CHANNEL_ID=.*/SECONDARY_CHANNEL_ID=-1003940881279/' .env
+              else
+                echo "" >> .env
+                echo "SECONDARY_CHANNEL_ID=-1003940881279" >> .env
+              fi
+            fi
+
             # Export environment variables for Docker Compose
             export BOT_APP_VERSION=$(git rev-parse --short HEAD)
             export BOT_APP_DATE=$(git log -1 --format=%cd --date=format:"%Y-%m-%d %H:%M:%S")
