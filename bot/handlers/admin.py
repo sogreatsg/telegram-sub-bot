@@ -1430,7 +1430,16 @@ async def handle_admin_kick_command(message: Message, bot: Bot):
 async def handle_admin_add_vip_command(message: Message, bot: Bot):
     """คำสั่งแอดมินสำหรับเพิ่มสิทธิ์ VIP ให้ผู้ใช้ด้วยตนเอง (รองรับทั้งวันและชั่วโมง): /add_vip <User ID หรือ @username> [ระยะเวลา เช่น 30, 12h, 1d 6h]"""
     if not is_admin_chat(message.chat.id):
-        return
+        is_admin_user = False
+        if message.from_user:
+            try:
+                cm = await bot.get_chat_member(chat_id=config.ADMIN_GROUP_ID, user_id=message.from_user.id)
+                if cm.status in ("creator", "administrator"):
+                    is_admin_user = True
+            except Exception:
+                pass
+        if not is_admin_user:
+            return
 
     args = (message.text or "").split(maxsplit=2)
     if len(args) < 2:
@@ -1456,6 +1465,7 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
     now = datetime.now(timezone.utc)
     is_stack_extension = False
     new_expires_at = None
+    old_expires_at = None
 
     async with get_session() as session:
         if query.isdigit():
@@ -1480,6 +1490,10 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
 
         target_channel_id = get_user_target_channel_id(user)
         target_channel_label = get_channel_label(target_channel_id)
+
+        # เก็บวันหมดอายุเดิมก่อนเพิ่ม
+        sub_before = await session.get(Subscription, target_uid)
+        old_expires_at = ensure_utc(sub_before.expires_at) if (sub_before and sub_before.expires_at) else None
 
         # ตรวจสอบสถานะจริงใน Channel เป้าหมาย
         is_in_channel = False
@@ -1533,7 +1547,10 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
 
     # ส่ง DM หาผู้ใช้ (สำหรับ /add_vip)
     exp_thai = format_thai_datetime(new_expires_at) if new_expires_at else "-"
+    old_exp_thai = format_thai_datetime(old_expires_at) if old_expires_at else "ไม่มีข้อมูลเดิม / สมาชิกใหม่"
     time_rem = format_time_remaining(new_expires_at) if new_expires_at else duration_label
+    admin_display = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else (html.escape(message.from_user.full_name) if message.from_user else "Admin")
+    admin_id_str = str(message.from_user.id) if message.from_user else "-"
 
     try:
         if is_stack_extension:
@@ -1566,36 +1583,47 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         pass
 
     user_header = format_user_title(user.full_name, user.username, target_uid)
-    if is_stack_extension:
-        resp = (
-            "✅ <b>ต่อเวลาสะสม VIP สำเร็จ!</b>\n\n"
-            f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-            f"➕ <b>เพิ่มเวลา:</b> +{duration_label}\n"
-            f"⏳ <b>วันหมดอายุใหม่:</b> <code>{exp_thai} น.</code> (คงเหลือ {time_rem})\n"
-            "ℹ️ <i>ผู้ใช้มีแพ็กเกจ Active อยู่แล้ว ระบบบวกเวลาเพิ่มให้ทันทีโดยไม่ต้องกดเข้าใหม่</i>"
-        )
-    elif is_in_channel:
-        resp = (
-            "✅ <b>เพิ่มสิทธิ์ VIP เรียบร้อยแล้ว!</b>\n\n"
-            f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-            f"📅 <b>ระยะเวลา:</b> {duration_label} (หมดอายุ: <code>{exp_thai} น.</code>)\n"
-            "ℹ️ <i>ผู้ใช้อยู่ใน Channel อยู่แล้ว เปิดใช้งาน ACTIVE ให้ทันที ไม่ต้องออก invite link</i>"
-        )
+    action_title = "ต่อเวลาสะสม VIP" if is_stack_extension else ("เพิ่มสิทธิ์ VIP (อยู่ในห้องแล้ว)" if is_in_channel else "เพิ่มสิทธิ์ VIP (ผู้ใช้ใหม่)")
+    resp = (
+        f"✅ <b>{action_title} สำเร็จ!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
+        f"📱 <b>Channel:</b> <b>{target_channel_label}</b>\n"
+        f"➕ <b>เวลาที่เพิ่ม:</b> <b>+{duration_label}</b>\n"
+        f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
+        f"🎯 <b>วันหมดอายุใหม่:</b> <code>{exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
+        f"👑 <b>ดำเนินการโดย:</b> {admin_display} (<code>{admin_id_str}</code>)\n"
+        f"📅 <b>เวลาบันทึก:</b> <code>{format_thai_datetime(now)} น.</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    if not is_in_channel:
+        resp += f"🔗 <b>Invite Link (7 วัน):</b> <code>{invite_url}</code>\n"
+        resp += "📬 <i>ระบบได้ส่งข้อความ DM พร้อมลิงก์เชิญเข้าห้องให้ผู้ใช้แล้ว</i>"
     else:
-        resp = (
-            "✅ <b>เพิ่มสิทธิ์ VIP เรียบร้อยแล้ว!</b>\n\n"
-            f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-            f"📅 <b>ระยะเวลา:</b> {duration_label} (หมดอายุ: <code>{exp_thai} น.</code>)\n"
-            f"🔗 <b>Invite Link:</b> <code>{invite_url}</code>"
-        )
+        resp += "📬 <i>ระบบได้ส่งข้อความ DM แจ้งการต่อเวลาให้ผู้ใช้แล้ว</i>"
+
     await message.answer(resp, parse_mode="HTML")
+    if not is_admin_chat(message.chat.id):
+        try:
+            await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=f"📢 <b>[Admin Log: /add_vip]</b>\n\n{resp}", parse_mode="HTML")
+        except Exception:
+            pass
 
 
 @router.message(Command("deduct_vip", "reduce_vip", "minus_vip", "del_days", "remove_vip"))
 async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
     """คำสั่งแอดมินสำหรับลดเวลาสมาชิก VIP โดยไม่มีการส่งข้อความหาผู้ใช้: /deduct_vip <User ID หรือ @username> <ระยะเวลา เช่น 7, 7d, 12h, 1d 12h>"""
     if not is_admin_chat(message.chat.id):
-        return
+        is_admin_user = False
+        if message.from_user:
+            try:
+                cm = await bot.get_chat_member(chat_id=config.ADMIN_GROUP_ID, user_id=message.from_user.id)
+                if cm.status in ("creator", "administrator"):
+                    is_admin_user = True
+            except Exception:
+                pass
+        if not is_admin_user:
+            return
 
     args = (message.text or "").split(maxsplit=2)
     if len(args) < 3:
@@ -1631,6 +1659,9 @@ async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
             return
 
         target_uid = user.telegram_id
+        target_channel_id = get_user_target_channel_id(user)
+        target_channel_label = get_channel_label(target_channel_id)
+
         sub = await session.get(Subscription, target_uid)
         if not sub or not sub.expires_at:
             await message.answer(
@@ -1667,27 +1698,46 @@ async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
     new_exp_thai = format_thai_datetime(new_expires_at)
     time_rem = format_time_remaining(new_expires_at)
     user_header = format_user_title(user.full_name, user.username, target_uid)
-    status_label = subscription_status_label(sub_status_new)
+    status_label, _ = subscription_status_label(sub)
+    admin_display = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else (html.escape(message.from_user.full_name) if message.from_user else "Admin")
+    admin_id_str = str(message.from_user.id) if message.from_user else "-"
 
     resp = (
-        "➖ <b>ลดเวลาสมาชิก VIP สำเร็จ!</b>\n"
+        "➖ <b>ปรับลดเวลาสมาชิก VIP สำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-        f"➖ <b>จำนวนเวลาที่ลด:</b> <b>-{duration_label}</b>\n"
+        f"📱 <b>Channel:</b> <b>{target_channel_label}</b>\n"
+        f"➖ <b>เวลาที่ปรับลด:</b> <b>-{duration_label}</b>\n"
         f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
         f"🎯 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
-        f"📊 <b>สถานะแพ็กเกจ:</b> <b>{status_label}</b>\n"
+        f"📊 <b>สถานะหลังปรับ:</b> <b>{status_label}</b>\n"
+        f"👑 <b>ดำเนินการโดย:</b> {admin_display} (<code>{admin_id_str}</code>)\n"
+        f"📅 <b>เวลาบันทึก:</b> <code>{format_thai_datetime(now)} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🔇 <i>หมายเหตุ: ไม่มีการส่งข้อความ DM แจ้งเตือนไปยังผู้ใช้</i>"
+        "🔇 <i>หมายเหตุ: ปรับลดในระบบแล้ว (ไม่มีการส่ง DM ไปหาผู้ใช้)</i>"
     )
     await message.answer(resp, parse_mode="HTML")
+    if not is_admin_chat(message.chat.id):
+        try:
+            await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=f"📢 <b>[Admin Log: /deduct_vip]</b>\n\n{resp}", parse_mode="HTML")
+        except Exception:
+            pass
 
 
 @router.message(Command("set_vip", "set_days", "set_expiry", "override_vip"))
 async def handle_admin_set_vip_command(message: Message, bot: Bot):
     """คำสั่งแอดมินสำหรับปรับตั้งค่าเวลาคงเหลือของสมาชิก VIP โดยตรง (ไม่มีการส่ง DM หาผู้ใช้): /set_vip <User ID หรือ @username> <ระยะเวลา เช่น 30, 30d, 12h, 1d 12h, 0>"""
     if not is_admin_chat(message.chat.id):
-        return
+        is_admin_user = False
+        if message.from_user:
+            try:
+                cm = await bot.get_chat_member(chat_id=config.ADMIN_GROUP_ID, user_id=message.from_user.id)
+                if cm.status in ("creator", "administrator"):
+                    is_admin_user = True
+            except Exception:
+                pass
+        if not is_admin_user:
+            return
 
     args = (message.text or "").split(maxsplit=2)
     if len(args) < 3:
@@ -1733,6 +1783,9 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
                 return
         else:
             target_uid = user.telegram_id
+
+        target_channel_id = get_user_target_channel_id(user)
+        target_channel_label = get_channel_label(target_channel_id)
 
         sub = await session.get(Subscription, target_uid)
         if not sub:
@@ -1781,19 +1834,30 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
     new_exp_thai = format_thai_datetime(new_expires_at)
     time_rem = format_time_remaining(new_expires_at)
     user_header = format_user_title(user.full_name, user.username, target_uid)
-    status_label = subscription_status_label(sub_status_new)
+    status_label, _ = subscription_status_label(sub)
+    admin_display = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else (html.escape(message.from_user.full_name) if message.from_user else "Admin")
+    admin_id_str = str(message.from_user.id) if message.from_user else "-"
 
     resp = (
         "⚙️ <b>กำหนดเวลาสมาชิก VIP ตรงสำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
+        f"📱 <b>Channel:</b> <b>{target_channel_label}</b>\n"
         f"🎯 <b>ตั้งเวลาคงเหลือ:</b> <b>{duration_label}</b> (นับจากตอนนี้)\n"
         f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
         f"🚀 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
+        f"📊 <b>สถานะหลังปรับ:</b> <b>{status_label}</b>\n"
+        f"👑 <b>ดำเนินการโดย:</b> {admin_display} (<code>{admin_id_str}</code>)\n"
+        f"📅 <b>เวลาบันทึก:</b> <code>{format_thai_datetime(now)} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🔇 <i>หมายเหตุ: ไม่มีการส่งข้อความ DM แจ้งเตือนไปยังผู้ใช้</i>"
+        "🔇 <i>หมายเหตุ: ปรับยอดในระบบแล้ว (ไม่มีการส่ง DM ไปหาผู้ใช้)</i>"
     )
     await message.answer(resp, parse_mode="HTML")
+    if not is_admin_chat(message.chat.id):
+        try:
+            await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=f"📢 <b>[Admin Log: /set_vip]</b>\n\n{resp}", parse_mode="HTML")
+        except Exception:
+            pass
 
 
 @router.message(Command("move_user", "move", "migrate_user"))
