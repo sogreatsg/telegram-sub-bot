@@ -393,6 +393,7 @@ async def check_expired_subscriptions(bot: Bot) -> None:
                 or_(
                     Subscription.status == SubStatus.ACTIVE.value,
                     Subscription.status == SubStatus.KICK_FAILED.value,
+                    Subscription.status == SubStatus.EXPIRED.value,
                 ),
                 Subscription.expires_at.is_not(None),
                 Subscription.expires_at <= now,

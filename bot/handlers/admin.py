@@ -1724,6 +1724,17 @@ async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
     admin_display = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else (html.escape(message.from_user.full_name) if message.from_user else "Admin")
     admin_id_str = str(message.from_user.id) if message.from_user else "-"
 
+    kick_line = ""
+    if new_expires_at <= now:
+        try:
+            kick_res = await kick_user_from_all_target_channels(bot, target_uid)
+            if len(kick_res["failed_channels"]) == 0:
+                kick_line = "🚪 <b>การเตะออกจากห้อง:</b> นำออกจาก Channel สำเร็จ ✅\n"
+            else:
+                kick_line = "⚠️ <b>การเตะออกจากห้อง:</b> บอทเตะไม่สำเร็จ (กรุณาตรวจสิทธิ์บอท)\n"
+        except Exception as e:
+            kick_line = f"⚠️ <b>การเตะออกจากห้อง:</b> เกิดข้อผิดพลาด ({e})\n"
+
     resp = (
         "➖ <b>ปรับลดเวลาสมาชิก VIP สำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1733,6 +1744,7 @@ async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
         f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
         f"🎯 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
         f"📊 <b>สถานะหลังปรับ:</b> <b>{status_badge}</b>\n"
+        f"{kick_line}"
         f"👑 <b>ดำเนินการโดย:</b> {admin_display} (<code>{admin_id_str}</code>)\n"
         f"📅 <b>เวลาบันทึก:</b> <code>{format_thai_datetime(now)} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1863,6 +1875,17 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
     admin_display = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else (html.escape(message.from_user.full_name) if message.from_user else "Admin")
     admin_id_str = str(message.from_user.id) if message.from_user else "-"
 
+    kick_line = ""
+    if not is_positive:
+        try:
+            kick_res = await kick_user_from_all_target_channels(bot, target_uid)
+            if len(kick_res["failed_channels"]) == 0:
+                kick_line = "🚪 <b>การเตะออกจากห้อง:</b> นำออกจาก Channel สำเร็จ ✅\n"
+            else:
+                kick_line = "⚠️ <b>การเตะออกจากห้อง:</b> บอทเตะไม่สำเร็จ (กรุณาตรวจสิทธิ์บอท)\n"
+        except Exception as e:
+            kick_line = f"⚠️ <b>การเตะออกจากห้อง:</b> เกิดข้อผิดพลาด ({e})\n"
+
     resp = (
         "⚙️ <b>กำหนดเวลาสมาชิก VIP ตรงสำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1872,6 +1895,7 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
         f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
         f"🚀 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
         f"📊 <b>สถานะหลังปรับ:</b> <b>{status_badge}</b>\n"
+        f"{kick_line}"
         f"👑 <b>ดำเนินการโดย:</b> {admin_display} (<code>{admin_id_str}</code>)\n"
         f"📅 <b>เวลาบันทึก:</b> <code>{format_thai_datetime(now)} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
