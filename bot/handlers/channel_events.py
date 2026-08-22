@@ -175,8 +175,10 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
 
                 logger.info(f"Activated pending subscription for user {user_id} ({plan_title}) in {get_channel_label(event.chat.id)}, expires_at={new_expires_at}")
 
-        elif sub and sub.status == SubStatus.ACTIVE.value and sub.expires_at and ensure_utc(sub.expires_at) > now:
-            # === กรณีไม่มี PENDING แต่มี ACTIVE อยู่แล้ว (สมาชิกเดิมหลุดแล้วเข้าใหม่) ===
+        elif sub and sub.expires_at and ensure_utc(sub.expires_at) > now:
+            # === กรณีไม่มี PENDING แต่มีวันคงเหลืออยู่แล้ว (สมาชิกเดิมหลุดแล้วเข้าใหม่ หรือย้ายเข้าห้องใหม่) ===
+            sub.status = SubStatus.ACTIVE.value
+            session.add(sub)
             sub_to_activate = sub
             new_expires_at = sub.expires_at
             plan_title = sub.source_label or "สมาชิก VIP"
