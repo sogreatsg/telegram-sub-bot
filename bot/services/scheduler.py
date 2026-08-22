@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import html
 from datetime import datetime, timezone, timedelta
@@ -23,6 +24,7 @@ from bot.services.channel_service import (
     check_user_presence_all_channels,
     format_user_channel_presence,
     get_all_target_channel_ids,
+    get_user_target_channel_id,
     get_channel_label,
     is_secondary_channel,
 )
