@@ -33,6 +33,8 @@ from bot.services.channel_service import (
     unban_user_in_all_target_channels,
     check_user_in_channel,
     check_user_in_target_channels,
+    check_user_presence_all_channels,
+    format_user_channel_presence,
 )
 from bot.handlers.user_menu import get_main_menu_keyboard
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title, format_remaining_time
@@ -2184,37 +2186,25 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     target_channel_id = get_user_target_channel_id(user)
     target_channel_label = get_channel_label(target_channel_id)
 
-    # ตรวจสอบสถานะใน Channel จริง พร้อมอัปเดตชื่อผู้ใช้ล่าสุดจาก Telegram
-    channel_status_str = "ไม่ทราบสถานะ"
-    try:
-        chat_member = await bot.get_chat_member(chat_id=target_channel_id, user_id=user.telegram_id)
-        status_map = {
-            ChatMemberStatus.CREATOR: "👑 เจ้าของห้อง (Creator)",
-            ChatMemberStatus.ADMINISTRATOR: "🛡️ ผู้ดูแล (Admin)",
-            ChatMemberStatus.MEMBER: f"🟢 อยู่ใน Channel ({target_channel_label})",
-            ChatMemberStatus.LEFT: "⚪ ออกจากห้องไปแล้ว (Left)",
-            ChatMemberStatus.KICKED: "🔴 ถูกแบน/เตะออก (Kicked/Banned)",
-            ChatMemberStatus.RESTRICTED: "🟡 ถูกจำกัดสิทธิ์ (Restricted)",
-        }
-        channel_status_str = status_map.get(chat_member.status, chat_member.status)
-        tg_u = getattr(chat_member, "user", None)
-        if tg_u:
-            updated_meta = False
-            if tg_u.full_name and user.full_name != tg_u.full_name:
-                user.full_name = tg_u.full_name
-                updated_meta = True
-            if tg_u.username and user.username != tg_u.username:
-                user.username = tg_u.username
-                updated_meta = True
-            if updated_meta:
-                async with get_session() as session:
-                    db_u = (await session.execute(select(User).where(User.telegram_id == user.telegram_id))).scalar_one_or_none()
-                    if db_u:
-                        db_u.full_name = user.full_name
-                        db_u.username = user.username
-                        session.add(db_u)
-    except Exception as e:
-        channel_status_str = f"ไม่อยู่ใน Channel / ตรวจสอบไม่ได้ ({e})"
+    # ตรวจสอบสถานะในทุก Channel จริง พร้อมอัปเดตชื่อผู้ใช้ล่าสุดจาก Telegram
+    in_channels, channel_status_map, tg_u = await check_user_presence_all_channels(bot, user.telegram_id)
+    if tg_u:
+        updated_meta = False
+        if tg_u.full_name and user.full_name != tg_u.full_name:
+            user.full_name = tg_u.full_name
+            updated_meta = True
+        if tg_u.username and user.username != tg_u.username:
+            user.username = tg_u.username
+            updated_meta = True
+        if updated_meta:
+            async with get_session() as session:
+                db_u = (await session.execute(select(User).where(User.telegram_id == user.telegram_id))).scalar_one_or_none()
+                if db_u:
+                    db_u.full_name = user.full_name
+                    db_u.username = user.username
+                    session.add(db_u)
+
+    channel_status_str = format_user_channel_presence(in_channels)
 
     # เวลาเข้า Channel ล่าสุด (ระบบใหม่เก็บสถานะปัจจุบันแถวเดียว ไม่มีประวัติการเข้าทุกครั้งอีกต่อไป)
     if sub and sub.joined_at:
@@ -2244,7 +2234,7 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     resp = [
         f"👤 <b>ข้อมูลผู้ใช้งาน:</b> {user_header}",
         f"🎯 <b>Channel ประจำตัว:</b> <b>{target_channel_label}</b> (<code>{target_channel_id}</code>)",
-        f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> {channel_status_str}",
+        f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> <b>{channel_status_str}</b>",
         f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
         f"🎁 <b>สถิติ Referral:</b> ชวนสำเร็จ {user.referral_count or 0} คน | โบนัสสะสม {user.referral_bonus_days or 0} วัน",
         f"🔗 <b>สมัครผ่านผู้แนะนำ (Referred By):</b> {ref_by_str}",

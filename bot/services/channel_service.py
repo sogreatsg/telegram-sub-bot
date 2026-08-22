@@ -166,7 +166,7 @@ async def check_user_in_channel(bot: Bot, chat_id: int, user_id: int) -> Tuple[b
 
 async def check_user_in_target_channels(bot: Bot, user_id: int) -> Tuple[bool, Optional[int], Optional[str]]:
     """
-    ตรวจสอบว่าผู้ใช้อยู่ใน Channel เป้าหมายใดบ้าง
+    ตรวจสอบว่าผู้ใช้อยู่ใน Channel เป้าหมายใดบ้าง (คืนค่า channel แรกที่พบ)
     คืนค่า (is_in_any, found_channel_id, status)
     """
     for cid in get_all_target_channel_ids():
@@ -174,3 +174,45 @@ async def check_user_in_target_channels(bot: Bot, user_id: int) -> Tuple[bool, O
         if is_mem:
             return True, cid, status
     return False, None, None
+
+
+async def check_user_presence_all_channels(bot: Bot, user_id: int) -> Tuple[List[int], Dict[int, str], Optional[Any]]:
+    """
+    ตรวจสอบสถานะของผู้ใช้ในทุก Target Channel อย่างละเอียด
+    คืนค่า:
+    - in_channels: รายการ channel_id ที่ผู้ใช้อยู่ในห้องจริง (เช่น [-1003758847086, -1003940881279])
+    - status_map: {channel_id: status_string}
+    - latest_tg_user: ข้อมูล Telegram User ล่าสุด
+    """
+    in_channels = []
+    status_map = {}
+    latest_tg_user = None
+
+    for cid in get_all_target_channel_ids():
+        is_mem, status, tg_u = await check_user_in_channel(bot, cid, user_id)
+        status_map[cid] = status or "LEFT"
+        if tg_u:
+            latest_tg_user = tg_u
+        if is_mem:
+            in_channels.append(cid)
+
+    return in_channels, status_map, latest_tg_user
+
+
+def format_user_channel_presence(in_channels: List[int]) -> str:
+    """
+    สร้างข้อความสรุปสถานะการอยู่ใน Channel:
+    - อยู่ทั้ง 2 ห้อง -> '🟢 อยู่ในทั้ง 2 ห้อง (BareLive + BareLive V.2)'
+    - อยู่ห้องเดียว -> '🟢 อยู่ใน BareLive' หรือ '🟢 อยู่ใน BareLive V.2'
+    - ไม่อยู่เลย -> '⚪ ออกจากห้องแล้ว'
+    """
+    all_cids = get_all_target_channel_ids()
+    if len(all_cids) > 1 and len(in_channels) >= len(all_cids):
+        names = [get_channel_label(c) for c in all_cids]
+        return f"🟢 อยู่ในทั้ง {len(all_cids)} ห้อง ({' + '.join(names)})"
+    elif len(in_channels) == 1:
+        return f"🟢 อยู่ใน {get_channel_label(in_channels[0])}"
+    elif len(in_channels) > 1:
+        names = [get_channel_label(c) for c in in_channels]
+        return f"🟢 อยู่ใน {len(in_channels)} ห้อง ({' + '.join(names)})"
+    return "⚪ ออกจากห้องแล้ว (ไม่อยู่ในห้องใดเลย)"

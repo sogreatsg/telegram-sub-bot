@@ -20,6 +20,8 @@ from bot.services.channel_service import (
     kick_user_from_all_target_channels,
     check_user_in_channel,
     check_user_in_target_channels,
+    check_user_presence_all_channels,
+    format_user_channel_presence,
     get_all_target_channel_ids,
     get_channel_label,
     is_secondary_channel,
@@ -583,17 +585,26 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
         )
         pending_subs = (await session.execute(stmt_pending)).scalars().all()
 
-        # ตรวจสอบสถานะว่าอยู่ในห้อง Channel ใดจริงหรือไม่
+        # ตรวจสอบสถานะว่าอยู่ในห้อง Channel ใดจริงหรือไม่ (รองรับการอยู่ทั้ง 2 ห้องพร้อมกัน)
         in_channel_active_subs = []
         left_channel_active_subs = []
-        user_channel_map = {}
+        user_channels_map = {}
+        both_channels_count = 0
+        primary_only_count = 0
+        secondary_only_count = 0
 
         if bot:
             for sub in unique_active_subs:
-                is_in, found_cid, _ = await check_user_in_target_channels(bot, sub.user_id)
-                if is_in and found_cid:
+                in_cids, _, _ = await check_user_presence_all_channels(bot, sub.user_id)
+                user_channels_map[sub.user_id] = in_cids
+                if len(in_cids) > 0:
                     in_channel_active_subs.append(sub)
-                    user_channel_map[sub.user_id] = found_cid
+                    if len(in_cids) >= 2:
+                        both_channels_count += 1
+                    elif is_secondary_channel(in_cids[0]):
+                        secondary_only_count += 1
+                    else:
+                        primary_only_count += 1
                 else:
                     left_channel_active_subs.append(sub)
         else:
@@ -620,6 +631,9 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
             report += f"📱 <b>จำนวนสมาชิกใน {channel_name} (<code>{config.CHANNEL_ID}</code>):</b> <b>{channel_member_count} คน</b>\n"
         if sec_channel_member_count is not None:
             report += f"🌟 <b>จำนวนสมาชิกใน {sec_channel_name} (<code>{config.SECONDARY_CHANNEL_ID}</code>):</b> <b>{sec_channel_member_count} คน</b>\n"
+
+        if config.SECONDARY_CHANNEL_ID and total_in_channel > 0 and bot:
+            report += f"👥 <b>สรุปการอยู่ในห้อง:</b> ทั้ง 2 ห้อง <b>{both_channels_count} คน</b> | เฉพาะ {channel_name} <b>{primary_only_count} คน</b> | เฉพาะ {sec_channel_name} <b>{secondary_only_count} คน</b>\n"
 
         if total_pending > 0:
             report += f"🟡 <b>สมาชิกรอกดเข้าร่วม (Pending):</b> <b>{total_pending} คน</b>\n"
@@ -658,11 +672,8 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
 
                 # แสดงสถานะการอยู่ในห้อง
                 if bot:
-                    found_cid = user_channel_map.get(sub.user_id)
-                    if found_cid:
-                        channel_badge = f"🟢 ใน {get_channel_label(found_cid)}"
-                    else:
-                        channel_badge = "⚪ ออกจากห้องแล้ว"
+                    in_cids = user_channels_map.get(sub.user_id, [])
+                    channel_badge = format_user_channel_presence(in_cids)
                 else:
                     channel_badge = "🟢 ACTIVE"
 
