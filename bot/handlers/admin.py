@@ -89,6 +89,25 @@ def format_time_remaining(expires_at: datetime) -> str:
     return " ".join(parts)
 
 
+def format_subscription_status_display(sub: Optional[Subscription]) -> str:
+    """คืนข้อความสถานะสมาชิกแบบมีไอคอนชัดเจน เช่น 🟢 ACTIVE หรือ 🔴 EXPIRED (หมดอายุแล้ว)"""
+    if not sub:
+        return "⚪ ไม่มีข้อมูล"
+    now = datetime.now(timezone.utc)
+    if sub.status == SubStatus.ACTIVE.value and sub.expires_at and ensure_utc(sub.expires_at) > now:
+        label = f" ({sub.source_label})" if sub.source_label else ""
+        return f"🟢 ACTIVE{label}"
+    elif sub.status == SubStatus.PENDING.value:
+        label = f" ({sub.source_label})" if sub.source_label else ""
+        return f"🟡 PENDING (รอกดเข้าห้อง{label})"
+    elif sub.status == SubStatus.KICKED.value:
+        return "🔴 KICKED (ถูกเตะออกจากห้องแล้ว)"
+    elif sub.status == SubStatus.KICK_FAILED.value:
+        return "⚠️ KICK_FAILED (ค้างเตะไม่สำเร็จ)"
+    else:
+        return "🔴 EXPIRED (หมดอายุแล้ว)"
+
+
 def get_bot_version_info() -> str:
     """ดึงข้อมูลเวอร์ชันและประวัติ Commit ล่าสุดแบบไดนามิก"""
     import subprocess
@@ -1584,6 +1603,7 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
 
     user_header = format_user_title(user.full_name, user.username, target_uid)
     action_title = "ต่อเวลาสะสม VIP" if is_stack_extension else ("เพิ่มสิทธิ์ VIP (อยู่ในห้องแล้ว)" if is_in_channel else "เพิ่มสิทธิ์ VIP (ผู้ใช้ใหม่)")
+    status_badge = format_subscription_status_display(grant.subscription)
     resp = (
         f"✅ <b>{action_title} สำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1592,6 +1612,7 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         f"➕ <b>เวลาที่เพิ่ม:</b> <b>+{duration_label}</b>\n"
         f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
         f"🎯 <b>วันหมดอายุใหม่:</b> <code>{exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
+        f"📊 <b>สถานะหลังปรับ:</b> <b>{status_badge}</b>\n"
         f"👑 <b>ดำเนินการโดย:</b> {admin_display} (<code>{admin_id_str}</code>)\n"
         f"📅 <b>เวลาบันทึก:</b> <code>{format_thai_datetime(now)} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1675,6 +1696,7 @@ async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
 
         if new_expires_at <= now:
             sub_status_new = SubStatus.EXPIRED.value
+            sub.source_label = f"หมดอายุ (Admin ปรับลด -{duration_label})"
         else:
             sub_status_new = SubStatus.ACTIVE.value
 
@@ -1698,7 +1720,7 @@ async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
     new_exp_thai = format_thai_datetime(new_expires_at)
     time_rem = format_time_remaining(new_expires_at)
     user_header = format_user_title(user.full_name, user.username, target_uid)
-    status_label, _ = subscription_status_label(sub)
+    status_badge = format_subscription_status_display(sub)
     admin_display = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else (html.escape(message.from_user.full_name) if message.from_user else "Admin")
     admin_id_str = str(message.from_user.id) if message.from_user else "-"
 
@@ -1710,7 +1732,7 @@ async def handle_admin_deduct_vip_command(message: Message, bot: Bot):
         f"➖ <b>เวลาที่ปรับลด:</b> <b>-{duration_label}</b>\n"
         f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
         f"🎯 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
-        f"📊 <b>สถานะหลังปรับ:</b> <b>{status_label}</b>\n"
+        f"📊 <b>สถานะหลังปรับ:</b> <b>{status_badge}</b>\n"
         f"👑 <b>ดำเนินการโดย:</b> {admin_display} (<code>{admin_id_str}</code>)\n"
         f"📅 <b>เวลาบันทึก:</b> <code>{format_thai_datetime(now)} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -1795,6 +1817,7 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
                 joined_at=now,
                 expires_at=now + timedelta(days=exact_days, minutes=exact_minutes) if is_positive else now,
                 created_at=now,
+                source_label=f"VIP {duration_label} (Admin กำหนดตรง)" if is_positive else "หมดอายุ (Admin กำหนด 0 วัน)",
             )
             session.add(sub)
             old_expires_at = None
@@ -1804,11 +1827,13 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
         if is_positive:
             new_expires_at = now + timedelta(days=exact_days, minutes=exact_minutes)
             sub_status_new = SubStatus.ACTIVE.value
+            sub.source_label = f"VIP {duration_label} (Admin กำหนดตรง)"
             if not sub.joined_at:
                 sub.joined_at = now
         else:
             new_expires_at = now
             sub_status_new = SubStatus.EXPIRED.value
+            sub.source_label = "หมดอายุ (Admin กำหนด 0 วัน)"
 
         sub.expires_at = new_expires_at
         sub.status = sub_status_new
@@ -1834,7 +1859,7 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
     new_exp_thai = format_thai_datetime(new_expires_at)
     time_rem = format_time_remaining(new_expires_at)
     user_header = format_user_title(user.full_name, user.username, target_uid)
-    status_label, _ = subscription_status_label(sub)
+    status_badge = format_subscription_status_display(sub)
     admin_display = f"@{message.from_user.username}" if (message.from_user and message.from_user.username) else (html.escape(message.from_user.full_name) if message.from_user else "Admin")
     admin_id_str = str(message.from_user.id) if message.from_user else "-"
 
@@ -1846,7 +1871,7 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
         f"🎯 <b>ตั้งเวลาคงเหลือ:</b> <b>{duration_label}</b> (นับจากตอนนี้)\n"
         f"⏳ <b>วันหมดอายุเดิม:</b> <code>{old_exp_thai} น.</code>\n"
         f"🚀 <b>วันหมดอายุใหม่:</b> <code>{new_exp_thai} น.</code> (<i>คงเหลือ {time_rem}</i>)\n"
-        f"📊 <b>สถานะหลังปรับ:</b> <b>{status_label}</b>\n"
+        f"📊 <b>สถานะหลังปรับ:</b> <b>{status_badge}</b>\n"
         f"👑 <b>ดำเนินการโดย:</b> {admin_display} (<code>{admin_id_str}</code>)\n"
         f"📅 <b>เวลาบันทึก:</b> <code>{format_thai_datetime(now)} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
