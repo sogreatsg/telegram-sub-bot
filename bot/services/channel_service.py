@@ -43,16 +43,14 @@ def get_all_target_channel_ids() -> List[int]:
 
 def get_user_target_channel_id(user: Optional[User]) -> int:
     """
-    คืนค่า Channel ID เป้าหมายของผู้ใช้คนนี้:
-    - หากมีการตั้งค่า SECONDARY_CHANNEL_ID (โหมดใช้งาน Channel ใหม่ V.2):
-      * หากผู้ใช้ถูกแอดมินกำหนดล็อคให้อยู่ห้องเดิมแบบเจาะจง (assigned_channel == 'PRIMARY_EXPLICIT') -> คืนค่า Primary CHANNEL_ID
-      * นอกเหนือจากนั้นทั้งหมด (ผู้ใช้ใหม่, สมัครใหม่, ขอทดลองใช้, ย้ายห้องแล้ว) -> คืนค่า SECONDARY_CHANNEL_ID (BareLive V.2)
-    - หากไม่มี SECONDARY_CHANNEL_ID -> คืนค่า Primary CHANNEL_ID ตามปกติ
+    คืนค่า Channel ID เป้าหมายของผู้ใช้:
+    - จะเป็น Channel ใหม่ (V.2 / SECONDARY_CHANNEL_ID) ก็ต่อเมื่อผู้ใช้ได้รับการเชิญ/ย้ายจากแอดมินแล้วเท่านั้น
+      (is_moved_to_secondary=True หรือ assigned_channel='SECONDARY')
+    - นอกเหนือจากนั้นทั้งหมด (ผู้ใช้ทั่วไป, ผู้ใช้ใหม่, ขอทดลองใช้) -> คืนค่า Channel หลัก V.1 (CHANNEL_ID) ตามปกติ
     """
-    if config.SECONDARY_CHANNEL_ID:
-        if user and getattr(user, "assigned_channel", None) == "PRIMARY_EXPLICIT":
-            return config.CHANNEL_ID
-        return config.SECONDARY_CHANNEL_ID
+    if config.SECONDARY_CHANNEL_ID and user:
+        if getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", None) == "SECONDARY":
+            return config.SECONDARY_CHANNEL_ID
     return config.CHANNEL_ID
 
 

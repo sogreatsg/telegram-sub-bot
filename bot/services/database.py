@@ -366,8 +366,8 @@ async def get_or_create_user(
         referral_count=0,
         referral_bonus_days=0,
         referral_rewarded=False,
-        assigned_channel="SECONDARY" if config.SECONDARY_CHANNEL_ID else "PRIMARY",
-        is_moved_to_secondary=True if config.SECONDARY_CHANNEL_ID else False,
+        assigned_channel="PRIMARY",
+        is_moved_to_secondary=False,
     )
     session.add(new_user)
     await session.flush()

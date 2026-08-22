@@ -2074,7 +2074,7 @@ async def handle_admin_unmove_user_command(message: Message):
             return
 
         user.is_moved_to_secondary = False
-        user.assigned_channel = "PRIMARY_EXPLICIT"
+        user.assigned_channel = "PRIMARY"
         session.add(user)
         await session.commit()
 
@@ -2264,7 +2264,7 @@ def build_admin_user_action_keyboard(user: Optional[User], user_id: int) -> Inli
     """สร้าง Inline Keyboard ปุ่มลัดสำหรับจัดการสมาชิกในเมนู /user"""
     is_moved = False
     if user and config.SECONDARY_CHANNEL_ID:
-        is_moved = getattr(user, "assigned_channel", None) != "PRIMARY_EXPLICIT"
+        is_moved = getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", None) == "SECONDARY"
 
     sec_title = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
     pri_title = get_channel_label(config.CHANNEL_ID)
@@ -2492,7 +2492,7 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
 
     is_moved = False
     if user and config.SECONDARY_CHANNEL_ID:
-        is_moved = getattr(user, "assigned_channel", None) != "PRIMARY_EXPLICIT"
+        is_moved = getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", None) == "SECONDARY"
     sec_title = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
     pri_title = get_channel_label(config.CHANNEL_ID)
 
@@ -3104,7 +3104,7 @@ async def handle_admin_quick_unmove_callback(callback: CallbackQuery, bot: Bot):
             return
 
         user.is_moved_to_secondary = False
-        user.assigned_channel = "PRIMARY_EXPLICIT"
+        user.assigned_channel = "PRIMARY"
         session.add(user)
         await session.commit()
 
