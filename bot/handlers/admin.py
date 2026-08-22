@@ -706,11 +706,11 @@ async def handle_admin_menu_audit_callback(callback: CallbackQuery, bot: Bot):
         member_count = await bot.get_chat_member_count(chat_id=config.CHANNEL_ID)
         bot_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=bot_info.id)
 
-        status_lines.append(f"📢 <b>Channel:</b> {html.escape(chat_info.title or '')} (<code>{config.CHANNEL_ID}</code>)")
-        status_lines.append(f"👥 <b>จำนวนสมาชิกใน Telegram:</b> {member_count} คน")
+        status_lines.append(f"📢 <b>Channel VIP หลัก:</b> {html.escape(chat_info.title or '')} (<code>{config.CHANNEL_ID}</code>)")
+        status_lines.append(f"👥 <b>จำนวนสมาชิก:</b> {member_count} คน")
         
         is_admin = bot_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
-        status_lines.append(f"🤖 <b>สถานะบอทใน Channel:</b> {'✅ Administrator' if is_admin else '❌ ไม่ได้เป็น Admin'}")
+        status_lines.append(f"🤖 <b>สถานะบอท:</b> {'✅ Administrator' if is_admin else '❌ ไม่ได้เป็น Admin'}")
 
         if is_admin and hasattr(bot_member, "can_restrict_members"):
             can_ban = bot_member.can_restrict_members
@@ -718,7 +718,28 @@ async def handle_admin_menu_audit_callback(callback: CallbackQuery, bot: Bot):
             status_lines.append(f"   • สิทธิ์เตะ/แบน (Ban Users): {'✅ มีสิทธิ์' if can_ban else '❌ ขาดสิทธิ์ (สำคัญมาก!)'}")
             status_lines.append(f"   • สิทธิ์สร้างลิงก์เชิญ: {'✅ มีสิทธิ์' if can_invite else '❌ ขาดสิทธิ์'}")
     except Exception as e:
-        status_lines.append(f"⚠️ <b>ตรวจสอบ Channel ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
+        status_lines.append(f"⚠️ <b>ตรวจสอบ Channel VIP หลักล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
+
+    if config.SECONDARY_CHANNEL_ID:
+        status_lines.append("")
+        try:
+            sec_chat_info = await bot.get_chat(chat_id=config.SECONDARY_CHANNEL_ID)
+            sec_member_count = await bot.get_chat_member_count(chat_id=config.SECONDARY_CHANNEL_ID)
+            sec_bot_member = await bot.get_chat_member(chat_id=config.SECONDARY_CHANNEL_ID, user_id=bot_info.id)
+
+            status_lines.append(f"🌟 <b>Channel ใหม่ (Target):</b> {html.escape(sec_chat_info.title or '')} (<code>{config.SECONDARY_CHANNEL_ID}</code>)")
+            status_lines.append(f"👥 <b>จำนวนสมาชิก:</b> {sec_member_count} คน")
+            
+            sec_is_admin = sec_bot_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+            status_lines.append(f"🤖 <b>สถานะบอท:</b> {'✅ Administrator' if sec_is_admin else '❌ ไม่ได้เป็น Admin'}")
+
+            if sec_is_admin and hasattr(sec_bot_member, "can_restrict_members"):
+                sec_can_ban = sec_bot_member.can_restrict_members
+                sec_can_invite = sec_bot_member.can_invite_users
+                status_lines.append(f"   • สิทธิ์เตะ/แบน (Ban Users): {'✅ มีสิทธิ์' if sec_can_ban else '❌ ขาดสิทธิ์'}")
+                status_lines.append(f"   • สิทธิ์สร้างลิงก์เชิญ: {'✅ มีสิทธิ์' if sec_can_invite else '❌ ขาดสิทธิ์'}")
+        except Exception as e:
+            status_lines.append(f"⚠️ <b>ตรวจสอบ Channel ใหม่ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
 
     status_lines.append("\n━━━━━━━━━━━━━━━━━━━━")
     status_lines.append("💡 <i>พิมพ์ <code>/summary</code> เพื่อดูรายชื่อสมาชิก Active\nหรือ <code>/kick [User ID]</code> เพื่อสั่งเตะสมาชิกออกจากห้อง</i>")
@@ -872,18 +893,20 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
 
         if not user and query_clean.isdigit():
             target_uid = int(query_clean)
-            try:
-                cm = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid)
-                tg_u = getattr(cm, "user", None)
-                if tg_u:
-                    user, _ = await get_or_create_user(
-                        session=session,
-                        telegram_id=target_uid,
-                        username=tg_u.username,
-                        full_name=tg_u.full_name,
-                    )
-            except Exception:
-                pass
+            for cid in get_all_target_channel_ids():
+                try:
+                    cm = await bot.get_chat_member(chat_id=cid, user_id=target_uid)
+                    tg_u = getattr(cm, "user", None)
+                    if tg_u:
+                        user, _ = await get_or_create_user(
+                            session=session,
+                            telegram_id=target_uid,
+                            username=tg_u.username,
+                            full_name=tg_u.full_name,
+                        )
+                        break
+                except Exception:
+                    pass
 
         if not user:
             return f"❌ <b>ไม่พบข้อมูลผู้ใช้:</b> <code>{html.escape(query)}</code> ในระบบฐานข้อมูล", None
@@ -909,45 +932,27 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
         )
         slips = (await session.execute(slips_stmt)).scalars().all()
 
-    # ตรวจสอบสถานะจริงใน Channel พร้อมอัปเดตชื่อผู้ใช้ล่าสุดจาก Telegram
-    channel_status_str = "ไม่ทราบสถานะ"
-    is_in_channel = False
-    try:
-        chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user.telegram_id)
-        status_map = {
-            ChatMemberStatus.CREATOR: "👑 เจ้าของห้อง (Creator)",
-            ChatMemberStatus.ADMINISTRATOR: "🛡️ ผู้ดูแล (Admin)",
-            ChatMemberStatus.MEMBER: "🟢 อยู่ใน Channel (Member)",
-            ChatMemberStatus.LEFT: "⚪ ออกจากห้องไปแล้ว (Left)",
-            ChatMemberStatus.KICKED: "🔴 ถูกแบน/เตะออก (Kicked/Banned)",
-            ChatMemberStatus.RESTRICTED: "🟡 ถูกจำกัดสิทธิ์ (Restricted)",
-        }
-        channel_status_str = status_map.get(chat_member.status, chat_member.status)
-        is_in_channel = chat_member.status in (
-            ChatMemberStatus.MEMBER,
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.CREATOR,
-            ChatMemberStatus.RESTRICTED,
-        )
-        tg_u = getattr(chat_member, "user", None)
-        if tg_u:
-            updated_meta = False
-            if tg_u.full_name and user.full_name != tg_u.full_name:
-                user.full_name = tg_u.full_name
-                updated_meta = True
-            if tg_u.username and user.username != tg_u.username:
-                user.username = tg_u.username
-                updated_meta = True
-            if updated_meta:
-                async with get_session() as session:
-                    db_u = (await session.execute(select(User).where(User.telegram_id == user.telegram_id))).scalar_one_or_none()
-                    if db_u:
-                        db_u.full_name = user.full_name
-                        db_u.username = user.username
-                        session.add(db_u)
-    except Exception as e:
-        channel_status_str = f"ไม่อยู่ใน Channel / ตรวจสอบไม่ได้ ({e})"
-        is_in_channel = False
+    # ตรวจสอบสถานะจริงในทุก Channel พร้อมอัปเดตชื่อผู้ใช้ล่าสุดจาก Telegram
+    in_channels, status_map, tg_u = await check_user_presence_all_channels(bot, user.telegram_id)
+    channel_status_str = format_user_channel_presence(in_channels)
+    is_in_channel = len(in_channels) > 0
+
+    if tg_u:
+        updated_meta = False
+        if tg_u.full_name and user.full_name != tg_u.full_name:
+            user.full_name = tg_u.full_name
+            updated_meta = True
+        if tg_u.username and user.username != tg_u.username:
+            user.username = tg_u.username
+            updated_meta = True
+        if updated_meta:
+            async with get_session() as session:
+                db_u = (await session.execute(select(User).where(User.telegram_id == user.telegram_id))).scalar_one_or_none()
+                if db_u:
+                    db_u.full_name = user.full_name
+                    db_u.username = user.username
+                    session.add(db_u)
+                    await session.commit()
 
     # --- คำนวณหมวดที่ 1: การชวนเพื่อน (Referral Ledger) ---
     total_referred_count = len(referred_users)
@@ -1419,7 +1424,7 @@ async def handle_admin_kick_command(message: Message, bot: Bot):
             select(Subscription)
             .where(
                 Subscription.user_id == target_uid,
-                Subscription.status.in_([SubStatus.ACTIVE.value, SubStatus.PENDING.value, SubStatus.KICK_FAILED.value]),
+                Subscription.status.in_([SubStatus.ACTIVE.value, SubStatus.PENDING.value, SubStatus.KICK_FAILED.value, SubStatus.EXPIRED.value]),
             )
         )
         subs = (await session.execute(stmt)).scalars().all()
@@ -2133,12 +2138,11 @@ async def handle_admin_reset_user_command(message: Message, bot: Bot):
         await session.execute(delete(Subscription).where(Subscription.user_id == target_uid))
         await session.execute(delete(User).where(User.telegram_id == target_uid))
 
-    # เตะออกจาก Channel (Soft-kick) เพื่อให้ลิงก์เก่าไม่ค้าง และผู้ใช้ออกจากห้องจริง
+    # เตะออกจากทุก Channel (Soft-kick) เพื่อให้ลิงก์เก่าไม่ค้าง และผู้ใช้ออกจากห้องจริง
     channel_kicked = False
     try:
-        await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, revoke_messages=False)
-        await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, only_if_banned=True)
-        channel_kicked = True
+        kick_res = await kick_user_from_all_target_channels(bot, target_uid)
+        channel_kicked = len(kick_res["failed_channels"]) == 0 or len(kick_res["kicked_channels"]) > 0
     except Exception as e:
         logger.debug(f"Soft-kick during reset for {target_uid}: {e}")
 
@@ -2202,11 +2206,10 @@ async def handle_admin_reset_trial_command(message: Message, bot: Bot):
             sub.pending_since = None
             session.add(sub)
 
-    # เตะออกจาก Channel หากกำลังใช้ trial
+    # เตะออกจากทุก Channel หากกำลังใช้ trial
     if is_trial_sub:
         try:
-            await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, revoke_messages=False)
-            await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, only_if_banned=True)
+            await kick_user_from_all_target_channels(bot, target_uid)
         except Exception:
             pass
 
@@ -2903,20 +2906,8 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
         slips_stmt = select(PaymentSlip).where(PaymentSlip.user_id == user_id).order_by(PaymentSlip.id.desc())
         slips = (await session.execute(slips_stmt)).scalars().all()
 
-    channel_status_str = "ไม่ทราบสถานะ"
-    try:
-        chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id)
-        status_map = {
-            ChatMemberStatus.CREATOR: "👑 เจ้าของห้อง (Creator)",
-            ChatMemberStatus.ADMINISTRATOR: "🛡️ ผู้ดูแล (Admin)",
-            ChatMemberStatus.MEMBER: "🟢 อยู่ใน Channel (Member)",
-            ChatMemberStatus.LEFT: "⚪ ออกจากห้องไปแล้ว (Left)",
-            ChatMemberStatus.KICKED: "🔴 ถูกแบน/เตะออก (Kicked/Banned)",
-            ChatMemberStatus.RESTRICTED: "🟡 ถูกจำกัดสิทธิ์ (Restricted)",
-        }
-        channel_status_str = status_map.get(chat_member.status, chat_member.status)
-    except Exception as e:
-        channel_status_str = f"ไม่อยู่ใน Channel ({e})"
+    in_channels, _, _ = await check_user_presence_all_channels(bot, user_id)
+    channel_status_str = format_user_channel_presence(in_channels)
 
     user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
     full_name_safe = html.escape(user.full_name or "")
@@ -3158,8 +3149,7 @@ async def handle_admin_reset_trial_callback(callback: CallbackQuery, bot: Bot):
 
     if is_trial_sub:
         try:
-            await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, revoke_messages=False)
-            await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, only_if_banned=True)
+            await kick_user_from_all_target_channels(bot, target_uid)
         except Exception:
             pass
 
