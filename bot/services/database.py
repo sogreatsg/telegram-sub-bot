@@ -302,6 +302,14 @@ async def init_db() -> None:
             except Exception:
                 pass
             try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN assigned_channel VARCHAR(32) DEFAULT 'PRIMARY';"))
+            except Exception:
+                pass
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN is_moved_to_secondary BOOLEAN DEFAULT 0;"))
+            except Exception:
+                pass
+            try:
                 await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_created_at ON users (created_at DESC);"))
             except Exception:
                 pass

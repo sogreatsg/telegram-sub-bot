@@ -14,6 +14,8 @@ from bot.services.database import get_session
 from bot.services.chat_logger import log_chat_message
 from bot.services.subscription import grant_subscription
 
+from bot.services.channel_service import get_user_target_channel_id, get_channel_label, unban_user_in_channel
+
 logger = logging.getLogger(__name__)
 config = get_settings()
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
@@ -144,18 +146,22 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
     if sub_extended:
         logger.info(f"Referral bonus: Extended active sub for User {referrer_id} by +1 day. New expires_at: {new_expires_at}")
 
+    target_channel_id = get_user_target_channel_id(referrer)
+    target_channel_label = get_channel_label(target_channel_id)
+
     # 4. หากไม่มี Active Sub -> สร้าง Invite Link ส่งให้ผู้แนะนำ
     if not sub_extended:
         try:
+            await unban_user_in_channel(bot, target_channel_id, referrer_id)
             invite_obj = await bot.create_chat_invite_link(
-                chat_id=config.CHANNEL_ID,
+                chat_id=target_channel_id,
                 member_limit=1,
                 expire_date=now + timedelta(days=7),
                 name=f"RefBonus-{referrer_id}",
             )
             invite_url = invite_obj.invite_link
         except Exception as e:
-            logger.error(f"Failed to generate referral bonus invite link for User {referrer_id}: {e}")
+            logger.error(f"Failed to generate referral bonus invite link for User {referrer_id} in {target_channel_id}: {e}")
 
     # 5. ส่งข้อความแจ้งเตือนทาง DM ให้ผู้แนะนำ
     try:
@@ -170,11 +176,11 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
                 f"👥 <b>ชวนเพื่อนสำเร็จสะสม:</b> <b>{referrer.referral_count} คน</b>\n"
                 f"🏆 <b>โบนัสสะสมทั้งหมด:</b> <b>{referrer.referral_bonus_days} วัน</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "💡 <i>ระบบสะสมและขยายเวลาให้โดยอัตโนมัติ ชวนเพื่อนเพิ่มเพื่อรับวันใช้งานฟรีต่อเนื่องได้เลยครับ!</i>"
+                f"💡 <i>ระบบสะสมและขยายเวลาให้โดยอัตโนมัติใน {target_channel_label} ชวนเพื่อนเพิ่มเพื่อรับวันใช้งานฟรีต่อเนื่องได้เลยครับ!</i>"
             )
         else:
             bonus_total_days = grant.subscription.pending_days or referrer.referral_bonus_days or 1
-            link_info = f"\n🔗 <b>ลิงก์เข้า Channel VIP ของคุณ:</b>\n{invite_url}\n\n⏱️ <i>เวลานับถอยหลัง {bonus_total_days} วัน จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</i>" if invite_url else ""
+            link_info = f"\n🔗 <b>ลิงก์เข้า {target_channel_label} ของคุณ:</b>\n{invite_url}\n\n⏱️ <i>เวลานับถอยหลัง {bonus_total_days} วัน จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</i>" if invite_url else ""
             dm_text = (
                 "🎉 <b>ยินดีด้วย! เพื่อนที่คุณแนะนำได้เข้าร่วมทดลองใช้งานแล้ว</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"

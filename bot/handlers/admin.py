@@ -22,6 +22,18 @@ from bot.services.reconciliation import reconcile_user, reconcile_all_users, for
 from bot.services.chat_logger import log_chat_message
 from bot.services.referral import is_referral_active, update_referral_settings
 from bot.services.trial import is_trial_active, update_trial_settings
+from bot.services.channel_service import (
+    get_user_target_channel_id,
+    get_all_target_channel_ids,
+    is_target_channel,
+    is_secondary_channel,
+    get_channel_label,
+    kick_user_from_all_target_channels,
+    unban_user_in_channel,
+    unban_user_in_all_target_channels,
+    check_user_in_channel,
+    check_user_in_target_channels,
+)
 from bot.handlers.user_menu import get_main_menu_keyboard
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, ensure_utc, split_text_chunks, format_user_title, format_remaining_time
 
@@ -233,12 +245,15 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
             additional_days, additional_minutes = parse_plan_days(requested_plan)
             grant_type_value = GrantType.PROMOTION.value if requested_plan == PlanType.PROMOTION.value else GrantType.PURCHASE.value
 
-            # ตรวจสอบสถานะจริงใน Channel (ใช้แค่ตัดสินใจว่าต้องออก invite link ใหม่ให้หรือไม่
-            # ไม่ใช้ตัดสินว่าจะบวกวันให้หรือไม่ — grant_subscription() จะบวกวันทันทีถ้ามี ACTIVE
-            # subscription ที่ยังไม่หมดอายุอยู่แล้วในฐานข้อมูล โดยไม่ต้องรอผู้ใช้กดเข้า Channel)
+            # ดึง User เพื่อหา target channel ประจำตัว (หากถูกย้ายไป Channel ใหม่ จะใช้ Channel ใหม่)
+            target_user_obj = await session.get(User, target_user_id)
+            target_channel_id = get_user_target_channel_id(target_user_obj)
+            target_channel_label = get_channel_label(target_channel_id)
+
+            # ตรวจสอบสถานะจริงใน Channel เป้าหมาย
             is_in_channel = False
             try:
-                chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_user_id)
+                chat_member = await bot.get_chat_member(chat_id=target_channel_id, user_id=target_user_id)
                 is_in_channel = chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
             except Exception:
                 is_in_channel = False
@@ -258,7 +273,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
 
             if is_stack_extension:
                 logger.info(
-                    f"Approve slip #{slip_id}: Extended active sub for User {target_user_id} by +{additional_days}d {additional_minutes}m. "
+                    f"Approve slip #{slip_id}: Extended active sub for User {target_user_id} by +{additional_days}d {additional_minutes}m in {target_channel_label}. "
                     f"New expires_at: {new_expires_at}"
                 )
 
@@ -279,7 +294,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 f"📅 <b>วันหมดอายุใหม่ของคุณ:</b> <code>{exp_thai} น.</code>\n"
                 f"⏰ <b>เวลาคงเหลือรวม:</b> {time_rem}\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "💡 <i>คุณสามารถรับชมเนื้อหาใน Channel VIP ได้ต่อเนื่องทันทีโดยไม่ต้องกดเข้าห้องใหม่ครับ! 🚀</i>"
+                f"💡 <i>คุณสามารถรับชมเนื้อหาใน {target_channel_label} ได้ต่อเนื่องทันทีโดยไม่ต้องกดเข้าห้องใหม่ครับ! 🚀</i>"
             )
             try:
                 await bot.send_message(
@@ -300,7 +315,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 f"📦 <b>แพ็กเกจ:</b> <b>{plan_badge} ({plan_desc})</b> เปิดใช้งานให้ทันทีแล้วครับ\n"
                 f"📅 <b>วันหมดอายุ:</b> <code>{exp_thai} น.</code>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "💡 <i>คุณอยู่ใน Channel VIP อยู่แล้ว สามารถใช้งานต่อได้ทันทีโดยไม่ต้องกดลิงก์ใหม่ครับ! 🚀</i>"
+                f"💡 <i>คุณอยู่ใน {target_channel_label} อยู่แล้ว สามารถใช้งานต่อได้ทันทีโดยไม่ต้องกดลิงก์ใหม่ครับ! 🚀</i>"
             )
             try:
                 await bot.send_message(
@@ -314,27 +329,19 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
 
         else:
             # ปลดแบนผู้ใช้ใน Channel ก่อนสร้างลิงก์เสมอ (ป้องกันกรณีเคยถูกเตะแล้วติด blacklist ใน Telegram)
-            try:
-                await bot.unban_chat_member(
-                    chat_id=config.CHANNEL_ID,
-                    user_id=target_user_id,
-                    only_if_banned=True,
-                )
-                logger.info(f"Auto-unbanned User {target_user_id} in Channel {config.CHANNEL_ID} before creating invite link.")
-            except Exception as e:
-                logger.debug(f"Could not unban User {target_user_id} before creating invite link: {e}")
+            await unban_user_in_channel(bot, target_channel_id, target_user_id)
 
             # สร้างลิงก์เชิญแบบ 1 ครั้งให้ผู้ใช้
             try:
                 invite_link_obj = await bot.create_chat_invite_link(
-                    chat_id=config.CHANNEL_ID,
+                    chat_id=target_channel_id,
                     member_limit=1,
                     expire_date=now + timedelta(days=7),
                     name=f"VIP-{target_user_id}",
                 )
                 invite_url = invite_link_obj.invite_link
             except Exception as e:
-                logger.error(f"Failed to generate invite link for approved user {target_user_id}: {e}", exc_info=True)
+                logger.error(f"Failed to generate invite link for approved user {target_user_id} in {target_channel_id}: {e}", exc_info=True)
                 await callback.answer(
                     "⚠️ ไม่สามารถสร้างลิงก์เชิญได้! กรุณาตรวจสอบว่าบอทมีสิทธิ์สร้างลิงก์ใน Channel",
                     show_alert=True,
@@ -345,7 +352,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 f"📦 <b>แพ็กเกจ:</b> <b>{plan_badge} ({plan_desc})</b> พร้อมใช้งานแล้วครับ\n\n"
-                f"🔗 <b>ลิงก์เชิญเข้า Channel ส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
+                f"🔗 <b>ลิงก์เชิญเข้า {target_channel_label} (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
                 "📌 <b>ข้อควรทราบ:</b>\n"
                 "• ลิงก์นี้สามารถใช้งานได้เพียง 1 ครั้งเท่านั้น\n"
                 f"• <b>ระยะเวลาสมาชิก {plan_desc} จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</b>\n"
@@ -354,7 +361,7 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
             )
             join_keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="🚀 เข้าร่วม Channel VIP ตอนนี้", url=invite_url)]
+                    [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_label} ตอนนี้", url=invite_url)]
                 ]
             )
             try:
@@ -571,6 +578,8 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "• <code>/add_vip [User ID/@user] [จำนวนวัน]</code> — ➕ เพิ่มวัน VIP (ส่ง DM บอก User)\n"
         "• <code>/deduct_vip [User ID/@user] [จำนวนวัน]</code> — ➖ ลดวัน VIP (ไม่ส่ง DM)\n"
         "• <code>/set_vip [User ID/@user] [จำนวนวัน]</code> — 🎯 ตั้งค่าวันคงเหลือใหม่โดยตรง\n"
+        "• <code>/move_user [User ID/@user]</code> — 🚀 ย้ายสมาชิกไป Channel ใหม่ (ส่งลิงก์ 7 วัน)\n"
+        "• <code>/unmove_user [User ID/@user]</code> — 🔄 ย้ายสมาชิกกลับ Channel เดิม\n"
         "• <code>/kick [User ID]</code> — สั่งเตะออกจาก Channel VIP ทันที\n\n"
         "🗑️ <b>7. รีเซ็ตข้อมูล:</b>\n"
         "• <code>/reset_user [User ID/@user]</code> — ล้างข้อมูลผู้ใช้ทั้งหมดเพื่อเริ่มใหม่\n"
@@ -1278,18 +1287,18 @@ async def handle_admin_audit_command(message: Message, bot: Bot):
 
     status_lines = ["🔍 <b>ตรวจสอบสถานะและความพร้อมของระบบ (System Audit)</b>\n"]
     
-    # 1. ตรวจสอบ Bot ใน Telegram Channel
+    # 1. ตรวจสอบ Bot ใน Telegram Channels ทั้งหมด
     try:
         bot_info = await bot.get_me()
         chat_info = await bot.get_chat(chat_id=config.CHANNEL_ID)
         member_count = await bot.get_chat_member_count(chat_id=config.CHANNEL_ID)
         bot_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=bot_info.id)
 
-        status_lines.append(f"📢 <b>Channel:</b> {html.escape(chat_info.title or '')} (<code>{config.CHANNEL_ID}</code>)")
-        status_lines.append(f"👥 <b>จำนวนสมาชิกใน Telegram:</b> {member_count} คน")
+        status_lines.append(f"📢 <b>Channel VIP หลัก:</b> {html.escape(chat_info.title or '')} (<code>{config.CHANNEL_ID}</code>)")
+        status_lines.append(f"👥 <b>จำนวนสมาชิก:</b> {member_count} คน")
         
         is_admin = bot_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
-        status_lines.append(f"🤖 <b>สถานะบอทใน Channel:</b> {'✅ Administrator' if is_admin else '❌ ไม่ได้เป็น Admin'}")
+        status_lines.append(f"🤖 <b>สถานะบอท:</b> {'✅ Administrator' if is_admin else '❌ ไม่ได้เป็น Admin'}")
 
         if is_admin and hasattr(bot_member, "can_restrict_members"):
             can_ban = bot_member.can_restrict_members
@@ -1297,7 +1306,28 @@ async def handle_admin_audit_command(message: Message, bot: Bot):
             status_lines.append(f"   • สิทธิ์เตะ/แบน (Ban Users): {'✅ มีสิทธิ์' if can_ban else '❌ ขาดสิทธิ์ (สำคัญมาก!)'}")
             status_lines.append(f"   • สิทธิ์สร้างลิงก์เชิญ: {'✅ มีสิทธิ์' if can_invite else '❌ ขาดสิทธิ์'}")
     except Exception as e:
-        status_lines.append(f"⚠️ <b>ตรวจสอบ Channel ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
+        status_lines.append(f"⚠️ <b>ตรวจสอบ Channel VIP หลักล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
+
+    if config.SECONDARY_CHANNEL_ID:
+        status_lines.append("")
+        try:
+            sec_chat_info = await bot.get_chat(chat_id=config.SECONDARY_CHANNEL_ID)
+            sec_member_count = await bot.get_chat_member_count(chat_id=config.SECONDARY_CHANNEL_ID)
+            sec_bot_member = await bot.get_chat_member(chat_id=config.SECONDARY_CHANNEL_ID, user_id=bot_info.id)
+
+            status_lines.append(f"🌟 <b>Channel ใหม่ (Target):</b> {html.escape(sec_chat_info.title or '')} (<code>{config.SECONDARY_CHANNEL_ID}</code>)")
+            status_lines.append(f"👥 <b>จำนวนสมาชิก:</b> {sec_member_count} คน")
+            
+            sec_is_admin = sec_bot_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+            status_lines.append(f"🤖 <b>สถานะบอท:</b> {'✅ Administrator' if sec_is_admin else '❌ ไม่ได้เป็น Admin'}")
+
+            if sec_is_admin and hasattr(sec_bot_member, "can_restrict_members"):
+                sec_can_ban = sec_bot_member.can_restrict_members
+                sec_can_invite = sec_bot_member.can_invite_users
+                status_lines.append(f"   • สิทธิ์เตะ/แบน (Ban Users): {'✅ มีสิทธิ์' if sec_can_ban else '❌ ขาดสิทธิ์'}")
+                status_lines.append(f"   • สิทธิ์สร้างลิงก์เชิญ: {'✅ มีสิทธิ์' if sec_can_invite else '❌ ขาดสิทธิ์'}")
+        except Exception as e:
+            status_lines.append(f"⚠️ <b>ตรวจสอบ Channel ใหม่ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
 
     status_lines.append("\n━━━━━━━━━━━━━━━━━━━━")
     status_lines.append("💡 <i>พิมพ์ <code>/audit_user [User ID]</code> เพื่อตรวจสอบยอดและประวัติสมาชิกรายบุคคล\nหรือ <code>/summary</code> เพื่อดูรายชื่อสมาชิก Active</i>")
@@ -1307,7 +1337,7 @@ async def handle_admin_audit_command(message: Message, bot: Bot):
 
 @router.message(Command("kick"))
 async def handle_admin_kick_command(message: Message, bot: Bot):
-    """คำสั่งแอดมินสำหรับบังคับเตะผู้ใช้ออกจาก Channel: /kick <user_id>"""
+    """คำสั่งแอดมินสำหรับบังคับเตะผู้ใช้ออกจากทุก Target Channel: /kick <user_id>"""
     if message.chat.id != config.ADMIN_GROUP_ID:
         return
 
@@ -1322,16 +1352,10 @@ async def handle_admin_kick_command(message: Message, bot: Bot):
         await message.answer("❌ User ID ต้องเป็นตัวเลขเท่านั้น", parse_mode="HTML")
         return
 
-    # ดำเนินการ Soft-kick
-    kicked = False
-    err_msg = ""
-    try:
-        await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, revoke_messages=False)
-        await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, only_if_banned=True)
-        kicked = True
-    except Exception as e:
-        err_msg = str(e)
-        logger.error(f"Manual kick failed for User {target_uid}: {e}")
+    # ดำเนินการ Soft-kick จากทุก Channel (ทั้งห้องเดิมและห้องใหม่)
+    kick_results = await kick_user_from_all_target_channels(bot, target_uid)
+    kicked = len(kick_results["failed_channels"]) == 0 or len(kick_results["kicked_channels"]) > 0
+    err_msg = "; ".join(f"{cid}: {err}" for cid, err in kick_results["errors"].items()) if kick_results["errors"] else ""
 
     # อัปเดตสถานะใน DB
     async with get_session() as session:
@@ -1346,6 +1370,7 @@ async def handle_admin_kick_command(message: Message, bot: Bot):
         for s in subs:
             s.status = SubStatus.KICKED.value
             session.add(s)
+        await session.commit()
 
     if kicked:
         # ส่งข้อความแจ้งเตือนทาง DM ให้ผู้ใช้
@@ -1418,10 +1443,13 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         else:
             target_uid = user.telegram_id
 
-        # ตรวจสอบสถานะจริงใน Channel
+        target_channel_id = get_user_target_channel_id(user)
+        target_channel_label = get_channel_label(target_channel_id)
+
+        # ตรวจสอบสถานะจริงใน Channel เป้าหมาย
         is_in_channel = False
         try:
-            chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid)
+            chat_member = await bot.get_chat_member(chat_id=target_channel_id, user_id=target_uid)
             is_in_channel = chat_member.status in (
                 ChatMemberStatus.MEMBER,
                 ChatMemberStatus.RESTRICTED,
@@ -1449,22 +1477,23 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         is_stack_extension = grant.is_stack_extension
         new_expires_at = grant.new_expires_at
         if is_stack_extension:
-            logger.info(f"Admin add_vip: Extended active sub for User {target_uid} by +{days} days. New expires_at: {new_expires_at}")
+            logger.info(f"Admin add_vip: Extended active sub for User {target_uid} by +{days} days in {target_channel_label}. New expires_at: {new_expires_at}")
 
         await session.commit()
 
     invite_url = "-"
     if not is_in_channel:
         try:
+            await unban_user_in_channel(bot, target_channel_id, target_uid)
             invite_link_obj = await bot.create_chat_invite_link(
-                chat_id=config.CHANNEL_ID,
+                chat_id=target_channel_id,
                 member_limit=1,
                 expire_date=now + timedelta(days=7),
                 name=f"ManualVIP-{target_uid}",
             )
             invite_url = invite_link_obj.invite_link
         except Exception as e:
-            logger.warning(f"Could not generate invite link: {e}")
+            logger.warning(f"Could not generate invite link for {target_channel_id}: {e}")
 
     # ส่ง DM หาผู้ใช้ (สำหรับ /add_vip)
     exp_thai = format_thai_datetime(new_expires_at) if new_expires_at else "-"
@@ -1478,19 +1507,19 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
                 f"⏳ <b>วันหมดอายุใหม่ของคุณ:</b> <code>{exp_thai} น.</code>\n"
                 f"⏰ <b>เวลาคงเหลือรวม:</b> {time_rem}\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "💡 <i>สามารถรับชมเนื้อหาใน Channel VIP ได้ต่อเนื่องทันทีครับ! 🚀</i>"
+                f"💡 <i>สามารถรับชมเนื้อหาใน {target_channel_label} ได้ต่อเนื่องทันทีครับ! 🚀</i>"
             )
         elif is_in_channel:
             dm_text = (
                 f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({days} วัน) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
                 f"⏳ <b>หมดอายุวันที่:</b> <code>{exp_thai} น.</code>\n\n"
-                "💡 <i>คุณอยู่ใน Channel VIP อยู่แล้ว ใช้งานได้ทันทีโดยไม่ต้องกดลิงก์ใหม่ครับ!</i>"
+                f"💡 <i>คุณอยู่ใน {target_channel_label} อยู่แล้ว ใช้งานได้ทันทีโดยไม่ต้องกดลิงก์ใหม่ครับ!</i>"
             )
         else:
             dm_text = (
                 f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({days} วัน) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
                 f"⏳ <b>หมดอายุวันที่:</b> <code>{exp_thai} น.</code>\n\n"
-                f"🔗 <b>ลิงก์เข้าร่วม Channel:</b>\n{invite_url}"
+                f"🔗 <b>ลิงก์เข้าร่วม {target_channel_label}:</b>\n{invite_url}"
             )
         await bot.send_message(
             chat_id=target_uid,
@@ -1729,6 +1758,183 @@ async def handle_admin_set_vip_command(message: Message, bot: Bot):
         "🔇 <i>หมายเหตุ: ไม่มีการส่งข้อความ DM แจ้งเตือนไปยังผู้ใช้</i>"
     )
     await message.answer(resp, parse_mode="HTML")
+
+
+@router.message(Command("move_user", "move", "migrate_user"))
+async def handle_admin_move_user_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับย้ายสมาชิกไปยัง Channel ใหม่ (Target Channel) พร้อมส่ง Invite Link 7 วัน: /move_user <User ID หรือ @username>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    if not config.SECONDARY_CHANNEL_ID:
+        await message.answer(
+            "⚠️ <b>ยังไม่ได้ตั้งค่า SECONDARY_CHANNEL_ID ใน .env</b>\n\n"
+            "กรุณาระบุ Channel ID ของห้องใหม่ในไฟล์ .env (เช่น <code>SECONDARY_CHANNEL_ID=-1001234567890</code>) "
+            "และรีสตาร์ทบอทก่อนใช้งานคำสั่งนี้ครับ 🙏",
+            parse_mode="HTML",
+        )
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/move_user [User ID หรือ @username]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/move_user 5125375696</code>\n"
+            "• <code>/move_user @some_user</code>\n\n"
+            "ℹ️ <i>คำสั่งนี้จะเปลี่ยน Channel ประจำตัวของผู้ใช้เป็น Channel ใหม่ และส่งลิงก์เชิญ (อายุ 7 วัน) ให้ทาง DM</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    now = datetime.now(timezone.utc)
+
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+
+        if not user:
+            if query.isdigit():
+                target_uid = int(query)
+                user, _ = await get_or_create_user(
+                    session=session,
+                    telegram_id=target_uid,
+                    full_name=f"User {target_uid}",
+                )
+            else:
+                await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+                return
+        else:
+            target_uid = user.telegram_id
+
+        # บันทึกสถานะว่าย้ายไปยังห้องใหม่แล้ว
+        user.is_moved_to_secondary = True
+        user.assigned_channel = "SECONDARY"
+        session.add(user)
+        await session.commit()
+
+    # ปลดแบนใน Channel ใหม่ก่อนสร้างลิงก์
+    await unban_user_in_channel(bot, config.SECONDARY_CHANNEL_ID, target_uid)
+
+    # สร้างลิงก์เชิญสำหรับ Channel ใหม่ (อายุ 7 วัน, ใช้งานได้ 1 ครั้ง)
+    invite_expire = now + timedelta(days=7)
+    invite_url = None
+    try:
+        invite_link_obj = await bot.create_chat_invite_link(
+            chat_id=config.SECONDARY_CHANNEL_ID,
+            member_limit=1,
+            expire_date=invite_expire,
+            name=f"Move-{target_uid}",
+        )
+        invite_url = invite_link_obj.invite_link
+    except Exception as e:
+        logger.error(f"Failed to generate move invite link for User {target_uid} in {config.SECONDARY_CHANNEL_ID}: {e}", exc_info=True)
+        await message.answer(
+            f"❌ <b>ไม่สามารถสร้างลิงก์เชิญสำหรับ Channel ใหม่ ({config.SECONDARY_CHANNEL_ID}) ได้!</b>\n\n"
+            f"สาเหตุ: <code>{html.escape(str(e))}</code>\n"
+            "กรุณาตรวจสอบว่าบอทเป็น Administrator ใน Channel ใหม่ และมีสิทธิ์สร้างลิงก์เชิญ (Invite Users)",
+            parse_mode="HTML",
+        )
+        return
+
+    # ส่ง DM ให้ผู้ใช้
+    user_header = format_user_title(user.full_name, user.username, target_uid)
+    expire_thai = format_thai_datetime(invite_expire)
+    user_dm_sent = False
+
+    user_move_text = (
+        "🎉 <b>คุณได้รับคำเชิญให้ย้ายเข้าสู่ VIP Channel ห้องใหม่!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "แอดมินได้ส่งลิงก์เชิญพิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่เรียบร้อยแล้วครับ 🚀\n\n"
+        f"🔗 <b>ลิงก์เชิญส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
+        f"⏳ <b>ลิงก์หมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📌 <i>ข้อควรทราบ: สิทธิ์และเวลาสมาชิกของคุณจะทำงานอย่างต่อเนื่องเหมือนเดิม กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ!</i>"
+    )
+
+    join_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🚀 เข้าร่วม Channel ใหม่ ตอนนี้", url=invite_url)]
+        ]
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=target_uid,
+            text=user_move_text,
+            reply_markup=join_kb,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        user_dm_sent = True
+    except Exception as e:
+        logger.warning(f"Could not send move DM to User {target_uid}: {e}")
+
+    try:
+        await log_chat_message(
+            user_id=target_uid,
+            sender_role="BOT",
+            message_text=f"[ระบบส่งลิงก์ย้าย Channel ใหม่ (อายุ 7 วัน): {invite_url}]"
+        )
+    except Exception:
+        pass
+
+    admin_reply = (
+        "🌟 <b>ย้ายสมาชิกไปยัง Channel ใหม่สำเร็จ!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
+        f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
+        f"📢 <b>Channel เป้าหมายใหม่:</b> <b>Channel ใหม่</b> (<code>{config.SECONDARY_CHANNEL_ID}</code>)\n"
+        f"⏳ <b>อายุลิงก์เชิญ:</b> 7 วัน (หมดอายุ: <code>{expire_thai} น.</code>)\n"
+        f"🔗 <b>Invite Link:</b>\n<code>{invite_url}</code>\n"
+        f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "ℹ️ <i>บันทึกสถานะผู้ใช้เป็น Channel ใหม่เรียบร้อย การซื้อ/ต่ออายุในอนาคตจะส่งลิงก์ห้องใหม่ให้อัตโนมัติ</i>\n"
+        "<i>เมื่อผู้ใช้กดเข้าร่วมห้องใหม่ ระบบจะส่งแจ้งเตือนเข้ากลุ่มแอดมินทันที</i>"
+    )
+
+    await message.answer(admin_reply, parse_mode="HTML", disable_web_page_preview=True)
+
+
+@router.message(Command("unmove_user", "move_user_back"))
+async def handle_admin_unmove_user_command(message: Message):
+    """คำสั่งแอดมินสำหรับย้ายผู้ใช้กลับสู่ Channel เดิม (Primary Channel): /unmove_user <User ID หรือ @username>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("❌ <b>วิธีใช้งาน:</b> <code>/unmove_user [User ID หรือ @username]</code>", parse_mode="HTML")
+        return
+
+    query = args[1].strip().lstrip("@")
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+
+        if not user:
+            await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+            return
+
+        user.is_moved_to_secondary = False
+        user.assigned_channel = "PRIMARY"
+        session.add(user)
+        await session.commit()
+
+    user_header = format_user_title(user.full_name, user.username, user.telegram_id)
+    await message.answer(
+        f"🔄 <b>ย้ายผู้ใช้กลับสู่ Channel หลักเดิมเรียบร้อย!</b>\n\n"
+        f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
+        f"📢 <b>Channel ประจำตัว:</b> Channel เดิม (<code>{config.CHANNEL_ID}</code>)",
+        parse_mode="HTML"
+    )
 
 
 @router.message(Command("reset_user", "delete_user", "del_user", "clear_user"))
@@ -1973,14 +2179,17 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
         )
         slips = (await session.execute(slips_stmt)).scalars().all()
 
+    target_channel_id = get_user_target_channel_id(user)
+    target_channel_label = get_channel_label(target_channel_id)
+
     # ตรวจสอบสถานะใน Channel จริง พร้อมอัปเดตชื่อผู้ใช้ล่าสุดจาก Telegram
     channel_status_str = "ไม่ทราบสถานะ"
     try:
-        chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user.telegram_id)
+        chat_member = await bot.get_chat_member(chat_id=target_channel_id, user_id=user.telegram_id)
         status_map = {
             ChatMemberStatus.CREATOR: "👑 เจ้าของห้อง (Creator)",
             ChatMemberStatus.ADMINISTRATOR: "🛡️ ผู้ดูแล (Admin)",
-            ChatMemberStatus.MEMBER: "🟢 อยู่ใน Channel (Member)",
+            ChatMemberStatus.MEMBER: f"🟢 อยู่ใน Channel ({target_channel_label})",
             ChatMemberStatus.LEFT: "⚪ ออกจากห้องไปแล้ว (Left)",
             ChatMemberStatus.KICKED: "🔴 ถูกแบน/เตะออก (Kicked/Banned)",
             ChatMemberStatus.RESTRICTED: "🟡 ถูกจำกัดสิทธิ์ (Restricted)",
@@ -2032,6 +2241,7 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
 
     resp = [
         f"👤 <b>ข้อมูลผู้ใช้งาน:</b> {user_header}",
+        f"🎯 <b>Channel ประจำตัว:</b> <b>{target_channel_label}</b> (<code>{target_channel_id}</code>)",
         f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> {channel_status_str}",
         f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
         f"🎁 <b>สถิติ Referral:</b> ชวนสำเร็จ {user.referral_count or 0} คน | โบนัสสะสม {user.referral_bonus_days or 0} วัน",
@@ -2747,19 +2957,13 @@ async def handle_admin_do_reset_user_callback(callback: CallbackQuery, bot: Bot)
         await session.execute(delete(User).where(User.telegram_id == target_uid))
         await session.commit()
 
-    # 7. เตะออกจาก Channel ทันที (หากเคยอยู่ในห้อง)
-    try:
-        await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, revoke_messages=False)
-        logger.info(f"Kicked User {target_uid} from Channel on reset.")
-    except Exception as e:
-        logger.debug(f"Could not ban user {target_uid} on reset (might not be in channel): {e}")
+    # 7. เตะออกจากทุก Channel ทันที (หากเคยอยู่ในห้อง)
+    await kick_user_from_all_target_channels(bot, target_uid)
+    logger.info(f"Kicked User {target_uid} from all target channels on reset.")
 
-    # 8. ปลดแบนจาก Blacklist ของ Channel ทันที เพื่อให้เป็นสถานะปกติที่สามารถรับลิงก์เชิญใหม่ได้ 100%
-    try:
-        await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=target_uid, only_if_banned=True)
-        logger.info(f"Unbanned User {target_uid} in Channel on reset.")
-    except Exception as e:
-        logger.debug(f"Could not unban user {target_uid} on reset: {e}")
+    # 8. ปลดแบนจาก Blacklist ของทุก Channel ทันที เพื่อให้เป็นสถานะปกติที่สามารถรับลิงก์เชิญใหม่ได้ 100%
+    await unban_user_in_all_target_channels(bot, target_uid)
+    logger.info(f"Unbanned User {target_uid} in all target channels on reset.")
 
     resp_text = (
         f"🗑️ <b>ลบประวัติและรีเซ็ตบัญชี {user_name} (<code>{target_uid}</code>) สำเร็จแล้ว!</b>\n"
@@ -3994,36 +4198,40 @@ async def handle_admin_deep_scan_command(message: Message, bot: Bot):
                 if has_active:
                     continue
 
-                # 2. ถ้าไม่มี ACTIVE/PENDING ให้ลองดึงสถานะจาก Telegram
-                try:
-                    chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id)
-                except TelegramBadRequest as e:
-                    continue
-                except TelegramRetryAfter as e:
-                    from asyncio import sleep as asyncio_sleep
-                    await asyncio_sleep(e.retry_after)
-                    continue
-                except Exception:
-                    continue
+                # 2. ถ้าไม่มี ACTIVE/PENDING ให้ลองดึงสถานะจากทุก Target Channel
+                kicked_any = False
+                target_cids = get_all_target_channel_ids()
 
-                # 3. ถ้าอยู่ในห้อง แต่ไม่ใช่ Admin ให้เตะ!
-                if chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
+                for cid in target_cids:
                     try:
-                        await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, revoke_messages=False)
-                        await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, only_if_banned=True)
-                        kicked_count += 1
-                        
-                        # อัปเดต Sub ล่าสุดให้เป็น KICKED
-                        latest_sub = await session.get(Subscription, user_id)
-                        if latest_sub:
-                            latest_sub.status = SubStatus.KICKED.value
-                            session.add(latest_sub)
-                            await session.commit()
-                            
-                    except Exception as e:
-                        error_count += 1
-                elif chat_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-                    admin_skip += 1
+                        chat_member = await bot.get_chat_member(chat_id=cid, user_id=user_id)
+                    except TelegramBadRequest as e:
+                        continue
+                    except TelegramRetryAfter as e:
+                        from asyncio import sleep as asyncio_sleep
+                        await asyncio_sleep(e.retry_after)
+                        continue
+                    except Exception:
+                        continue
+
+                    # 3. ถ้าอยู่ในห้อง แต่ไม่ใช่ Admin ให้เตะ!
+                    if chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
+                        try:
+                            await bot.ban_chat_member(chat_id=cid, user_id=user_id, revoke_messages=False)
+                            await bot.unban_chat_member(chat_id=cid, user_id=user_id, only_if_banned=True)
+                            kicked_any = True
+                        except Exception as e:
+                            error_count += 1
+                    elif chat_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+                        admin_skip += 1
+
+                if kicked_any:
+                    kicked_count += 1
+                    latest_sub = await session.get(Subscription, user_id)
+                    if latest_sub:
+                        latest_sub.status = SubStatus.KICKED.value
+                        session.add(latest_sub)
+                        await session.commit()
                 
                 # หน่วงเวลาเล็กน้อยป้องกัน Rate Limit จาก Telegram
                 from asyncio import sleep as asyncio_sleep
@@ -4034,8 +4242,8 @@ async def handle_admin_deep_scan_command(message: Message, bot: Bot):
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"🔍 ตรวจสอบทั้งหมด: <b>{scanned_count}</b> บัญชี\n"
             f"👢 เตะคนที่ค้างสำเร็จ: <b>{kicked_count}</b> คน\n"
-            f"⚠️ เตะไม่สำเร็จ (Error): <b>{error_count}</b> คน\n"
-            f"🛡️ ข้ามแอดมิน: <b>{admin_skip}</b> คน\n"
+            f"⚠️ เตะไม่สำเร็จ (Error): <b>{error_count}</b> ครั้ง\n"
+            f"🛡️ ข้ามแอดมิน: <b>{admin_skip}</b> ครั้ง\n"
             "━━━━━━━━━━━━━━━━━━━━"
         )
         await message.answer(report_msg, parse_mode="HTML")

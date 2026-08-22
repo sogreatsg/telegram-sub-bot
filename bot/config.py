@@ -8,6 +8,10 @@ class Settings(BaseSettings):
 
     BOT_TOKEN: str = Field(..., description="Telegram Bot API Token from @BotFather")
     CHANNEL_ID: int = Field(..., description="Target private Telegram Channel ID (e.g. -1001234567890)")
+    SECONDARY_CHANNEL_ID: int | None = Field(
+        default=None,
+        description="Secondary/New Target Telegram Channel ID (e.g. -1001234567890) for moved users",
+    )
     ADMIN_GROUP_ID: int = Field(..., description="Admin Telegram Group ID (e.g. -1009876543210)")
     ADMIN_MENTION: str = Field(
         default="@sgrtbl",

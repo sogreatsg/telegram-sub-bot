@@ -120,14 +120,26 @@ async def main() -> None:
         # ตรวจสอบสิทธิ์ของบอทใน Target Channel
         try:
             bot_chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=bot_user.id)
-            logger.info(f"Bot status in Channel {config.CHANNEL_ID}: {bot_chat_member.status}")
+            logger.info(f"Bot status in Primary Channel {config.CHANNEL_ID}: {bot_chat_member.status}")
             if bot_chat_member.status not in ("administrator", "creator"):
                 logger.warning(
-                    f"⚠️ [WARNING] Bot @{bot_user.username} is NOT an Administrator in Channel {config.CHANNEL_ID}! "
+                    f"⚠️ [WARNING] Bot @{bot_user.username} is NOT an Administrator in Primary Channel {config.CHANNEL_ID}! "
                     f"Telegram requires the bot to be an Admin in the Channel to receive member join events!"
                 )
         except Exception as e:
-            logger.warning(f"Could not verify Bot status in Channel {config.CHANNEL_ID}: {e}")
+            logger.warning(f"Could not verify Bot status in Primary Channel {config.CHANNEL_ID}: {e}")
+
+        if config.SECONDARY_CHANNEL_ID:
+            logger.info(f"Secondary/Target Channel ID: {config.SECONDARY_CHANNEL_ID}")
+            try:
+                sec_chat_member = await bot.get_chat_member(chat_id=config.SECONDARY_CHANNEL_ID, user_id=bot_user.id)
+                logger.info(f"Bot status in Secondary Channel {config.SECONDARY_CHANNEL_ID}: {sec_chat_member.status}")
+                if sec_chat_member.status not in ("administrator", "creator"):
+                    logger.warning(
+                        f"⚠️ [WARNING] Bot @{bot_user.username} is NOT an Administrator in Secondary Channel {config.SECONDARY_CHANNEL_ID}!"
+                    )
+            except Exception as e:
+                logger.warning(f"Could not verify Bot status in Secondary Channel {config.SECONDARY_CHANNEL_ID}: {e}")
 
         # Delete any pending webhook if previously configured
         await bot.delete_webhook(drop_pending_updates=False)

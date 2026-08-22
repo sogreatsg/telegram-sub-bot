@@ -20,6 +20,7 @@ from bot.services.chat_logger import log_chat_message
 from bot.services.referral import get_referral_link, get_share_url, is_referral_active
 from bot.services.trial import is_trial_active
 from bot.services.subscription import grant_subscription, subscription_status_label
+from bot.services.channel_service import get_user_target_channel_id, get_channel_label, unban_user_in_channel
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -314,28 +315,24 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
                 is_in_channel=False,
             )
 
+        user_obj = await session.get(User, user_id)
+        target_channel_id = get_user_target_channel_id(user_obj)
+        target_channel_label = get_channel_label(target_channel_id)
+
     # ปลดแบนผู้ใช้ใน Channel ก่อนสร้างลิงก์เสมอ (ป้องกันกรณีเคยถูกเตะแล้วติด blacklist ใน Telegram)
-    try:
-        await bot.unban_chat_member(
-            chat_id=config.CHANNEL_ID,
-            user_id=user_id,
-            only_if_banned=True,
-        )
-        logger.info(f"Auto-unbanned User {user_id} in Channel {config.CHANNEL_ID} before creating trial invite link.")
-    except Exception as e:
-        logger.debug(f"Could not unban User {user_id} before creating trial invite link: {e}")
+    await unban_user_in_channel(bot, target_channel_id, user_id)
 
     # สร้างลิงก์เชิญแบบใช้งานได้ 1 ครั้งสำหรับ Channel ส่วนตัว (หมดอายุภายใน 48 ชม. หากไม่กดเข้า)
     try:
         invite_link_obj = await bot.create_chat_invite_link(
-            chat_id=config.CHANNEL_ID,
+            chat_id=target_channel_id,
             member_limit=1,
             expire_date=datetime.now(timezone.utc) + timedelta(hours=48),
             name=f"Trial-{user_id}",
         )
         invite_url = invite_link_obj.invite_link
     except Exception as e:
-        logger.error(f"Failed to generate trial invite link for user {user_id}: {e}", exc_info=True)
+        logger.error(f"Failed to generate trial invite link for user {user_id} in {target_channel_id}: {e}", exc_info=True)
         await callback.answer(
             "⚠️ ไม่สามารถสร้างลิงก์เชิญได้ กรุณาตรวจสอบว่าบอทเป็น Admin ใน Channel",
             show_alert=True,
@@ -345,7 +342,7 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
     trial_min = config.TRIAL_DURATION_MINUTES
     trial_message = (
         f"🎉 <b>ลิงก์ทดลองใช้งานฟรี {trial_min} นาทีของคุณพร้อมแล้ว!</b>\n\n"
-        f"🔗 <b>ลิงก์เชิญส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
+        f"🔗 <b>ลิงก์เชิญส่วนตัวสำหรับ {target_channel_label} (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
         "⚠️ <b>ข้อควรทราบสำคัญ:</b>\n"
         "• ลิงก์นี้สามารถใช้งานได้เพียง 1 ครั้งเท่านั้น\n"
         f"• <b>ระบบจะเริ่มนับถอยหลัง {trial_min} นาทีทันทีที่คุณกดเข้าร่วม Channel</b>\n"
@@ -355,7 +352,7 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
 
     join_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚀 เข้าร่วม Channel ทันที", url=invite_url)],
+            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_label} ทันที", url=invite_url)],
             [InlineKeyboardButton(text="🔙 กลับสู่เมนูหลัก", callback_data="menu:main")],
         ]
     )

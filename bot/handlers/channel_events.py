@@ -11,6 +11,7 @@ from bot.models.schema import User, Subscription, SubStatus
 from bot.services.database import get_session, get_or_create_user
 from bot.services.referral import award_referral_bonus
 from bot.services.subscription import activate_pending_subscription
+from bot.services.channel_service import is_target_channel, is_secondary_channel, get_channel_label
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -22,15 +23,6 @@ from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, format_remain
 
 # Dictionary สำหรับ Lock ป้องกัน concurrency (Event เบิ้ลจาก Telegram)
 user_locks = defaultdict(asyncio.Lock)
-
-def is_target_channel(chat_id: int) -> bool:
-    """ตรวจสอบว่าเป็น Channel VIP เป้าหมายหรือไม่ (รองรับทั้งรูปแบบมีและไม่มี -100)"""
-    target = config.CHANNEL_ID
-    if chat_id == target:
-        return True
-    str_chat = str(chat_id).replace("-100", "").replace("-", "")
-    str_target = str(target).replace("-100", "").replace("-", "")
-    return str_chat == str_target
 
 @router.chat_member()
 async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
@@ -154,6 +146,13 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
         sub = await session.get(Subscription, user_id)
         trial_already_used_before = bool(user_obj.trial_used) if user_obj else True
 
+        # หากผู้ใช้เข้า Channel ใหม่ ให้บันทึกสถานะผู้ใช้ว่าถูกย้ายเข้าห้องใหม่เรียบร้อย
+        is_sec = is_secondary_channel(event.chat.id)
+        if is_sec and user_obj:
+            user_obj.is_moved_to_secondary = True
+            user_obj.assigned_channel = "SECONDARY"
+            session.add(user_obj)
+
         if sub and sub.status == SubStatus.PENDING.value and ((sub.pending_days or 0) > 0 or (sub.pending_minutes or 0) > 0):
             # === มีโควต้า pending รอกดเข้าห้อง -> เปิดใช้งานทันที ===
             grant = await activate_pending_subscription(session, user_id=user_id)
@@ -174,7 +173,7 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
                     referred_by_to_award = user_obj.referred_by_id
                     friend_user_snapshot = user_obj
 
-                logger.info(f"Activated pending subscription for user {user_id} ({plan_title}), expires_at={new_expires_at}")
+                logger.info(f"Activated pending subscription for user {user_id} ({plan_title}) in {get_channel_label(event.chat.id)}, expires_at={new_expires_at}")
 
         elif sub and sub.status == SubStatus.ACTIVE.value and sub.expires_at and ensure_utc(sub.expires_at) > now:
             # === กรณีไม่มี PENDING แต่มี ACTIVE อยู่แล้ว (สมาชิกเดิมหลุดแล้วเข้าใหม่) ===
@@ -182,7 +181,7 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
             new_expires_at = sub.expires_at
             plan_title = sub.source_label or "สมาชิก VIP"
             duration_str = f"เหลือ {format_remaining_time(sub.expires_at)}"
-            logger.info(f"Existing active subscription detected for user {user_id} ({plan_title})")
+            logger.info(f"Existing active subscription detected for user {user_id} ({plan_title}) in {get_channel_label(event.chat.id)}")
 
     # มอบรางวัล Referral Bonus ให้ผู้แนะนำ (ถ้ามี)
     if referred_by_to_award and friend_user_snapshot:
@@ -195,12 +194,14 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
     full_name_safe = html.escape(user.full_name or "")
     start_time_thai = format_thai_datetime(now)
     expires_at_thai = format_thai_datetime(new_expires_at) if new_expires_at else "ไม่ระบุ"
+    channel_label = get_channel_label(event.chat.id)
+    is_sec_join = is_secondary_channel(event.chat.id)
 
     if sub_to_activate:
         # 1. ส่งข้อความต้อนรับเข้า DM ของผู้ใช้
         try:
             welcome_dm = (
-                f"🎉 <b>ยินดีต้อนรับเข้าสู่ VIP Channel!</b>\n\n"
+                f"🎉 <b>ยินดีต้อนรับเข้าสู่ {channel_label}!</b>\n\n"
                 f"แพ็กเกจ <b>{plan_title}</b> ของคุณเปิดใช้งานเรียบร้อยแล้ว 🚀\n\n"
                 f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
                 f"⏰ <b>เวลาเริ่มต้น:</b> <code>{start_time_thai} น.</code>\n"
@@ -216,14 +217,20 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
             logger.warning(f"Could not send welcome DM to User {user_id}: {e}")
 
         # 2. ส่งข้อความแจ้งเตือนเข้ากลุ่ม Admin
-        header_title = "🚪 <b>มีสมาชิกกดเข้าร่วม Channel แล้ว!</b>"
-        if is_stack_extension:
-            header_title = "🚪 <b>มีสมาชิกกดเข้าร่วม Channel พร้อมต่อเวลาสะสม!</b>"
+        if is_sec_join:
+            header_title = "🌟 <b>[Target Channel] มีสมาชิกกดเข้าร่วม Channel ใหม่แล้ว!</b>"
+            if is_stack_extension:
+                header_title = "🌟 <b>[Target Channel] มีสมาชิกกดเข้าร่วม Channel ใหม่ พร้อมต่อเวลาสะสม!</b>"
+        else:
+            header_title = "🚪 <b>มีสมาชิกกดเข้าร่วม Channel แล้ว!</b>"
+            if is_stack_extension:
+                header_title = "🚪 <b>มีสมาชิกกดเข้าร่วม Channel พร้อมต่อเวลาสะสม!</b>"
 
         admin_log_msg = (
             f"{header_title}\n\n"
             f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
             f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+            f"📢 <b>Channel:</b> <b>{channel_label}</b> (<code>{event.chat.id}</code>)\n"
             f"📦 <b>แผนที่ใช้งาน:</b> <b>{plan_title}</b>\n"
             f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
             f"🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_time_thai} น.</code>\n"
@@ -238,7 +245,7 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
                 text=admin_log_msg,
                 parse_mode="HTML",
             )
-            logger.info(f"Sent channel join audit log to Admin Group for User {user_id}")
+            logger.info(f"Sent channel join audit log to Admin Group for User {user_id} in {channel_label}")
         except Exception as e:
             logger.warning(f"Could not send join log to Admin Group: {e}")
 
@@ -249,30 +256,31 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
             return
 
         # === กรณีไม่มี Subscription ที่ถูกต้อง -> Soft-kick ===
-        logger.warning(f"Unauthorized join detected: User {user_id} ({user.full_name}) has no valid subscription.")
+        logger.warning(f"Unauthorized join detected: User {user_id} ({user.full_name}) has no valid subscription in {channel_label}.")
         kicked = False
         try:
             await bot.ban_chat_member(chat_id=event.chat.id, user_id=user_id, revoke_messages=False)
             await bot.unban_chat_member(chat_id=event.chat.id, user_id=user_id, only_if_banned=True)
             kicked = True
-            logger.info(f"Successfully soft-kicked unauthorized User ID={user_id} from Channel.")
+            logger.info(f"Successfully soft-kicked unauthorized User ID={user_id} from {channel_label}.")
         except Exception as e:
-            logger.error(f"Failed to soft-kick unauthorized User ID={user_id}: {e}")
+            logger.error(f"Failed to soft-kick unauthorized User ID={user_id} from {channel_label}: {e}")
 
         try:
             await bot.send_message(
                 chat_id=user_id,
-                text="⚠️ <b>ไม่สามารถเข้าร่วม Channel VIP ได้</b>\n\nเนื่องจากคุณยังไม่มีแพ็กเกจสมาชิกที่เปิดใช้งาน กรุณาพิมพ์ /start เพื่อกดทดลองใช้ฟรี หรือสมัครสมาชิก VIP ครับ",
+                text=f"⚠️ <b>ไม่สามารถเข้าร่วม {channel_label} ได้</b>\n\nเนื่องจากคุณยังไม่มีแพ็กเกจสมาชิกที่เปิดใช้งาน กรุณาพิมพ์ /start เพื่อกดทดลองใช้ฟรี หรือสมัครสมาชิก VIP ครับ",
                 parse_mode="HTML",
             )
         except Exception:
             pass
 
-        action_status = "เตะออกจาก Channel ทันทีเรียบร้อย ❌" if kicked else "⚠️ บอทเตะไม่สำเร็จ (กรุณาตรวจสิทธิ์ Ban Users ของบอท)"
+        action_status = f"เตะออกจาก {channel_label} ทันทีเรียบร้อย ❌" if kicked else "⚠️ บอทเตะไม่สำเร็จ (กรุณาตรวจสิทธิ์ Ban Users ของบอท)"
         admin_alert = (
-            "🚨 <b>[Security Alert] ตรวจพบผู้ใช้เข้า Channel โดยไม่ผ่านระบบ!</b>\n\n"
+            f"🚨 <b>[Security Alert] ตรวจพบผู้ใช้เข้า {channel_label} โดยไม่ผ่านระบบ!</b>\n\n"
             f"👤 <b>ผู้ใช้:</b> {full_name_safe} ({user_handle})\n"
             f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+            f"📢 <b>Channel:</b> {channel_label} (<code>{event.chat.id}</code>)\n"
             f"⚡ <b>การดำเนินการ:</b> {action_status}\n\n"
             "ℹ️ <i>ระบบป้องกันไม่ให้ผู้ใช้แอบแฝงหรือค้างในห้อง VIP โดยไม่มีแพ็กเกจ</i>"
         )

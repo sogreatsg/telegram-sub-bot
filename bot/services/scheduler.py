@@ -16,6 +16,14 @@ from bot.models.schema import Subscription, SubStatus, PaymentSlip, SlipStatus, 
 from bot.services.database import get_session
 from bot.services.referral import award_referral_bonus
 from bot.services.subscription import PENDING_STALE_HOURS, activate_pending_subscription, is_pending_stale
+from bot.services.channel_service import (
+    kick_user_from_all_target_channels,
+    check_user_in_channel,
+    check_user_in_target_channels,
+    get_all_target_channel_ids,
+    get_channel_label,
+    is_secondary_channel,
+)
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -101,24 +109,26 @@ async def sync_pending_members(bot: Bot) -> dict:
             user_id = sub.user_id
             user_obj = sub.user
 
-            try:
-                chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id)
-                in_channel = chat_member.status in (
-                    ChatMemberStatus.MEMBER,
-                    ChatMemberStatus.RESTRICTED,
-                    ChatMemberStatus.ADMINISTRATOR,
-                    ChatMemberStatus.CREATOR,
-                )
-                tg_user = getattr(chat_member, "user", None)
-                if tg_user and user_obj:
-                    if tg_user.full_name and user_obj.full_name != tg_user.full_name:
-                        user_obj.full_name = tg_user.full_name
-                    if tg_user.username and user_obj.username != tg_user.username:
-                        user_obj.username = tg_user.username
-                    session.add(user_obj)
-            except Exception as e:
-                logger.debug(f"Could not check member status for User {user_id}: {e}")
-                in_channel = False
+            in_channel = False
+            joined_channel_id = None
+
+            # ตรวจสอบทุก Target Channel ที่บอทดูแล
+            for cid in get_all_target_channel_ids():
+                is_mem, status, tg_user = await check_user_in_channel(bot, cid, user_id)
+                if is_mem:
+                    in_channel = True
+                    joined_channel_id = cid
+                    if is_secondary_channel(cid) and user_obj:
+                        user_obj.is_moved_to_secondary = True
+                        user_obj.assigned_channel = "SECONDARY"
+                        session.add(user_obj)
+                    if tg_user and user_obj:
+                        if tg_user.full_name and user_obj.full_name != tg_user.full_name:
+                            user_obj.full_name = tg_user.full_name
+                        if tg_user.username and user_obj.username != tg_user.username:
+                            user_obj.username = tg_user.username
+                        session.add(user_obj)
+                    break
 
             if not in_channel:
                 if not is_pending_stale(sub, now):
@@ -160,16 +170,16 @@ async def sync_pending_members(bot: Bot) -> dict:
                 duration_str = f"{grant.granted_minutes} นาที"
             joined_time = now
             final_expires_at = grant.new_expires_at
+            channel_label = get_channel_label(joined_channel_id or config.CHANNEL_ID)
 
             if final_expires_at <= now:
-                # กรณี edge-case: โควต้าที่ได้เท่ากับ 0 พอดี -> เตะออกทันที
+                # กรณี edge-case: โควต้าที่ได้เท่ากับ 0 พอดี -> เตะออกจากทุกห้องทันที
                 try:
-                    await bot.ban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, revoke_messages=False)
-                    await bot.unban_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id, only_if_banned=True)
+                    await kick_user_from_all_target_channels(bot, user_id)
                     grant.subscription.status = SubStatus.KICKED.value
                     session.add(grant.subscription)
                     results["kicked_expired"] += 1
-                    logger.info(f"[SYNC] User {user_id} was PENDING but already expired in channel. Kicked successfully.")
+                    logger.info(f"[SYNC] User {user_id} was PENDING but already expired in channel. Kicked successfully from all target channels.")
 
                     start_time_thai = format_thai_datetime(joined_time)
                     expires_at_thai = format_thai_datetime(final_expires_at)
@@ -179,6 +189,7 @@ async def sync_pending_members(bot: Bot) -> dict:
                         "🚪 <b>สมาชิกหมดอายุและถูกเตะออกจาก Channel แล้ว!</b>\n\n"
                         f"👤 <b>ผู้ใช้งาน:</b> {full_name_sync} ({user_handle_sync})\n"
                         f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+                        f"📢 <b>Channel:</b> {channel_label}\n"
                         f"📦 <b>แพ็กเกจ:</b> <b>{plan_title}</b> ({duration_str})\n"
                         f"🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_time_thai} น.</code>\n"
                         f"🔴 <b>เวลาหมดอายุ (End):</b> <code>{expires_at_thai} น.</code>\n"
@@ -196,14 +207,14 @@ async def sync_pending_members(bot: Bot) -> dict:
                 continue
 
             results["activated"] += 1
-            logger.info(f"[SYNC] Activated PENDING subscription for User {user_id}. Expires at {final_expires_at}")
+            logger.info(f"[SYNC] Activated PENDING subscription for User {user_id} in {channel_label}. Expires at {final_expires_at}")
 
             # ส่ง DM ต้อนรับหาผู้ใช้
             start_time_thai = format_thai_datetime(joined_time)
             expires_at_thai = format_thai_datetime(final_expires_at)
             try:
                 welcome_dm = (
-                    f"🎉 <b>ยินดีต้อนรับเข้าสู่ VIP Channel!</b>\n\n"
+                    f"🎉 <b>ยินดีต้อนรับเข้าสู่ {channel_label}!</b>\n\n"
                     f"แพ็กเกจ <b>{plan_title}</b> ของคุณเปิดใช้งานเรียบร้อยแล้ว 🚀\n\n"
                     f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
                     f"⏰ <b>เวลาเริ่มต้น:</b> <code>{start_time_thai} น.</code>\n"
@@ -217,10 +228,14 @@ async def sync_pending_members(bot: Bot) -> dict:
             # ส่งแจ้งเตือนเข้ากลุ่ม Admin
             user_handle = f"@{user_obj.username}" if (user_obj and user_obj.username) else "ไม่มี Username"
             full_name_safe = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
+            is_sec = is_secondary_channel(joined_channel_id or config.CHANNEL_ID)
+            header_title = "🌟 <b>[Target Channel] มีสมาชิกกดเข้าร่วม Channel ใหม่แล้ว!</b>" if is_sec else "🚪 <b>มีสมาชิกกดเข้าร่วม Channel แล้ว!</b>"
+
             admin_log_msg = (
-                "🚪 <b>มีสมาชิกกดเข้าร่วม Channel แล้ว!</b>\n\n"
+                f"{header_title}\n\n"
                 f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
                 f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+                f"📢 <b>Channel:</b> <b>{channel_label}</b> (<code>{joined_channel_id}</code>)\n"
                 f"📦 <b>แผนที่ใช้งาน:</b> <b>{plan_title}</b>\n"
                 f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
                 f"🟢 <b>เวลาเริ่มต้น (Start):</b> <code>{start_time_thai} น.</code>\n"
@@ -398,55 +413,29 @@ async def check_expired_subscriptions(bot: Bot) -> None:
 
             logger.info(f"Processing expiration for User ID={user_id}, Plan={plan_title}")
 
-            # ตรวจสอบว่าเป็น Admin/Owner ของ Channel หรือไม่ (ถ้าใช่ไม่ต้องเตะ)
+            # ตรวจสอบว่าเป็น Admin/Owner ของ Channel ใดๆ หรือไม่ (ถ้าใช่ไม่ต้องเตะ)
             is_channel_admin = False
-            try:
-                chat_member = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=user_id)
-                if chat_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-                    is_channel_admin = True
-                    logger.info(f"User ID={user_id} is Channel Administrator/Creator. Skipping soft-kick.")
-            except Exception as e:
-                logger.debug(f"Could not check chat member status for User {user_id}: {e}")
+            for cid in get_all_target_channel_ids():
+                try:
+                    chat_member = await bot.get_chat_member(chat_id=cid, user_id=user_id)
+                    if chat_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+                        is_channel_admin = True
+                        logger.info(f"User ID={user_id} is Channel Administrator/Creator in {cid}. Skipping soft-kick.")
+                        break
+                except Exception as e:
+                    logger.debug(f"Could not check chat member status for User {user_id} in {cid}: {e}")
 
             if is_channel_admin:
                 sub.status = SubStatus.EXPIRED.value
                 session.add(sub)
                 continue
 
-            # ดำเนินการ Soft-Kick จาก Channel (แบน และ ปลดแบนทันที)
-            kicked_successfully = False
+            # ดำเนินการ Soft-Kick จากทุก Channel (ทั้งกลุ่มเดิมและกลุ่มใหม่)
+            kick_results = await kick_user_from_all_target_channels(bot, user_id)
+            kicked_successfully = len(kick_results["failed_channels"]) == 0
             fail_reason = None
-            try:
-                await bot.ban_chat_member(
-                    chat_id=config.CHANNEL_ID,
-                    user_id=user_id,
-                    revoke_messages=False,
-                )
-                await bot.unban_chat_member(
-                    chat_id=config.CHANNEL_ID,
-                    user_id=user_id,
-                    only_if_banned=True,
-                )
-                kicked_successfully = True
-                logger.info(f"Successfully soft-kicked User ID={user_id} from Channel {config.CHANNEL_ID}.")
-            except TelegramBadRequest as e:
-                err_msg = e.message.lower()
-                if any(kw in err_msg for kw in ["not found", "not a member", "not in the chat", "user_not_participant"]):
-                    # ผู้ใช้ออกจาก Channel ไปแล้วด้วยตนเอง
-                    kicked_successfully = True
-                    logger.info(f"User ID={user_id} is already not in Channel: {e.message}")
-                else:
-                    fail_reason = f"TelegramBadRequest: {e.message}"
-                    logger.warning(f"TelegramBadRequest kicking User ID={user_id}: {e.message}")
-            except TelegramForbiddenError as e:
-                fail_reason = f"TelegramForbiddenError (บอทไม่มีสิทธิ์ Ban Users หรือถูกจำกัด): {e.message}"
-                logger.error(f"TelegramForbiddenError kicking User ID={user_id}: {e.message}")
-            except TelegramRetryAfter as e:
-                fail_reason = f"Rate Limit (รอ {e.retry_after} วินาที)"
-                logger.warning(f"Hit Telegram rate limit for User ID={user_id}. Retry after {e.retry_after}s: {e}")
-            except Exception as e:
-                fail_reason = f"Error: {e}"
-                logger.error(f"Unexpected error soft-kicking User ID={user_id}: {e}", exc_info=True)
+            if not kicked_successfully:
+                fail_reason = "; ".join(f"{cid}: {err}" for cid, err in kick_results["errors"].items())
 
             # อัปเดตสถานะใน DB
             if kicked_successfully:
@@ -546,14 +535,22 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
 
     # 1. ดึงจำนวนสมาชิกจริงจาก Telegram Channel (ไม่นับ Admin และ Bot)
     channel_member_count = None
+    sec_channel_member_count = None
     if bot:
         try:
             total_count = await bot.get_chat_member_count(chat_id=config.CHANNEL_ID)
             admins = await bot.get_chat_administrators(chat_id=config.CHANNEL_ID)
-            # ใน Telegram Channel บอทและแอดมินจะรวมอยู่ในรายชื่อ administrators
             channel_member_count = total_count - len(admins)
         except Exception as e:
             logger.warning(f"Could not fetch chat member count for channel {config.CHANNEL_ID}: {e}")
+
+        if config.SECONDARY_CHANNEL_ID:
+            try:
+                sec_total = await bot.get_chat_member_count(chat_id=config.SECONDARY_CHANNEL_ID)
+                sec_admins = await bot.get_chat_administrators(chat_id=config.SECONDARY_CHANNEL_ID)
+                sec_channel_member_count = sec_total - len(sec_admins)
+            except Exception as e:
+                logger.warning(f"Could not fetch chat member count for secondary channel {config.SECONDARY_CHANNEL_ID}: {e}")
 
     async with get_session() as session:
         # 2. ดึง Subscription ที่ ACTIVE อยู่ทั้งหมด พร้อมข้อมูล User (1 แถวต่อ user อยู่แล้ว)
@@ -586,29 +583,17 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
         )
         pending_subs = (await session.execute(stmt_pending)).scalars().all()
 
-        # ตรวจสอบสถานะว่าอยู่ในห้อง Channel จริงหรือไม่
+        # ตรวจสอบสถานะว่าอยู่ในห้อง Channel ใดจริงหรือไม่
         in_channel_active_subs = []
         left_channel_active_subs = []
+        user_channel_map = {}
 
         if bot:
             for sub in unique_active_subs:
-                is_in = False
-                try:
-                    cm = await bot.get_chat_member(chat_id=config.CHANNEL_ID, user_id=sub.user_id)
-                    if cm.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
-                        is_in = True
-                    tg_u = getattr(cm, "user", None)
-                    if tg_u and sub.user:
-                        if tg_u.full_name and sub.user.full_name != tg_u.full_name:
-                            sub.user.full_name = tg_u.full_name
-                        if tg_u.username and sub.user.username != tg_u.username:
-                            sub.user.username = tg_u.username
-                        session.add(sub.user)
-                except Exception:
-                    is_in = False
-
-                if is_in:
+                is_in, found_cid, _ = await check_user_in_target_channels(bot, sub.user_id)
+                if is_in and found_cid:
                     in_channel_active_subs.append(sub)
+                    user_channel_map[sub.user_id] = found_cid
                 else:
                     left_channel_active_subs.append(sub)
         else:
@@ -629,7 +614,9 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
         )
 
         if channel_member_count is not None:
-            report += f"📱 <b>จำนวนสมาชิกใน Channel จริง:</b> <b>{channel_member_count} คน</b>\n"
+            report += f"📱 <b>จำนวนสมาชิกใน Channel เดิม ({config.CHANNEL_ID}):</b> <b>{channel_member_count} คน</b>\n"
+        if sec_channel_member_count is not None:
+            report += f"🌟 <b>จำนวนสมาชิกใน Channel ใหม่ ({config.SECONDARY_CHANNEL_ID}):</b> <b>{sec_channel_member_count} คน</b>\n"
 
         if total_pending > 0:
             report += f"🟡 <b>สมาชิกรอกดเข้าร่วม (Pending):</b> <b>{total_pending} คน</b>\n"
@@ -668,7 +655,14 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
 
                 # แสดงสถานะการอยู่ในห้อง
                 if bot:
-                    channel_badge = "🟢 ใน Channel" if sub in in_channel_active_subs else "⚪ ออกจากห้องแล้ว"
+                    found_cid = user_channel_map.get(sub.user_id)
+                    if found_cid:
+                        if is_secondary_channel(found_cid):
+                            channel_badge = "🌟 ใน Channel ใหม่"
+                        else:
+                            channel_badge = "🟢 ใน Channel เดิม"
+                    else:
+                        channel_badge = "⚪ ออกจากห้องแล้ว"
                 else:
                     channel_badge = "🟢 ACTIVE"
 
@@ -687,28 +681,14 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 p_user = psub.user
                 p_u_header = format_user_title(p_user.full_name if p_user else None, p_user.username if p_user else None, psub.user_id)
                 quota_str = f"{psub.pending_days} วัน" if psub.pending_days > 0 else f"{psub.pending_minutes} นาที"
+                target_note = " (Channel ใหม่)" if (p_user and getattr(p_user, "is_moved_to_secondary", False)) else ""
                 report += (
                     f"<b>{p_idx}.</b> {p_u_header}\n"
-                    f"   • <b>โควต้ารอใช้งาน:</b> {quota_str} ({psub.source_label})\n"
+                    f"   • <b>โควต้ารอใช้งาน:</b> {quota_str} ({psub.source_label}){target_note}\n"
                     f"   • 🟡 <b>สถานะ:</b> ออกลิงก์แล้ว-รอกดเข้าห้อง\n\n"
                 )
 
         report += "━━━━━━━━━━━━━━━━━━━━\n"
-
-        if channel_member_count is not None and bot:
-            expected_in_channel = total_in_channel + total_failed
-            if channel_member_count > expected_in_channel:
-                diff_count = channel_member_count - expected_in_channel
-                report += (
-                    "🚨 <b>แจ้งเตือนความผิดปกติของจำนวนสมาชิก!</b>\n\n"
-                    f"👥 จำนวนคนใน Channel จริง (ไม่รวม Admin/Bot): <b>{channel_member_count} คน</b>\n"
-                    f"📝 จำนวนคนที่ควรจะมี (Active ในห้อง + เตะไม่สำเร็จ): <b>{expected_in_channel} คน</b>\n\n"
-                    f"⚠️ <i>จำนวนคนในห้องจริงมากกว่าในระบบ {diff_count} คน! อาจมีคนแอบอยู่ในห้องโดยไม่มีแพ็กเกจ หรือมีคนถูกดึงเข้าห้องโดยไม่ผ่านบอท แนะนำให้ใช้คำสั่ง <code>/deep_scan</code> เพื่อตรวจสอบครับ</i>\n"
-                    "━━━━━━━━━━━━━━━━━━━━\n"
-                )
-            elif channel_member_count == expected_in_channel:
-                report += "✅ <i>จำนวนคนใน Channel ตรงกับสมาชิกที่มีสิทธิ์ในระบบ 100%</i>\n━━━━━━━━━━━━━━━━━━━━\n"
-
         report += "🤖 <i>ระบบจัดการสมาชิก BareLive Membership Bot</i>"
         return report
 
