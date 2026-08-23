@@ -258,10 +258,27 @@ async def handle_menu_main(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "menu:trial")
 async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMContext):
-    """จัดการคำขอทดลองใช้งานฟรี"""
+    """จัดการคำขอทดลองใช้งานฟรี (เฉพาะสมาชิก V.2)"""
     await state.clear()
     if not callback.from_user:
         return
+
+    user_id = callback.from_user.id
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=user_id,
+            username=callback.from_user.username,
+            full_name=callback.from_user.full_name or callback.from_user.first_name,
+        )
+        if not is_user_v2_member(user):
+            await callback.answer()
+            if callback.message:
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+            return
 
     if not is_trial_active():
         await callback.answer("⚠️ ระบบทดลองใช้ฟรีปิดให้บริการชั่วคราว", show_alert=True)
@@ -281,18 +298,8 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
                 pass
         return
 
-    user_id = callback.from_user.id
     async with get_session() as session:
-        user, _ = await get_or_create_user(
-            session=session,
-            telegram_id=user_id,
-            username=callback.from_user.username,
-            full_name=callback.from_user.full_name or callback.from_user.first_name,
-        )
-        if not is_user_v2_member(user):
-            await callback.answer()
-            return
-
+        user = await session.get(User, user_id)
         # ตรวจสอบว่าเคยใช้สิทธิ์ทดลองไปแล้วหรือยัง (เข้าร่วม channel แล้ว)
         if user.trial_used:
             await callback.answer(
@@ -382,10 +389,27 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
 
 @router.callback_query(F.data == "menu:referral")
 async def handle_referral_menu(callback: CallbackQuery, bot: Bot, state: FSMContext):
-    """แสดงหน้าต่างระบบชวนเพื่อน (Referral System) พร้อมลิงก์เฉพาะตัวและสถิติ"""
+    """แสดงหน้าต่างระบบชวนเพื่อน (Referral System) พร้อมลิงก์เฉพาะตัวและสถิติ (เฉพาะสมาชิก V.2)"""
     await state.clear()
     if not callback.from_user or not callback.message:
         return
+
+    user_id = callback.from_user.id
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=user_id,
+            username=callback.from_user.username,
+            full_name=callback.from_user.full_name or callback.from_user.first_name,
+        )
+        if not is_user_v2_member(user):
+            await callback.answer()
+            if callback.message:
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+            return
 
     if not is_referral_active():
         await callback.answer("⚠️ ระบบแนะนำเพื่อนปิดใช้งานชั่วคราว", show_alert=True)
@@ -404,7 +428,6 @@ async def handle_referral_menu(callback: CallbackQuery, bot: Bot, state: FSMCont
             pass
         return
 
-    user_id = callback.from_user.id
     try:
         bot_info = await bot.get_me()
         bot_username = bot_info.username or "barelive_sub_bot"
@@ -415,15 +438,7 @@ async def handle_referral_menu(callback: CallbackQuery, bot: Bot, state: FSMCont
     share_url = get_share_url(bot_username, user_id)
 
     async with get_session() as session:
-        user, _ = await get_or_create_user(
-            session=session,
-            telegram_id=user_id,
-            username=callback.from_user.username,
-            full_name=callback.from_user.full_name or callback.from_user.first_name,
-        )
-        if not is_user_v2_member(user):
-            await callback.answer()
-            return
+        user = await session.get(User, user_id)
         ref_count = user.referral_count or 0
         bonus_days = user.referral_bonus_days or 0
 

@@ -11,6 +11,7 @@ from bot.config import get_settings
 from bot.services.database import init_db, close_db
 from bot.services.scheduler import setup_scheduler
 from bot.services.channel_service import set_channel_title
+from bot.middlewares import V2MemberOnlyCallbackMiddleware
 from bot.handlers import (
     user_menu_router,
     payment_router,
@@ -98,7 +99,12 @@ async def main() -> None:
     )
     dp = Dispatcher(storage=MemoryStorage())
 
-    # 3. Register Handler Routers
+    # 3. Register Middleware & Handler Routers
+    v2_callback_guard = V2MemberOnlyCallbackMiddleware()
+    payment_router.callback_query.middleware(v2_callback_guard)
+    user_menu_router.callback_query.middleware(v2_callback_guard)
+    promotion_user_router.callback_query.middleware(v2_callback_guard)
+
     dp.include_router(payment_router)
     dp.include_router(admin_router)
     dp.include_router(channel_events_router)
