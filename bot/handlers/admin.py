@@ -47,6 +47,11 @@ from bot.services.channel_service import (
     format_user_channel_presence,
 )
 from bot.services.chat_cleaner import clean_user_chat_messages
+from bot.services.chat_cleaner_state import (
+    update_session_state,
+    get_clean_status_summary,
+    reset_all_clean_checkpoints,
+)
 from bot.services.payment_settings import (
     is_promptpay_active,
     update_promptpay_setting,
@@ -5382,15 +5387,31 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
             for i, user in enumerate(all_users, 1):
                 scanned_count += 1
                 uid = user.telegram_id
+                u_name = user.full_name or user.username or f"User {uid}"
 
                 # ตรวจสอบว่าเป็นสมาชิก V.2 หรือไม่
                 if is_user_v2_member(user):
                     skipped_v2_count += 1
                     continue
 
-                # ดำเนินการลบข้อความใน DM
+                # อัปเดตสถานะ Session ว่ากำลังล้างใครอยู่
+                update_session_state(
+                    is_running=True,
+                    total_users=total_users,
+                    current_user_index=i,
+                    current_user_id=uid,
+                    current_user_name=u_name,
+                    total_msgs_deleted=total_msgs_deleted,
+                )
+
+                # ดำเนินการลบข้อความใน DM (พร้อมระบบ Checkpoint จำตำแหน่ง ID อัตโนมัติ)
                 try:
-                    res = await clean_user_chat_messages(bot, uid)
+                    res = await clean_user_chat_messages(
+                        bot=bot,
+                        user_id=uid,
+                        username=user.username,
+                        full_name=user.full_name,
+                    )
                     if res["success"]:
                         cleaned_user_count += 1
                         total_msgs_deleted += res["deleted_count"]
@@ -5404,22 +5425,31 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
 
                 await asyncio.sleep(0.04)
 
-                if i % 15 == 0 or i == total_users:
+                if i % 10 == 0 or i == total_users:
                     try:
                         await status_msg.edit_text(
                             "🔄 <b>กำลังดำเนินการลบข้อความ DM ของทุกคนที่ไม่ใช่ V.2...</b>\n"
                             "━━━━━━━━━━━━━━━━━━━━\n"
-                            f"📊 <b>ความคืบหน้า:</b> {i}/{total_users} บัญชี\n"
-                            f"🧹 <b>ล้างแชทสำเร็จ:</b> <b>{cleaned_user_count}</b> คน\n"
+                            f"📊 <b>ความคืบหน้า:</b> {i}/{total_users} บัญชี ({(i/total_users)*100:.1f}%)\n"
+                            f"👤 <b>กำลังทำบัญชี:</b> {html.escape(u_name)} (<code>{uid}</code>)\n"
+                            f"🧹 <b>ล้างแชทสำเร็จแล้ว:</b> <b>{cleaned_user_count}</b> คน\n"
                             f"🗑️ <b>ยอดข้อความที่ลบแล้ว:</b> <b>{total_msgs_deleted:,}</b> ข้อความ\n"
                             f"🛡️ <b>ข้ามสมาชิก V.2 (ปลอดภัย):</b> {skipped_v2_count} คน\n"
                             f"🚫 <b>บล็อกบอท/ติดต่อไม่ได้:</b> {blocked_count} คน\n"
                             "━━━━━━━━━━━━━━━━━━━━\n"
-                            "⏳ <i>กรุณารอสักครู่จนกว่าระบบจะทำงานเสร็จสิ้น...</i>",
+                            "💾 <i>ระบบบันทึก Checkpoint ตลอดเวลา หากหยุดชั่วคราวจะทำต่อจากจุดเดิมได้ทันที</i>",
                             parse_mode="HTML"
                         )
                     except Exception:
                         pass
+
+        # ปิดสถานะ Session การล้างแชท
+        update_session_state(
+            is_running=False,
+            total_users=total_users,
+            current_user_index=total_users,
+            total_msgs_deleted=total_msgs_deleted,
+        )
 
         final_report = (
             "🎉 <b>ดำเนินการกวาดล้างข้อความ DM ของทุกคนที่ไม่ใช่สมาชิก V.2 เสร็จสมบูรณ์!</b>\n"
@@ -5442,10 +5472,74 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
 
     except Exception as e:
         logger.error(f"Error in clean_non_v2_dms: {e}", exc_info=True)
+        update_session_state(is_running=False)
         try:
             await status_msg.edit_text(f"❌ <b>เกิดข้อผิดพลาดในการลบข้อความ DM:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
         except Exception:
             await callback.message.answer(f"❌ <b>เกิดข้อผิดพลาด:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
+
+@router.message(Command("clean_status", "clean_progress", "clean_state"))
+async def handle_admin_clean_status_command(message: Message):
+    """ตรวจสอบสถานะและ Checkpoint การล้างแชท DM ล่าสุด: /clean_status"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    from bot.services.chat_cleaner_state import get_clean_status_summary
+    summary = get_clean_status_summary()
+    sess = summary["session"]
+
+    status_badge = "🟢 กำลังทำงาน (Running)" if sess.get("is_running") else "⚪ ไม่ได้ทำงาน (Idle)"
+    cur_user = sess.get("current_user_name") or f"User {sess.get('current_user_id')}" if sess.get("current_user_id") else "ไม่มี"
+
+    text = (
+        "📊 <b>สถานะระบบกวาดล้างข้อความ DM (Checkpoint Tracker)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚙️ <b>สถานะปัจจุบัน:</b> {status_badge}\n"
+        f"👥 <b>ผู้ใช้ที่บันทึกในระบบ:</b> <b>{summary['total_tracked_users']}</b> บัญชี\n"
+        f"✅ <b>ล้างเสร็จสิ้นสมบูรณ์ 100%:</b> <b>{summary['completed_count']}</b> คน\n"
+        f"⏳ <b>กำลังทำค้างอยู่ (มี Checkpoint):</b> <b>{summary['in_progress_count']}</b> คน\n"
+        f"🚫 <b>ผู้ใช้บล็อกบอท:</b> <b>{summary['blocked_count']}</b> คน\n"
+        f"🗑️ <b>รวมข้อความบอทที่ลบไปแล้ว:</b> <b>{summary['total_deleted_msgs']:,}</b> ข้อความ\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    if sess.get("is_running"):
+        text += (
+            f"🔄 <b>Session ล่าสุด:</b> {sess.get('current_user_index', 0)}/{sess.get('total_users', 0)} บัญชี\n"
+            f"👤 <b>กำลังทำบัญชี:</b> <code>{cur_user}</code>\n\n"
+        )
+
+    # แสดง 5 รายการล่าสุดที่กำลังทำค้างอยู่
+    if summary["in_progress_users"]:
+        text += "⏳ <b>บัญชีที่ทำค้างอยู่ (ทำต่อจาก ID เดิมได้ทันที):</b>\n"
+        for u in summary["in_progress_users"][:5]:
+            u_title = html.escape(u.get("full_name") or u.get("username") or f"User {u['user_id']}")
+            text += f"• {u_title} (<code>{u['user_id']}</code>) ➔ ทำถึง ID: <code>{u.get('scanned_down_to_id', 0):,}</code> จาก {u.get('max_id', 0):,} (ลบแล้ว {u.get('deleted_count', 0)} ข้อความ)\n"
+        text += "\n"
+
+    text += (
+        "💡 <i>เมื่อสั่งล้างแชทอีกครั้ง ระบบจะข้ามคนที่เสร็จแล้วอัตโนมัติ และทำต่อจาก ID เดิมของคนที่ค้างอยู่ทันที ไม่ต้องเริ่มใหม่ครับ</i>\n"
+        "🧹 <i>พิมพ์ <code>/clean_non_v2_chat</code> เพื่อสั่งกวาดล้างต่อ</i>"
+    )
+
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("clean_reset"))
+async def handle_admin_clean_reset_command(message: Message):
+    """รีเซ็ตประวัติ Checkpoint การล้างแชททั้งหมด: /clean_reset"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    from bot.services.chat_cleaner_state import reset_all_clean_checkpoints
+    reset_all_clean_checkpoints()
+    await message.answer(
+        "🔄 <b>รีเซ็ตประวัติ Checkpoint การล้างแชททั้งหมดเรียบร้อยแล้ว!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✨ <i>การสั่งล้างแชทครั้งถัดไปจะเริ่มสแกนใหม่ตั้งแต่ต้นสำหรับทุกบัญชีครับ</i>",
+        parse_mode="HTML"
+    )
 
 
 @router.message(Command("clean_chat", "clean_user", "wipe_user_chat"))
@@ -5477,29 +5571,49 @@ async def handle_admin_clean_chat_command(message: Message, bot: Bot):
         if query.isdigit():
             target_uid = int(query)
             user_name = f"User {target_uid}"
+            user_uname = None
+            user_fname = user_name
         else:
             await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
             return
     else:
         target_uid = user.telegram_id
-        user_name = html.escape(user.full_name or f"User {target_uid}")
+        user_uname = user.username
+        user_fname = user.full_name or f"User {target_uid}"
+        user_name = html.escape(user_fname)
 
     status_msg = await message.answer(f"⏳ กำลังตรวจสอบและทยอยลบข้อความของบอทในแชท {user_name} (<code>{target_uid}</code>)...", parse_mode="HTML")
 
-    res = await clean_user_chat_messages(bot, target_uid)
+    res = await clean_user_chat_messages(
+        bot=bot,
+        user_id=target_uid,
+        username=user_uname,
+        full_name=user_fname,
+    )
     if res["success"]:
-        report_text = (
-            f"✅ <b>ดำเนินการลบข้อความของบอทในแชท {user_name} เสร็จสิ้น!</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"👤 <b>ผู้ใช้:</b> {user_name} (<code>{target_uid}</code>)\n"
-            f"🎯 <b>Message ID สูงสุดที่ตรวจพบ:</b> <code>ID {res['max_id']}</code>\n"
-            f"🔍 <b>สแกนทั้งหมด:</b> <b>{res['scanned_count']}</b> ข้อความ (ตั้งแต่ ID 1 ถึง {max(1, res['max_id'] - 1)})\n"
-            f"🗑️ <b>ลบข้อความฝั่งบอทสำเร็จ:</b> <b>{res['deleted_count']}</b> ข้อความ\n"
-            f"⏭️ <b>ข้ามข้อความของฝั่ง User/ที่ไม่มีอยู่:</b> <b>{res['skipped_count']}</b> ข้อความ\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "✨ <i>ข้อความ รูปภาพ QR Code และเมนูปุ่มกดของบอทถูกลบออกจากหน้าจอผู้ใช้เรียบร้อยแล้ว</i>\n"
-            "⚠️ <i>หมายเหตุ: ข้อความฝั่งที่ User พิมพ์ส่งมาเอง (บับเบิ้ลขวา) Telegram ไม่อนุญาตให้บอทลบตามกฎความปลอดภัยครับ</i>"
-        )
+        if res.get("already_completed"):
+            report_text = (
+                f"✅ <b>บัญชีนี้ล้างแชทเสร็จสิ้นครบ 100% แล้วก่อนหน้านี้!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>ผู้ใช้:</b> {user_name} (<code>{target_uid}</code>)\n"
+                f"🗑️ <b>ยอดข้อความที่ลบไปแล้ว:</b> <b>{res['deleted_count']}</b> ข้อความ\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "✨ <i>ระบบข้ามให้อัตโนมัติ ไม่ต้องสแกนซ้ำครับ</i>"
+            )
+        else:
+            resume_info = f"\n🔄 <b>ทำต่อจาก Checkpoint ID:</b> <code>{res['resumed_from_id']:,}</code>" if res.get("resumed_from_id") else ""
+            report_text = (
+                f"✅ <b>ดำเนินการลบข้อความของบอทในแชท {user_name} เสร็จสิ้น!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>ผู้ใช้:</b> {user_name} (<code>{target_uid}</code>)\n"
+                f"🎯 <b>Message ID สูงสุดที่ตรวจพบ:</b> <code>ID {res['max_id']}</code>{resume_info}\n"
+                f"🔍 <b>สแกนทั้งหมด:</b> <b>{res['scanned_count']}</b> ข้อความ (ลงไปจนถึง ID 1)\n"
+                f"🗑️ <b>ลบข้อความฝั่งบอทสำเร็จ:</b> <b>{res['deleted_count']}</b> ข้อความ\n"
+                f"⏭️ <b>ข้ามข้อความของฝั่ง User/ที่ไม่มีอยู่:</b> <b>{res['skipped_count']}</b> ข้อความ\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "💾 <i>บันทึกสถานะ Checkpoint Completed เรียบร้อยแล้ว</i>\n"
+                "✨ <i>ข้อความ รูปภาพ QR Code และเมนูปุ่มกดของบอทถูกลบออกจากหน้าจอผู้ใช้เรียบร้อยแล้ว</i>"
+            )
         try:
             await status_msg.edit_text(report_text, parse_mode="HTML")
         except Exception:
