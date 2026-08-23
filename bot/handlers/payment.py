@@ -24,6 +24,7 @@ from bot.models.schema import PaymentSlip, SlipStatus, PlanType, PLAN_DETAILS, g
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
 from bot.services.channel_service import is_user_v2_member
+from bot.services.payment_settings import is_promptpay_active, is_truemoney_active
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
 
 logger = logging.getLogger(__name__)
@@ -56,29 +57,29 @@ def extract_truemoney_url(text: str) -> Optional[str]:
 
 
 def get_payment_method_keyboard(plan_key: str) -> InlineKeyboardMarkup:
-    """สร้างปุ่มเลือกช่องทางการชำระเงิน (สแกน QR Code หรือ ซองของขวัญ TrueMoney)"""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📲 สแกน QR Code",
-                    callback_data=f"payment:method:promptpay:{plan_key}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🧧 ส่งซองของขวัญ TrueMoney (ซองแดง)",
-                    callback_data=f"payment:method:truemoney:{plan_key}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔙 กลับสู่เมนูหลัก",
-                    callback_data="menu:main",
-                ),
-            ],
-        ]
-    )
+    """สร้างปุ่มเลือกช่องทางการชำระเงินตามที่เปิดใช้งาน (สแกน QR Code หรือ ซองของขวัญ TrueMoney)"""
+    buttons = []
+    if is_promptpay_active():
+        buttons.append([
+            InlineKeyboardButton(
+                text="📲 สแกน QR Code",
+                callback_data=f"payment:method:promptpay:{plan_key}",
+            )
+        ])
+    if is_truemoney_active():
+        buttons.append([
+            InlineKeyboardButton(
+                text="🧧 ส่งซองของขวัญ TrueMoney (ซองแดง)",
+                callback_data=f"payment:method:truemoney:{plan_key}",
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(
+            text="🔙 กลับสู่เมนูหลัก",
+            callback_data="menu:main",
+        )
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def get_payment_cancel_keyboard(plan_key: str) -> InlineKeyboardMarkup:
@@ -159,6 +160,24 @@ async def handle_subscribe_plan_button(callback: CallbackQuery, state: FSMContex
     duration_str = format_plan_duration(plan_info)
     await state.clear()
 
+    has_qr = is_promptpay_active()
+    has_tmn = is_truemoney_active()
+
+    if not has_qr and not has_tmn:
+        await callback.answer("⚠️ ระบบรับชำระเงินปิดปรับปรุงชั่วคราว", show_alert=True)
+        disabled_text = (
+            f"⚠️ <b>ระบบชำระเงินปิดปรับปรุงชั่วคราว — {plan_info['badge']}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "ขณะนี้ระบบรับชำระเงินปิดปรับปรุงชั่วคราว ขออภัยในความไม่สะดวกครับ\n"
+            "กรุณาติดต่อแอดมินหรือลองใหม่อีกครั้งในภายหลังครับ 🙏"
+        )
+        await callback.message.edit_text(
+            text=disabled_text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 กลับสู่เมนูหลัก", callback_data="menu:main")]]),
+            parse_mode="HTML",
+        )
+        return
+
     method_text = (
         f"💳 <b>เลือกช่องทางชำระเงิน — {plan_info['badge']}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -166,11 +185,26 @@ async def handle_subscribe_plan_button(callback: CallbackQuery, state: FSMContex
         f"⏳ <b>ระยะเวลาสมาชิก:</b> <b>{duration_str}</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🌟 <b>กรุณาเลือกช่องทางที่คุณต้องการชำระเงิน:</b>\n\n"
-        "1️⃣ <b>📲 สแกน QR Code</b>\n"
-        "   • สแกน QR Code และส่งรูปสลิปโอนเงินเข้ามาในแชท\n\n"
-        "2️⃣ <b>🧧 ซองของขวัญ TrueMoney (ซองแดง)</b>\n"
-        "   • สร้างซองของขวัญ TrueMoney ตามยอดที่ระบุ และส่งลิงก์เข้ามาในแชท"
     )
+
+    if has_qr and has_tmn:
+        method_text += (
+            "1️⃣ <b>📲 สแกน QR Code</b>\n"
+            "   • สแกน QR Code และส่งรูปสลิปโอนเงินเข้ามาในแชท\n\n"
+            "2️⃣ <b>🧧 ซองของขวัญ TrueMoney (ซองแดง)</b>\n"
+            "   • สร้างซองของขวัญ TrueMoney ตามยอดที่ระบุ และส่งลิงก์เข้ามาในแชท"
+        )
+    elif has_tmn and not has_qr:
+        method_text += (
+            "🧧 <b>ซองของขวัญ TrueMoney (ซองแดง)</b>\n"
+            "   • สร้างซองของขวัญ TrueMoney ตามยอดที่ระบุ และส่งลิงก์เข้ามาในแชท\n\n"
+            "⚠️ <i>(ขณะนี้ระบบปิดรับชำระผ่าน QR Code ชั่วคราว)</i>"
+        )
+    else:
+        method_text += (
+            "📲 <b>สแกน QR Code</b>\n"
+            "   • สแกน QR Code และส่งรูปสลิปโอนเงินเข้ามาในแชท"
+        )
 
     # ส่งหรือแก้ไขข้อความตามความเหมาะสม
     if callback.message.photo or callback.message.document:
@@ -204,6 +238,21 @@ async def handle_subscribe_plan_button(callback: CallbackQuery, state: FSMContex
 async def handle_payment_method_promptpay(callback: CallbackQuery, state: FSMContext):
     """เริ่มขั้นตอนการชำระเงินด้วย QR Code (เฉพาะสมาชิก V.2)"""
     if not callback.from_user or not callback.message:
+        return
+
+    plan_key = callback.data.split(":")[-1]
+    if not is_promptpay_active():
+        await callback.answer("⚠️ ระบบชำระเงินผ่าน QR Code ปิดให้บริการชั่วคราว", show_alert=True)
+        if callback.message:
+            try:
+                await callback.message.edit_text(
+                    "⚠️ <b>ระบบชำระเงินผ่าน QR Code ปิดให้บริการชั่วคราว</b>\n\n"
+                    "ขณะนี้ระบบรับชำระผ่าน QR Code ปิดปรับปรุงชั่วคราว กรุณาเลือกชำระผ่านซองของขวัญ TrueMoney แทนครับ 🙏",
+                    reply_markup=get_payment_method_keyboard(plan_key),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
         return
 
     async with get_session() as session:

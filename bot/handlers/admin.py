@@ -47,6 +47,12 @@ from bot.services.channel_service import (
     format_user_channel_presence,
 )
 from bot.services.chat_cleaner import clean_user_chat_messages
+from bot.services.payment_settings import (
+    is_promptpay_active,
+    update_promptpay_setting,
+    is_truemoney_active,
+    update_truemoney_setting,
+)
 from bot.handlers.user_menu import get_main_menu_keyboard
 from bot.utils.time_utils import (
     BANGKOK_TZ,
@@ -639,6 +645,9 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "• <code>/trial</code> (หรือ <code>/trial_on</code> / <code>/trial_off</code>) — เปิด/ปิด/ดูสถานะ\n\n"
         "🔔 <b>11. ระบบแจ้งเตือนข้อความค้างตอบ (DM Reminder):</b>\n"
         "• <code>/dm_reminder</code> (หรือ <code>/dm_reminder_on</code> / <code>/dm_reminder_off</code>) — เปิด/ปิด/ดูสถานะแจ้งเตือนค้างตอบ\n\n"
+        "💳 <b>12. ระบบช่องทางชำระเงิน:</b>\n"
+        "• <code>/promptpay</code> (หรือ <code>/promptpay_on</code> / <code>/promptpay_off</code>) — เปิด/ปิด/ดูสถานะชำระผ่าน QR Code\n"
+        "• <code>/payment_methods</code> — ดูสถานะช่องทางชำระเงินทั้งหมด\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "💡 <i>แตะปุ่มด่วนด้านล่างเพื่อใช้งานเมนูหลักได้ทันทีครับ</i>"
     )
@@ -675,6 +684,9 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
             ],
             [
                 InlineKeyboardButton(text="🧹 ลบข้อความ DM ทุกคนที่ไม่ใช่ V.2", callback_data="admin:confirm_clean_non_v2_dms"),
+            ],
+            [
+                InlineKeyboardButton(text="💳 ตั้งค่าช่องทางชำระเงิน (QR/TrueMoney)", callback_data="admin_menu:payment_methods"),
             ],
         ]
     )
@@ -5487,6 +5499,136 @@ async def handle_admin_clean_chat_command(message: Message, bot: Bot):
             await message.answer(f"⚠️ ไม่สามารถลบได้เนื่องจากผู้ใช้ <code>{target_uid}</code> บล็อกบอทไว้", parse_mode="HTML")
         else:
             await message.answer(f"❌ <b>ลบไม่สำเร็จ:</b> <code>{html.escape(detail)}</code>", parse_mode="HTML")
+
+
+def get_payment_methods_status_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
+    """สร้างข้อความและปุ่มจัดการช่องทางการชำระเงิน"""
+    pp_active = is_promptpay_active()
+    tmn_active = is_truemoney_active()
+
+    text = (
+        "💳 <b>ตั้งค่าช่องทางการชำระเงิน (Payment Methods)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📲 <b>สแกน QR Code (PromptPay):</b> {'🟢 เปิดใช้งาน (Active)' if pp_active else '🔴 ปิดใช้งาน (Disabled)'}\n"
+        f"🧧 <b>ซองของขวัญ TrueMoney:</b> {'🟢 เปิดใช้งาน (Active)' if tmn_active else '🔴 ปิดใช้งาน (Disabled)'}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>เมื่อปิด QR Code บอทจะไม่แสดงตัวเลือกสแกน QR Code ให้ผู้ใช้ และจะรับชำระเฉพาะซองของขวัญ TrueMoney เท่านั้น</i>\n"
+        "👉 <i>แตะปุ่มด้านล่างเพื่อเปิดหรือปิดช่องทางที่ต้องการได้ทันทีครับ</i>"
+    )
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔴 ปิดชำระผ่าน QR Code" if pp_active else "🟢 เปิดชำระผ่าน QR Code",
+                    callback_data="pay_method_action:promptpay_off" if pp_active else "pay_method_action:promptpay_on"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔴 ปิดซอง TrueMoney" if tmn_active else "🟢 เปิดซอง TrueMoney",
+                    callback_data="pay_method_action:truemoney_off" if tmn_active else "pay_method_action:truemoney_on"
+                ),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 กลับเมนูแอดมิน", callback_data="admin_menu:back_to_main"),
+            ]
+        ]
+    )
+    return text, kb
+
+
+@router.message(Command("promptpay", "qr", "qr_payment", "promptpay_setting"))
+async def handle_promptpay_command(message: Message):
+    """คำสั่งเปิด/ปิด/ดูสถานะการชำระเงินผ่าน QR Code: /promptpay [on/off]"""
+    if not is_admin_chat(message.chat.id):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) >= 2:
+        subcmd = parts[1].strip().lower()
+        if subcmd in ("on", "enable", "start", "open"):
+            update_promptpay_setting(is_active=True)
+            text, kb = get_payment_methods_status_text_and_kb()
+            await message.answer(f"✅ <b>เปิดใช้งานการชำระเงินผ่าน QR Code เรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+            return
+        elif subcmd in ("off", "disable", "stop", "close"):
+            update_promptpay_setting(is_active=False)
+            text, kb = get_payment_methods_status_text_and_kb()
+            await message.answer(f"❌ <b>ปิดใช้งานการชำระเงินผ่าน QR Code เรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+            return
+
+    text, kb = get_payment_methods_status_text_and_kb()
+    await message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("promptpay_on", "qr_on"))
+async def handle_promptpay_on_command(message: Message):
+    """คำสั่งเปิดใช้งานการชำระเงินผ่าน QR Code: /promptpay_on"""
+    if not is_admin_chat(message.chat.id):
+        return
+    update_promptpay_setting(is_active=True)
+    text, kb = get_payment_methods_status_text_and_kb()
+    await message.answer(f"✅ <b>เปิดใช้งานการชำระเงินผ่าน QR Code เรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("promptpay_off", "qr_off"))
+async def handle_promptpay_off_command(message: Message):
+    """คำสั่งปิดใช้งานการชำระเงินผ่าน QR Code: /promptpay_off"""
+    if not is_admin_chat(message.chat.id):
+        return
+    update_promptpay_setting(is_active=False)
+    text, kb = get_payment_methods_status_text_and_kb()
+    await message.answer(f"❌ <b>ปิดใช้งานการชำระเงินผ่าน QR Code เรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("payment_methods", "payment_settings", "pay_setting"))
+async def handle_payment_methods_command(message: Message):
+    """คำสั่งดูและจัดการช่องทางการชำระเงินทั้งหมด: /payment_methods"""
+    if not is_admin_chat(message.chat.id):
+        return
+    text, kb = get_payment_methods_status_text_and_kb()
+    await message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin_menu:payment_methods")
+async def handle_admin_menu_payment_methods_callback(callback: CallbackQuery):
+    """จัดการปุ่มลัด [💳 จัดการช่องทางชำระเงิน] ในเมนู Admin"""
+    if not is_admin_chat(callback.message.chat.id):
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+    await callback.answer()
+    text, kb = get_payment_methods_status_text_and_kb()
+    await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("pay_method_action:"))
+async def handle_pay_method_action_callback(callback: CallbackQuery):
+    """จัดการ Quick Actions ปุ่มลัดเปิด/ปิด ช่องทางชำระเงิน"""
+    if not is_admin_chat(callback.message.chat.id):
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    action = callback.data.split(":")[1]
+    if action == "promptpay_on":
+        update_promptpay_setting(is_active=True)
+        await callback.answer("✅ เปิดใช้งานชำระเงินผ่าน QR Code แล้ว")
+    elif action == "promptpay_off":
+        update_promptpay_setting(is_active=False)
+        await callback.answer("❌ ปิดใช้งานชำระเงินผ่าน QR Code แล้ว")
+    elif action == "truemoney_on":
+        update_truemoney_setting(is_active=True)
+        await callback.answer("✅ เปิดใช้งานชำระเงินผ่าน TrueMoney แล้ว")
+    elif action == "truemoney_off":
+        update_truemoney_setting(is_active=False)
+        await callback.answer("❌ ปิดใช้งานชำระเงินผ่าน TrueMoney แล้ว")
+
+    text, kb = get_payment_methods_status_text_and_kb()
+    try:
+        await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        pass
+
 
 
 
