@@ -228,3 +228,59 @@ def format_user_channel_presence(in_channels: List[int]) -> str:
         names = [get_channel_label(c) for c in in_channels]
         return f"🟢 อยู่ใน {len(in_channels)} ห้อง ({' + '.join(names)})"
     return "⚪ ออกจากห้องแล้ว (ไม่อยู่ในห้องใดเลย)"
+
+
+_discussion_chat_id_cache: Optional[int] = None
+
+
+async def get_discussion_chat_id(bot: Bot) -> Optional[int]:
+    """
+    ดึง Chat ID ของห้องพูดคุย (Discussion / Community Group)
+    โดยตรวจสอบจาก:
+    1. config.CHAT_GROUP_ID (หากตั้งค่าไว้ใน .env)
+    2. linked_chat_id ของ Channel หลัก V.1 (config.CHANNEL_ID)
+    3. linked_chat_id ของ Channel ใหม่ V.2 (config.SECONDARY_CHANNEL_ID)
+    4. Resolve Username จาก config.FREE_CHAT_GROUP_URL (เช่น @barelivechat)
+    """
+    global _discussion_chat_id_cache
+    if _discussion_chat_id_cache:
+        return _discussion_chat_id_cache
+
+    # 1. Config CHAT_GROUP_ID
+    if getattr(config, "CHAT_GROUP_ID", None):
+        _discussion_chat_id_cache = config.CHAT_GROUP_ID
+        return _discussion_chat_id_cache
+
+    # 2. Check linked_chat_id of Primary Channel
+    try:
+        ch = await bot.get_chat(config.CHANNEL_ID)
+        if getattr(ch, "linked_chat_id", None):
+            _discussion_chat_id_cache = ch.linked_chat_id
+            return _discussion_chat_id_cache
+    except Exception:
+        pass
+
+    # 3. Check linked_chat_id of Secondary Channel
+    if config.SECONDARY_CHANNEL_ID:
+        try:
+            sec_ch = await bot.get_chat(config.SECONDARY_CHANNEL_ID)
+            if getattr(sec_ch, "linked_chat_id", None):
+                _discussion_chat_id_cache = sec_ch.linked_chat_id
+                return _discussion_chat_id_cache
+        except Exception:
+            pass
+
+    # 4. Resolve username from FREE_CHAT_GROUP_URL
+    if config.FREE_CHAT_GROUP_URL:
+        uname = config.FREE_CHAT_GROUP_URL.rstrip("/").split("/")[-1]
+        if uname and not uname.startswith("+"):
+            try:
+                g_chat = await bot.get_chat(f"@{uname}")
+                if g_chat and g_chat.id:
+                    _discussion_chat_id_cache = g_chat.id
+                    return _discussion_chat_id_cache
+            except Exception:
+                pass
+
+    return None
+

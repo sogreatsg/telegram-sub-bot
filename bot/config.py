@@ -57,6 +57,10 @@ class Settings(BaseSettings):
         default="https://t.me/barelivechat",
         description="Free community chat group URL",
     )
+    CHAT_GROUP_ID: int | None = Field(
+        default=None,
+        description="Discussion / Free Community Chat Group ID (optional, e.g. -1001234567890)",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
