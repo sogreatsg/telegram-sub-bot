@@ -1,7 +1,7 @@
 import logging
 from typing import Callable, Dict, Any, Awaitable
 from aiogram import BaseMiddleware
-from aiogram.types import TelegramObject, CallbackQuery
+from aiogram.types import TelegramObject, CallbackQuery, Message
 
 from bot.config import get_settings
 from bot.models.schema import User
@@ -60,4 +60,45 @@ class V2MemberOnlyCallbackMiddleware(BaseMiddleware):
                 pass
 
         # 3. ไม่ส่งต่อไปยัง handler ใดๆ ทั้งสิ้น
+        return
+
+
+class V2MemberOnlyMessageMiddleware(BaseMiddleware):
+    """
+    Middleware สำหรับกรอง Message ทั้งหมดจากฝั่ง User ในแชทส่วนตัว (Private DM):
+    - สมาชิกห้อง V.2 และ Admin -> สามารถส่งข้อความและพิมพ์คำสั่งได้ตามปกติ
+    - สมาชิกห้อง V.1 และผู้ใช้สมัครใหม่ -> ระงับการตอบกลับ 100% (บอทเงียบสนิท ไม่ตอบใดๆ)
+    """
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: Dict[str, Any],
+    ) -> Any:
+        if not isinstance(event, Message):
+            return await handler(event, data)
+
+        # ถ้าส่งใน Admin Group ให้ผ่านได้เสมอ
+        chat = data.get("event_chat")
+        if chat and chat.id == config.ADMIN_GROUP_ID:
+            return await handler(event, data)
+
+        # ถ้าส่งในกลุ่ม/แชเนลอื่นๆ ให้ handler ประจำกลุ่มดูแลตามปกติ
+        if chat and chat.type != "private":
+            return await handler(event, data)
+
+        user = data.get("event_from_user")
+        if not user:
+            return await handler(event, data)
+
+        # ตรวจสอบสถานะสมาชิกในฐานข้อมูล
+        async with get_session() as session:
+            db_user = await session.get(User, user.id)
+            if is_user_v2_member(db_user):
+                return await handler(event, data)
+
+        # หากไม่ใช่สมาชิก V.2 (อยู่ V.1 หรือสมัครใหม่)
+        logger.info(f"[V2_FILTER] Blocked message '{event.text or event.caption or 'media'}' from non-V2 user {user.id} (@{user.username})")
+        # ไม่ส่งต่อไปยัง handler ใดๆ ทั้งสิ้น (บอทเงียบสนิท)
         return

@@ -2,30 +2,57 @@ import sys
 import os
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
+from aiogram.types import CallbackQuery, Message
 
 # Add root directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from bot.config import get_settings
 from bot.models.schema import User
-from bot.middlewares.v2_filter import V2MemberOnlyCallbackMiddleware
+from bot.middlewares.v2_filter import (
+    V2MemberOnlyCallbackMiddleware,
+    V2MemberOnlyMessageMiddleware,
+)
 
 async def test_middleware():
-    mw = V2MemberOnlyCallbackMiddleware()
+    config = get_settings()
+    cb_mw = V2MemberOnlyCallbackMiddleware()
+    msg_mw = V2MemberOnlyMessageMiddleware()
 
-    # Mock handler
     handler = AsyncMock()
 
     # 1. Test Admin Group callback
-    event_admin_group = MagicMock()
-    event_admin_group.__class__.__name__ = "CallbackQuery"
+    event_admin_group = MagicMock(spec=CallbackQuery, data="admin:summary")
     data_admin = {
         "event_from_user": MagicMock(id=999),
-        "event_chat": MagicMock(id=-1003893668383),  # Admin group
+        "event_chat": MagicMock(id=config.ADMIN_GROUP_ID),
     }
-    await mw(handler, event_admin_group, data_admin)
+    await cb_mw(handler, event_admin_group, data_admin)
     assert handler.called, "Admin group callbacks should be passed to handler"
 
-    print("Middleware test passed successfully!")
+    # 2. Test Admin Group message
+    handler.reset_mock()
+    msg_admin_group = MagicMock(spec=Message, text="/admin")
+    await msg_mw(handler, msg_admin_group, data_admin)
+    assert handler.called, "Admin group messages should be passed to handler"
+
+    # 3. Test non-V2 private DM message (should be blocked)
+    handler.reset_mock()
+    msg_private = MagicMock(spec=Message, text="/start", caption=None)
+    data_non_v2 = {
+        "event_from_user": MagicMock(id=999999, username="test_non_v2"),
+        "event_chat": MagicMock(id=999999, type="private"),
+    }
+    await msg_mw(handler, msg_private, data_non_v2)
+    assert not handler.called, "Non-V2 private DM messages should be completely blocked"
+
+    # 4. Test non-V2 callback query (should be blocked)
+    handler.reset_mock()
+    cb_private = MagicMock(spec=CallbackQuery, data="menu:subscribe:VIP_30D", message=MagicMock())
+    await cb_mw(handler, cb_private, data_non_v2)
+    assert not handler.called, "Non-V2 callback queries should be completely blocked"
+
+    print("All middleware tests passed successfully!")
 
 if __name__ == "__main__":
     asyncio.run(test_middleware())

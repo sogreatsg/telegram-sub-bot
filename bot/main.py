@@ -11,7 +11,10 @@ from bot.config import get_settings
 from bot.services.database import init_db, close_db
 from bot.services.scheduler import setup_scheduler
 from bot.services.channel_service import set_channel_title
-from bot.middlewares import V2MemberOnlyCallbackMiddleware
+from bot.middlewares import (
+    V2MemberOnlyCallbackMiddleware,
+    V2MemberOnlyMessageMiddleware,
+)
 from bot.handlers import (
     user_menu_router,
     payment_router,
@@ -101,9 +104,17 @@ async def main() -> None:
 
     # 3. Register Middleware & Handler Routers
     v2_callback_guard = V2MemberOnlyCallbackMiddleware()
+    v2_message_guard = V2MemberOnlyMessageMiddleware()
+
+    # Callback Middleware (ดักจับการกดปุ่มทั้งหมด)
     payment_router.callback_query.middleware(v2_callback_guard)
     user_menu_router.callback_query.middleware(v2_callback_guard)
     promotion_user_router.callback_query.middleware(v2_callback_guard)
+
+    # Message Middleware (ดักจับข้อความ คำสั่ง /start และไฟล์แนบทั้งหมดใน DM)
+    payment_router.message.middleware(v2_message_guard)
+    user_menu_router.message.middleware(v2_message_guard)
+    promotion_user_router.message.middleware(v2_message_guard)
 
     dp.include_router(payment_router)
     dp.include_router(admin_router)
