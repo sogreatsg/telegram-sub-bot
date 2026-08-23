@@ -22,6 +22,11 @@ from bot.services.reconciliation import reconcile_user, reconcile_all_users, for
 from bot.services.chat_logger import log_chat_message
 from bot.services.referral import is_referral_active, update_referral_settings
 from bot.services.trial import is_trial_active, update_trial_settings
+from bot.services.notification_settings import (
+    is_unanswered_dm_reminder_active,
+    update_unanswered_dm_reminder_setting,
+    get_notification_settings,
+)
 from bot.services.channel_service import (
     get_user_target_channel_id,
     get_all_target_channel_ids,
@@ -621,6 +626,8 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "• <code>/referral</code> (หรือ <code>/referral_on</code> / <code>/referral_off</code>) — เปิด/ปิด/ดูสถานะ\n\n"
         "⏱️ <b>10. ระบบทดลองฟรี:</b>\n"
         "• <code>/trial</code> (หรือ <code>/trial_on</code> / <code>/trial_off</code>) — เปิด/ปิด/ดูสถานะ\n\n"
+        "🔔 <b>11. ระบบแจ้งเตือนข้อความค้างตอบ (DM Reminder):</b>\n"
+        "• <code>/dm_reminder</code> (หรือ <code>/dm_reminder_on</code> / <code>/dm_reminder_off</code>) — เปิด/ปิด/ดูสถานะแจ้งเตือนค้างตอบ\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "💡 <i>แตะปุ่มด่วนด้านล่างเพื่อใช้งานเมนูหลักได้ทันทีครับ</i>"
     )
@@ -649,6 +656,7 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
             ],
             [
                 InlineKeyboardButton(text="⏱️ ระบบทดลองฟรี", callback_data="admin_menu:trial"),
+                InlineKeyboardButton(text="🔔 เตือนข้อความค้างตอบ", callback_data="admin_menu:unanswered_reminder"),
             ],
         ]
     )
@@ -4060,6 +4068,122 @@ async def handle_trial_action_callback(callback: CallbackQuery):
         update_trial_settings(is_active=False)
         await callback.answer("❌ ปิดใช้งานระบบทดลองฟรีเรียบร้อยแล้ว")
         text, kb = await get_trial_status_text_and_kb()
+        await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+async def get_unanswered_reminder_status_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
+    """สร้างข้อความและปุ่มสำหรับหน้าจัดการระบบแจ้งเตือนข้อความค้างตอบ (Unanswered DM Reminder)"""
+    is_active = is_unanswered_dm_reminder_active()
+    status_icon = "🟢" if is_active else "🔴"
+    status_str = "เปิดใช้งาน (แจ้งเตือนทุก 10 นาทีเมื่อมีข้อความค้างตอบ)" if is_active else "ปิดใช้งาน (ไม่ส่งข้อความเตือนค้างตอบ)"
+
+    text = (
+        "🔔 <b>ระบบแจ้งเตือนข้อความค้างตอบ (Unanswered DM Reminder)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>สถานะปัจจุบัน:</b> {status_icon} <b>{status_str}</b>\n\n"
+        "ℹ️ <b>คำอธิบายการทำงาน:</b>\n"
+        "• เมื่อมีผู้ใช้ส่งข้อความ Direct Message หาบอท และแอดมินยังไม่ตอบเกิน 10 นาที\n"
+        "• ระบบจะรวบรวมรายชื่อและส่งข้อความแจ้งเตือน <code>🚨 [แจ้งเตือนข้อความค้างตอบ]</code> เข้า Admin Group ทุกๆ 10 นาที\n"
+        "• หากปิดใช้งาน ระบบจะไม่ส่งข้อความเตือนซ้ำนี้เข้ากลุ่มแอดมิน\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "👉 <i>แตะปุ่มด้านล่างเพื่อเปิดหรือปิดการแจ้งเตือนได้ทันที:</i>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🟢 เปิดการแจ้งเตือน", callback_data="dm_reminder_action:on"),
+            InlineKeyboardButton(text="🔴 ปิดการแจ้งเตือน", callback_data="dm_reminder_action:off"),
+        ],
+        [
+            InlineKeyboardButton(text="🔄 รีเฟรชสถานะ", callback_data="admin_menu:unanswered_reminder"),
+            InlineKeyboardButton(text="🔙 กลับสู่เมนูแอดมิน", callback_data="admin_menu:main"),
+        ]
+    ])
+    return text, kb
+
+
+async def show_unanswered_reminder_status(message_or_callback):
+    """ส่งหรือแก้ไขข้อความแสดงสถานะระบบแจ้งเตือนข้อความค้างตอบ"""
+    text, kb = await get_unanswered_reminder_status_text_and_kb()
+    if isinstance(message_or_callback, CallbackQuery):
+        try:
+            await message_or_callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await message_or_callback.message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message_or_callback.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("dm_reminder", "notify_unanswered", "unanswered_reminder", "toggle_unanswered", "reminder_setting"))
+async def handle_dm_reminder_command(message: Message):
+    """คำสั่งดูสถานะหรือควบคุมระบบแจ้งเตือนข้อความค้างตอบ: /dm_reminder [on/off]"""
+    if not is_admin_chat(message.chat.id):
+        return
+    args = (message.text or "").split()[1:]
+    if not args:
+        await show_unanswered_reminder_status(message)
+        return
+
+    subcmd = args[0].lower()
+    if subcmd in ("on", "enable", "start", "open"):
+        update_unanswered_dm_reminder_setting(is_active=True)
+        text, kb = await get_unanswered_reminder_status_text_and_kb()
+        await message.answer(f"✅ <b>เปิดใช้งานการแจ้งเตือนข้อความค้างตอบเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+    elif subcmd in ("off", "disable", "stop", "close"):
+        update_unanswered_dm_reminder_setting(is_active=False)
+        text, kb = await get_unanswered_reminder_status_text_and_kb()
+        await message.answer(f"❌ <b>ปิดใช้งานการแจ้งเตือนข้อความค้างตอบเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+    else:
+        await show_unanswered_reminder_status(message)
+
+
+@router.message(Command("dm_reminder_on", "notify_unanswered_on"))
+async def handle_dm_reminder_on_command(message: Message):
+    """คำสั่งเปิดใช้งานการแจ้งเตือนข้อความค้างตอบ: /dm_reminder_on"""
+    if not is_admin_chat(message.chat.id):
+        return
+    update_unanswered_dm_reminder_setting(is_active=True)
+    text, kb = await get_unanswered_reminder_status_text_and_kb()
+    await message.answer(f"✅ <b>เปิดใช้งานการแจ้งเตือนข้อความค้างตอบเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("dm_reminder_off", "notify_unanswered_off"))
+async def handle_dm_reminder_off_command(message: Message):
+    """คำสั่งปิดใช้งานการแจ้งเตือนข้อความค้างตอบ: /dm_reminder_off"""
+    if not is_admin_chat(message.chat.id):
+        return
+    update_unanswered_dm_reminder_setting(is_active=False)
+    text, kb = await get_unanswered_reminder_status_text_and_kb()
+    await message.answer(f"❌ <b>ปิดใช้งานการแจ้งเตือนข้อความค้างตอบเรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin_menu:unanswered_reminder")
+async def handle_admin_menu_unanswered_reminder_callback(callback: CallbackQuery):
+    """จัดการปุ่มลัด [🔔 แจ้งเตือนข้อความค้างตอบ] ในเมนู Admin"""
+    if not is_admin_chat(callback.message.chat.id):
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+    await callback.answer()
+    await show_unanswered_reminder_status(callback)
+
+
+@router.callback_query(F.data.startswith("dm_reminder_action:"))
+async def handle_dm_reminder_action_callback(callback: CallbackQuery):
+    """จัดการ Quick Actions ปุ่มลัดเปิด/ปิด การแจ้งเตือนข้อความค้างตอบ"""
+    if not is_admin_chat(callback.message.chat.id):
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    action = callback.data.split(":")[1]
+    if action == "on":
+        update_unanswered_dm_reminder_setting(is_active=True)
+        await callback.answer("✅ เปิดใช้งานการแจ้งเตือนข้อความค้างตอบแล้ว")
+        text, kb = await get_unanswered_reminder_status_text_and_kb()
+        await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+    elif action == "off":
+        update_unanswered_dm_reminder_setting(is_active=False)
+        await callback.answer("❌ ปิดใช้งานการแจ้งเตือนข้อความค้างตอบแล้ว")
+        text, kb = await get_unanswered_reminder_status_text_and_kb()
         await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
 
 

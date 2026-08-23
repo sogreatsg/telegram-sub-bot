@@ -17,6 +17,7 @@ from bot.models.schema import Subscription, SubStatus, PaymentSlip, SlipStatus, 
 from bot.services.database import get_session
 from bot.services.referral import award_referral_bonus
 from bot.services.subscription import PENDING_STALE_HOURS, activate_pending_subscription, is_pending_stale
+from bot.services.notification_settings import is_unanswered_dm_reminder_active
 from bot.services.channel_service import (
     kick_user_from_all_target_channels,
     check_user_in_channel,
@@ -903,8 +904,11 @@ async def check_unanswered_user_dms_reminder(bot: Bot) -> None:
     """
     ตรวจสอบข้อความล่าสุดที่เป็น DM จาก User หากแอดมินยังไม่ตอบกลับและรอนานเกิน 10 นาที
     จะรวบรวมรายชื่อผู้ใช้ที่ยังไม่ได้รับการตอบกลับแล้วส่งแจ้งเตือนเข้า Admin Group ทุก 10 นาที
-    หากรอบไหนไม่มีข้อความค้างตอบ จะไม่ส่งข้อความเตือน
+    หากรอบไหนไม่มีข้อความค้างตอบ หรือแอดมินปิดการแจ้งเตือนไว้ จะไม่ส่งข้อความเตือน
     """
+    if not is_unanswered_dm_reminder_active():
+        return
+
     now = datetime.now(timezone.utc)
     try:
         async with get_session() as session:
