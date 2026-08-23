@@ -45,6 +45,7 @@ from bot.services.channel_service import (
     check_user_presence_all_channels,
     format_user_channel_presence,
 )
+from bot.services.chat_cleaner import clean_user_chat_messages
 from bot.handlers.user_menu import get_main_menu_keyboard
 from bot.utils.time_utils import (
     BANGKOK_TZ,
@@ -621,7 +622,9 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "• <code>/kick [User ID]</code> — สั่งเตะออกจาก Channel VIP ทันที\n"
         "• <code>/kick_all_v1</code> — 🚪 สั่งเตะสมาชิกทุกคนออกจาก Channel V.1\n"
         "• <code>/kick_all_chat</code> — 💬 สั่งเตะสมาชิกทุกคนออกจากห้องพูดคุย (Community Chat)\n"
-        "• <code>/kick_chat [User ID/@user]</code> — 💬 เตะผู้ใช้รายคนออกจากห้องพูดคุย\n\n"
+        "• <code>/kick_chat [User ID/@user]</code> — 💬 เตะผู้ใช้รายคนออกจากห้องพูดคุย\n"
+        "• <code>/clean_non_v2_chat</code> — 🧹 สั่งลบข้อความบอทใน DM ของทุกคนที่ไม่ใช่ V.2\n"
+        "• <code>/clean_chat [User ID/@user]</code> — 🧹 ลบข้อความบอทใน DM ของผู้ใช้รายคน\n\n"
         "🗑️ <b>7. รีเซ็ตข้อมูล:</b>\n"
         "• <code>/reset_user [User ID/@user]</code> — ล้างข้อมูลผู้ใช้ทั้งหมดเพื่อเริ่มใหม่\n"
         "• <code>/reset_trial [User ID/@user]</code> — รีเซ็ตสิทธิ์ทดลองฟรีให้ผู้ใช้\n\n"
@@ -668,6 +671,9 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
             [
                 InlineKeyboardButton(text="🚪 เตะทุกคนออกจาก V.1", callback_data="admin:confirm_kick_all_v1"),
                 InlineKeyboardButton(text="💬 เตะทุกคนออกจากห้องแชท", callback_data="admin:confirm_kick_all_chat"),
+            ],
+            [
+                InlineKeyboardButton(text="🧹 ลบข้อความ DM ทุกคนที่ไม่ใช่ V.2", callback_data="admin:confirm_clean_non_v2_dms"),
             ],
         ]
     )
@@ -5161,6 +5167,229 @@ async def handle_admin_kick_chat_command(message: Message, bot: Bot):
         )
     except Exception as e:
         await message.answer(f"❌ <b>เตะไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
+
+def get_clean_non_v2_dms_confirmation_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
+    """สร้างข้อความและปุ่มยืนยันสำหรับคำสั่งลบข้อความ DM ทั้งหมดของทุกคนที่ไม่ใช่สมาชิก V.2"""
+    text = (
+        "⚠️ <b>ยืนยันการลบข้อความของบอทใน DM ของทุกคนที่ไม่ใช่สมาชิก V.2?</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🎯 <b>กลุ่มเป้าหมายที่จะถูกลบข้อความ:</b>\n"
+        "• สมาชิกห้องเดิม V.1 ทั้งหมด\n"
+        "• ผู้ใช้ที่ยังไม่ได้สมัครสมาชิก / ผู้ใช้ที่เคยกด /start หรือทักแชทเข้ามาทั้งหมด\n\n"
+        "✨ <b>กลุ่มที่จะไม่ได้รับผลกระทบ (ปลอดภัย 100%):</b>\n"
+        "• <b>สมาชิกห้อง BareLive V.2 (สมาชิกปัจจุบัน)</b> จะไม่ถูกลบข้อความใดๆ\n"
+        "• <b>กลุ่ม Admin</b> จะไม่ได้รับผลกระทบ\n\n"
+        "🚨 <b>ผลลัพธ์:</b>\n"
+        "• บอทจะทำการทยอยลบข้อความทุกอย่างที่บอทเคยส่งไป (เมนู, ราคา, QR Code, ลิงก์เชิญ, ข้อความต้อนรับ ฯลฯ)\n"
+        "• ผู้ใช้กลุ่มเป้าหมายจะมองไม่เห็นข้อความของบอทอีกต่อไป\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "👉 <i>กรุณากดยืนยันด้านล่างหากต้องการเริ่มการกวาดล้างข้อความทันที</i>"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🧹 ยืนยันลบข้อความ DM ทุกคนที่ไม่ใช่ V.2", callback_data="admin:do_clean_non_v2_dms"),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 ยกเลิก", callback_data="admin:cancel_clean_non_v2_dms"),
+            ]
+        ]
+    )
+    return text, kb
+
+
+@router.message(Command("clean_non_v2_chat", "clean_all_v1_dms", "clean_all_dms", "wipe_all_dms", "clean_dms"))
+async def handle_clean_non_v2_chat_command(message: Message):
+    """คำสั่งแอดมินสำหรับลบข้อความ DM ของผู้ใช้ที่ไม่ใช่สมาชิก V.2 ทุกคน: /clean_non_v2_chat"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+    text, kb = get_clean_non_v2_dms_confirmation_text_and_kb()
+    await message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:confirm_clean_non_v2_dms")
+async def handle_admin_confirm_clean_non_v2_dms_callback(callback: CallbackQuery):
+    """Callback เปิดหน้าต่างยืนยันลบข้อความ DM จากปุ่มใน Admin Menu"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+    await callback.answer()
+    text, kb = get_clean_non_v2_dms_confirmation_text_and_kb()
+    await callback.message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:cancel_clean_non_v2_dms")
+async def handle_admin_cancel_clean_non_v2_dms_callback(callback: CallbackQuery):
+    """Callback ยกเลิกการลบข้อความ DM"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+    await callback.answer("ยกเลิกคำสั่งเรียบร้อย")
+    try:
+        await callback.message.edit_text("❌ <b>ยกเลิกการลบข้อความ DM เรียบร้อยแล้ว</b>", parse_mode="HTML")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "admin:do_clean_non_v2_dms")
+async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เริ่มกระบวนการกวาดล้างข้อความ DM ของทุกคนที่ไม่ใช่สมาชิก V.2"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    admin_name = f"@{callback.from_user.username}" if callback.from_user.username else html.escape(callback.from_user.full_name)
+    await callback.answer("🚀 กำลังเริ่มกระบวนการลบข้อความ DM...")
+
+    status_msg = await callback.message.edit_text(
+        "🔄 <b>กำลังเริ่มกระบวนการลบข้อความ DM ของทุกคนที่ไม่ใช่สมาชิก V.2...</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👑 <b>ผู้สั่งการ:</b> {admin_name}\n"
+        "⏳ กรุณารอสักครู่ ระบบกำลังค้นหารายชื่อผู้ใช้และทยอยดำเนินการ...",
+        parse_mode="HTML"
+    )
+
+    scanned_count = 0
+    cleaned_user_count = 0
+    skipped_v2_count = 0
+    blocked_count = 0
+    total_msgs_deleted = 0
+    error_count = 0
+
+    try:
+        async with get_session() as session:
+            stmt = select(User)
+            all_users = (await session.execute(stmt)).scalars().all()
+            total_users = len(all_users)
+
+            for i, user in enumerate(all_users, 1):
+                scanned_count += 1
+                uid = user.telegram_id
+
+                # ตรวจสอบว่าเป็นสมาชิก V.2 หรือไม่
+                if is_user_v2_member(user):
+                    skipped_v2_count += 1
+                    continue
+
+                # ดำเนินการลบข้อความใน DM
+                try:
+                    del_count, success, detail = await clean_user_chat_messages(bot, uid)
+                    if success:
+                        cleaned_user_count += 1
+                        total_msgs_deleted += del_count
+                    elif detail == "BLOCKED_BOT":
+                        blocked_count += 1
+                    else:
+                        error_count += 1
+                except Exception as e:
+                    logger.debug(f"Error cleaning DM for user {uid}: {e}")
+                    error_count += 1
+
+                await asyncio.sleep(0.06)
+
+                if i % 15 == 0 or i == total_users:
+                    try:
+                        await status_msg.edit_text(
+                            "🔄 <b>กำลังดำเนินการลบข้อความ DM ของทุกคนที่ไม่ใช่ V.2...</b>\n"
+                            "━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📊 <b>ความคืบหน้า:</b> {i}/{total_users} บัญชี\n"
+                            f"🧹 <b>ล้างแชทสำเร็จ:</b> <b>{cleaned_user_count}</b> คน\n"
+                            f"🗑️ <b>ยอดข้อความที่ลบแล้ว:</b> <b>{total_msgs_deleted:,}</b> ข้อความ\n"
+                            f"🛡️ <b>ข้ามสมาชิก V.2 (ปลอดภัย):</b> {skipped_v2_count} คน\n"
+                            f"🚫 <b>บล็อกบอท/ติดต่อไม่ได้:</b> {blocked_count} คน\n"
+                            "━━━━━━━━━━━━━━━━━━━━\n"
+                            "⏳ <i>กรุณารอสักครู่จนกว่าระบบจะทำงานเสร็จสิ้น...</i>",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+
+        final_report = (
+            "🎉 <b>ดำเนินการกวาดล้างข้อความ DM ของทุกคนที่ไม่ใช่สมาชิก V.2 เสร็จสมบูรณ์!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"👑 <b>ผู้สั่งการ:</b> {admin_name}\n"
+            f"🔍 <b>ตรวจสอบผู้ใช้ทั้งหมด:</b> <b>{scanned_count}</b> บัญชี\n"
+            f"🧹 <b>ล้างข้อความสำเร็จ:</b> <b>{cleaned_user_count}</b> คน\n"
+            f"🗑️ <b>จำนวนข้อความที่ลบทั้งหมด:</b> <b>{total_msgs_deleted:,}</b> ข้อความ\n"
+            f"🛡️ <b>ข้ามสมาชิก V.2 (คงข้อความไว้):</b> <b>{skipped_v2_count}</b> คน\n"
+            f"🚫 <b>ผู้ใช้บล็อกบอท:</b> <b>{blocked_count}</b> คน\n"
+            f"⚠️ <b>ข้อผิดพลาดอื่นๆ:</b> <b>{error_count}</b> ครั้ง\n"
+            f"📅 <b>เวลาที่เสร็จสิ้น:</b> <code>{format_thai_datetime(datetime.now(timezone.utc))} น.</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "✨ <i>ข้อความ เมนู และปุ่มกดทั้งหมดของบอทในแชทของผู้ใช้ที่ไม่ใช่ V.2 ถูกลบออกเรียบร้อยแล้วครับ</i>"
+        )
+        try:
+            await status_msg.edit_text(final_report, parse_mode="HTML")
+        except Exception:
+            await callback.message.answer(final_report, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error in clean_non_v2_dms: {e}", exc_info=True)
+        try:
+            await status_msg.edit_text(f"❌ <b>เกิดข้อผิดพลาดในการลบข้อความ DM:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        except Exception:
+            await callback.message.answer(f"❌ <b>เกิดข้อผิดพลาด:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
+
+@router.message(Command("clean_chat", "clean_user", "wipe_user_chat"))
+async def handle_admin_clean_chat_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับลบข้อความของบอทใน DM ของผู้ใช้รายคน: /clean_chat <User ID หรือ @username>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/clean_chat [User ID หรือ @username]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/clean_chat 5125375696</code>\n"
+            "• <code>/clean_chat @username</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+
+    if not user:
+        if query.isdigit():
+            target_uid = int(query)
+            user_name = f"User {target_uid}"
+        else:
+            await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+            return
+    else:
+        target_uid = user.telegram_id
+        user_name = html.escape(user.full_name or f"User {target_uid}")
+
+    del_count, success, detail = await clean_user_chat_messages(bot, target_uid)
+    if success:
+        await message.answer(
+            f"✅ <b>ลบข้อความของบอทใน DM สำเร็จ!</b>\n"
+            f"👤 <b>ผู้ใช้:</b> {user_name} (<code>{target_uid}</code>)\n"
+            f"🗑️ <b>ลบข้อความทั้งหมด:</b> <b>{del_count:,}</b> ข้อความ\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "✨ <i>ข้อความของบอทถูกลบออกจากหน้าจอแชทของผู้ใช้เรียบร้อยแล้ว</i>",
+            parse_mode="HTML"
+        )
+    else:
+        if detail == "BLOCKED_BOT":
+            await message.answer(f"⚠️ ไม่สามารถลบได้เนื่องจากผู้ใช้ <code>{target_uid}</code> บล็อกบอทไว้", parse_mode="HTML")
+        else:
+            await message.answer(f"❌ <b>ลบไม่สำเร็จ:</b> <code>{html.escape(detail)}</code>", parse_mode="HTML")
+
 
 
 
