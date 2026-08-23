@@ -195,6 +195,7 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
     user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
     full_name_safe = html.escape(user.full_name or "")
     start_time_thai = format_thai_datetime(now)
+    expires_at_thai = format_thai_datetime(new_expires_at) if new_expires_at else "ไม่ระบุ"
     try:
         channel_label = await fetch_channel_title(bot, event.chat.id)
     except Exception:

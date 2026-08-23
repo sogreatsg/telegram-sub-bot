@@ -14,7 +14,7 @@ from aiogram.types import (
 from sqlalchemy import select
 
 from bot.config import get_settings
-from bot.models.schema import User, Subscription, SubStatus, GrantType
+from bot.models.schema import User, Subscription, SubStatus, GrantType, PaymentSlip, SlipStatus
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
 from bot.services.referral import get_referral_link, get_share_url, is_referral_active
