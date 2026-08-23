@@ -5634,6 +5634,102 @@ async def handle_admin_clean_chat_command(message: Message, bot: Bot):
             await status_msg.edit_text(f"❌ <b>ลบไม่สำเร็จ:</b> <code>{html.escape(detail)}</code>", parse_mode="HTML")
 
 
+@router.message(Command("check_chat", "inspect_chat", "test_chat"))
+async def handle_admin_check_chat_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับตรวจเช็คความสะอาดและสถานะห้องแชท DM ของผู้ใช้: /check_chat <User ID หรือ @username>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/check_chat [User ID หรือ @username]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/check_chat 8869252777</code>\n"
+            "• <code>/check_chat @username</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+
+    if not user:
+        if query.isdigit():
+            target_uid = int(query)
+            user_name = f"User {target_uid}"
+        else:
+            await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+            return
+    else:
+        target_uid = user.telegram_id
+        user_name = html.escape(user.full_name or user.username or f"User {target_uid}")
+
+    status_msg = await message.answer(f"🔍 กำลังตรวจสอบสถานะห้องแชทของ {user_name} (<code>{target_uid}</code>) กับเซิร์ฟเวอร์ Telegram...", parse_mode="HTML")
+
+    # 1. Probe หา max_id
+    try:
+        probe = await bot.send_message(chat_id=target_uid, text=".")
+        max_id = probe.message_id
+        try:
+            await bot.delete_message(chat_id=target_uid, message_id=max_id)
+        except Exception:
+            pass
+        blocked = False
+    except TelegramForbiddenError:
+        blocked = True
+        max_id = 0
+    except Exception as e:
+        await status_msg.edit_text(f"❌ <b>ไม่สามารถติดต่อห้องแชทได้:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        return
+
+    if blocked:
+        await status_msg.edit_text(f"⚠️ ผู้ใช้ {user_name} (<code>{target_uid}</code>) <b>บล็อกบอท</b> ไม่สามารถส่งหรือลบข้อความได้", parse_mode="HTML")
+        return
+
+    # 2. ตรวจสอบ Checkpoint
+    from bot.services.chat_cleaner_state import get_user_checkpoint
+    cp = get_user_checkpoint(target_uid)
+    cp_status = cp.get("status", "NONE") if cp else "NONE"
+    cp_last_max = cp.get("last_scanned_max_id", 0) if cp else 0
+    cp_deleted = cp.get("deleted_count", 0) if cp else 0
+
+    # 3. ตรวจสอบความสะอาด 50 Message IDs ล่าสุด
+    test_range = list(range(max_id - 1, max(0, max_id - 51), -1))
+    found_bot_msgs = 0
+    for mid in test_range:
+        try:
+            await bot.delete_message(chat_id=target_uid, message_id=mid)
+            found_bot_msgs += 1
+        except Exception:
+            pass
+
+    clean_verdict = "✨ <b>สะอาด 100% (ไม่พบข้อความบอทค้างอยู่)</b>" if found_bot_msgs == 0 else f"⚠️ <b>พบและลบข้อความบอทที่ค้างไป: {found_bot_msgs} ข้อความ</b>"
+
+    report_text = (
+        f"🔍 <b>ผลการตรวจสอบห้องแชท DM ({user_name})</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้:</b> {user_name} (<code>{target_uid}</code>)\n"
+        f"📊 <b>Message ID ล่าสุดบน Telegram Cloud:</b> <code>ID {max_id:,}</code>\n"
+        f"💾 <b>สถานะในระบบ Checkpoint:</b> <code>{cp_status}</code>\n"
+        f"📌 <b>ID สูงสุดที่เคยสแกนลบ:</b> <code>ID {cp_last_max:,}</code>\n"
+        f"🗑️ <b>ยอดข้อความที่ลบสะสม:</b> <b>{cp_deleted}</b> ข้อความ\n"
+        f"🛡️ <b>ผลการตรวจสอบความสะอาด:</b> {clean_verdict}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>หากในแอปมือถือยังเห็นข้อความอยู่ ให้ Clear Telegram Cache หรือเปิดดูใน Telegram Web เพื่อ Sync ข้อมูลสดครับ</i>"
+    )
+
+    try:
+        await status_msg.edit_text(report_text, parse_mode="HTML")
+    except Exception:
+        await message.answer(report_text, parse_mode="HTML")
+
+
 def get_payment_methods_status_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
     """สร้างข้อความและปุ่มจัดการช่องทางการชำระเงิน"""
     pp_active = is_promptpay_active()
