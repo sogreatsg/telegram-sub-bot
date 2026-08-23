@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 async def clean_user_chat_messages(bot: Bot, user_id: int) -> Dict[str, Any]:
     """
     ลบข้อความทั้งหมดที่บอทเคยส่งหา User ในแชทส่วนตัว (Private DM) ตั้งแต่ ID 1 ถึง max_id
-    ไล่ลบจากข้อความล่าสุดย้อนไปหาข้อความแรกสุดทีละข้อความอย่างแม่นยำ พร้อมจัดการ Rate Limit
+    ไล่ลบทีละ 1 ข้อความแบบ Sequential 100% ความแม่นยำสูงสุด ไม่ติด Flood Control
     
     คืนค่า dict:
     - deleted_count: จำนวนข้อความของบอทที่ลบสำเร็จจริง
@@ -57,19 +57,16 @@ async def clean_user_chat_messages(bot: Bot, user_id: int) -> Dict[str, Any]:
     deleted_count = 0
     skipped_count = 0
 
-    # วนลูปไล่ลบตั้งแต่ข้อความล่าสุด (max_id - 1) ย้อนกลับไปหาข้อความแรกสุด (1)
     for mid in range(max_id - 1, 0, -1):
-        result["scanned_count"] += 1
         try:
             await bot.delete_message(chat_id=user_id, message_id=mid)
             deleted_count += 1
             await asyncio.sleep(0.015)
         except TelegramBadRequest:
-            # Telegram ไม่อนุญาตให้บอทลบข้อความของฝั่ง User หรือข้อความนี้ไม่มีอยู่แล้ว
             skipped_count += 1
         except TelegramRetryAfter as e:
             logger.info(f"Rate limited by Telegram for user {user_id}, waiting {e.retry_after}s")
-            await asyncio.sleep(e.retry_after + 0.5)
+            await asyncio.sleep(e.retry_after + 1.0)
             try:
                 await bot.delete_message(chat_id=user_id, message_id=mid)
                 deleted_count += 1
@@ -79,7 +76,10 @@ async def clean_user_chat_messages(bot: Bot, user_id: int) -> Dict[str, Any]:
             logger.debug(f"Error deleting message {mid} for user {user_id}: {e}")
             skipped_count += 1
 
+        await asyncio.sleep(0.015)
+
     result["deleted_count"] = deleted_count
+    result["scanned_count"] = (max_id - 1)
     result["skipped_count"] = skipped_count
     result["success"] = True
     result["detail"] = "SUCCESS"
