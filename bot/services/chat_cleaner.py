@@ -12,12 +12,12 @@ from bot.services.channel_service import is_user_v2_member
 logger = logging.getLogger(__name__)
 
 
-async def clean_user_chat_messages(bot: Bot, user_id: int, max_scan_range: int = 500) -> tuple[int, bool, str]:
+async def clean_user_chat_messages(bot: Bot, user_id: int) -> tuple[int, bool, str]:
     """
-    ลบข้อความทั้งหมดที่บอทเคยส่งหา User ในแชทส่วนตัว (Private DM):
+    ลบข้อความทั้งหมดที่บอทเคยส่งหา User ในแชทส่วนตัว (Private DM) ตั้งแต่ข้อความแรกสุด (ID 1) ถึงข้อความล่าสุด:
     - ส่ง Probe ข้อความสั้นๆ เพื่อหา message_id สูงสุดล่าสุด
     - ลบ Probe ทันที
-    - ลบข้อความย้อนหลังของบอททั้งหมดตั้งแต่ ID 1 ถึง max_id
+    - กวาดล้างข้อความย้อนหลังของบอททั้งหมดตั้งแต่ ID 1 ถึง max_id แบบ 100% Full History
     
     คืนค่า: (จำนวนข้อความที่ลบสำเร็จ, สถานะสำเร็จหรือไม่, รายละเอียดเพิ่มเติม)
     """
@@ -37,36 +37,39 @@ async def clean_user_chat_messages(bot: Bot, user_id: int, max_scan_range: int =
         logger.debug(f"Error sending probe to user {user_id}: {e}")
         return 0, False, str(e)
 
-    start_id = max(1, max_id - max_scan_range)
-    all_ids = list(range(start_id, max_id))
+    # กวาดล้างตั้งแต่ข้อความที่ 1 จนถึงข้อความล่าสุดทั้งหมด
+    all_ids = list(range(1, max_id))
     if not all_ids:
         return 0, True, "NO_MESSAGES"
 
     deleted_count = 0
-    # แบ่งเป็น Chunk ละ 50 ข้อความ
-    chunk_size = 50
+    # Telegram Bot API deleteMessages รองรับได้สูงสุดครั้งละ 100 IDs
+    chunk_size = 100
     for i in range(0, len(all_ids), chunk_size):
         chunk = all_ids[i:i + chunk_size]
         try:
-            # ลองใช้ delete_messages แบบชุดก่อน
+            # ลองใช้ delete_messages ลบพร้อมกัน 100 ข้อความใน 1 API call
             await bot.delete_messages(chat_id=user_id, message_ids=chunk)
             deleted_count += len(chunk)
         except (TelegramBadRequest, Exception):
-            # หากล้มเหลว (เช่น มีข้อความของ user ปนอยู่) ให้วนลบทีละ ID
-            for mid in chunk:
+            # หากติดเงื่อนไข (เช่น มีข้อความของ User ปนอยู่) ให้ลบแยกแบบ Concurrent
+            async def _safe_delete(mid: int) -> int:
                 try:
                     await bot.delete_message(chat_id=user_id, message_id=mid)
-                    deleted_count += 1
+                    return 1
                 except TelegramRetryAfter as e:
                     await asyncio.sleep(e.retry_after + 0.5)
                     try:
                         await bot.delete_message(chat_id=user_id, message_id=mid)
-                        deleted_count += 1
+                        return 1
                     except Exception:
-                        pass
+                        return 0
                 except Exception:
-                    pass
+                    return 0
 
-        await asyncio.sleep(0.04)
+            results = await asyncio.gather(*[_safe_delete(mid) for mid in chunk])
+            deleted_count += sum(results)
+
+        await asyncio.sleep(0.03)
 
     return deleted_count, True, "SUCCESS"
