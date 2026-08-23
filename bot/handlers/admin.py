@@ -34,6 +34,7 @@ from bot.services.channel_service import (
     get_all_target_channel_ids,
     is_target_channel,
     is_secondary_channel,
+    is_user_v2_member,
     get_channel_label,
     get_discussion_chat_id,
     resolve_chat_group,
