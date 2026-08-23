@@ -635,23 +635,27 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "• <code>/kick [User ID]</code> — สั่งเตะออกจาก Channel VIP ทันที\n"
         "• <code>/kick_all_v1</code> — 🚪 สั่งเตะสมาชิกทุกคนออกจาก Channel V.1\n"
         "• <code>/kick_all_chat</code> — 💬 สั่งเตะสมาชิกทุกคนออกจากห้องพูดคุย (Community Chat)\n"
-        "• <code>/kick_chat [User ID/@user]</code> — 💬 เตะผู้ใช้รายคนออกจากห้องพูดคุย\n"
-        "• <code>/clean_non_v2_chat</code> — 🧹 สั่งลบข้อความบอทใน DM ของทุกคนที่ไม่ใช่ V.2\n"
-        "• <code>/clean_chat [User ID/@user]</code> — 🧹 ลบข้อความบอทใน DM ของผู้ใช้รายคน\n\n"
-        "🗑️ <b>7. รีเซ็ตข้อมูล:</b>\n"
+        "• <code>/kick_chat [User ID/@user]</code> — 💬 เตะผู้ใช้รายคนออกจากห้องพูดคุย\n\n"
+        "🧹 <b>7. ระบบกวาดล้าง & ตรวจสอบแชท (Chat Cleaner & Inspector):</b>\n"
+        "• <code>/clean_non_v2_chat</code> — 🧹 สั่งลบข้อความบอทใน DM ของทุกคนที่ไม่ใช่สมาชิก V.2 (มี Checkpoint)\n"
+        "• <code>/clean_chat [User ID/@user]</code> — 🧹 สั่งลบข้อความบอทใน DM ของผู้ใช้รายคน (สแกนลงถึง ID 1)\n"
+        "• <code>/check_chat [User ID/@user]</code> — 🔍 ตรวจสอบ Message ID & เช็คความสะอาดของห้องแชทกับ Telegram Cloud\n"
+        "• <code>/clean_status</code> — 📊 ดูความคืบหน้า Checkpoint ของการล้างแชท (เสร็จแล้ว/ค้างอยู่/ยอดข้อความที่ลบ)\n"
+        "• <code>/clean_reset</code> — 🔄 รีเซ็ตประวัติ Checkpoint การล้างแชททั้งหมดเพื่อให้เริ่มสแกนใหม่ตั้งแต่ต้น\n\n"
+        "🗑️ <b>8. รีเซ็ตข้อมูล:</b>\n"
         "• <code>/reset_user [User ID/@user]</code> — ล้างข้อมูลผู้ใช้ทั้งหมดเพื่อเริ่มใหม่\n"
         "• <code>/reset_trial [User ID/@user]</code> — รีเซ็ตสิทธิ์ทดลองฟรีให้ผู้ใช้\n\n"
-        "🎁 <b>8. ระบบโปรโมชั่น:</b>\n"
+        "🎁 <b>9. ระบบโปรโมชั่น:</b>\n"
         "• <code>/promotion</code> (หรือ <code>/promotion_on</code> / <code>/promotion_off</code>) — เปิด/ปิด/ดูสถานะ\n"
         "• <code>/promotion_setting</code> — ตั้งค่าราคาและจำนวนวัน\n"
         "• <code>/promo_broadcast</code> — บรอดแคสต์โปรโมชั่น\n\n"
-        "👥 <b>9. ระบบแนะนำเพื่อน:</b>\n"
+        "👥 <b>10. ระบบแนะนำเพื่อน:</b>\n"
         "• <code>/referral</code> (หรือ <code>/referral_on</code> / <code>/referral_off</code>) — เปิด/ปิด/ดูสถานะ\n\n"
-        "⏱️ <b>10. ระบบทดลองฟรี:</b>\n"
+        "⏱️ <b>11. ระบบทดลองฟรี:</b>\n"
         "• <code>/trial</code> (หรือ <code>/trial_on</code> / <code>/trial_off</code>) — เปิด/ปิด/ดูสถานะ\n\n"
-        "🔔 <b>11. ระบบแจ้งเตือนข้อความค้างตอบ (DM Reminder):</b>\n"
+        "🔔 <b>12. ระบบแจ้งเตือนข้อความค้างตอบ (DM Reminder):</b>\n"
         "• <code>/dm_reminder</code> (หรือ <code>/dm_reminder_on</code> / <code>/dm_reminder_off</code>) — เปิด/ปิด/ดูสถานะแจ้งเตือนค้างตอบ\n\n"
-        "💳 <b>12. ระบบช่องทางชำระเงิน:</b>\n"
+        "💳 <b>13. ระบบช่องทางชำระเงิน:</b>\n"
         "• <code>/promptpay</code> (หรือ <code>/promptpay_on</code> / <code>/promptpay_off</code>) — เปิด/ปิด/ดูสถานะชำระผ่าน QR Code\n"
         "• <code>/payment_methods</code> — ดูสถานะช่องทางชำระเงินทั้งหมด\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -689,7 +693,8 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
                 InlineKeyboardButton(text="💬 เตะทุกคนออกจากห้องแชท", callback_data="admin:confirm_kick_all_chat"),
             ],
             [
-                InlineKeyboardButton(text="🧹 ลบข้อความ DM ทุกคนที่ไม่ใช่ V.2", callback_data="admin:confirm_clean_non_v2_dms"),
+                InlineKeyboardButton(text="🧹 ล้างแชท DM ทุกคนที่ไม่ใช่ V.2", callback_data="admin:confirm_clean_non_v2_dms"),
+                InlineKeyboardButton(text="📊 สถานะล้างแชท (/clean_status)", callback_data="admin_menu:clean_status"),
             ],
             [
                 InlineKeyboardButton(text="💳 ตั้งค่าช่องทางชำระเงิน (QR/TrueMoney)", callback_data="admin_menu:payment_methods"),
@@ -697,6 +702,71 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         ]
     )
     return admin_menu_text, keyboard
+
+
+@router.callback_query(F.data == "admin_menu:clean_status")
+async def handle_admin_menu_clean_status_callback(callback: CallbackQuery):
+    """ปุ่มลัดสำหรับเปิดรายงาน Clean Status จาก Admin Menu"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+    await callback.answer("📊 กำลังโหลดสถานะการล้างแชท...")
+
+    from bot.services.chat_cleaner_state import get_clean_status_summary
+    summary = get_clean_status_summary()
+    sess = summary["session"]
+
+    status_badge = "🟢 กำลังทำงาน (Running)" if sess.get("is_running") else "⚪ ไม่ได้ทำงาน (Idle)"
+    cur_user = sess.get("current_user_name") or f"User {sess.get('current_user_id')}" if sess.get("current_user_id") else "ไม่มี"
+
+    text = (
+        "📊 <b>สถานะระบบกวาดล้างข้อความ DM (Checkpoint Tracker)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚙️ <b>สถานะปัจจุบัน:</b> {status_badge}\n"
+        f"👥 <b>ผู้ใช้ที่บันทึกในระบบ:</b> <b>{summary['total_tracked_users']}</b> บัญชี\n"
+        f"✅ <b>ล้างเสร็จสิ้นสมบูรณ์ 100%:</b> <b>{summary['completed_count']}</b> คน\n"
+        f"⏳ <b>กำลังทำค้างอยู่ (มี Checkpoint):</b> <b>{summary['in_progress_count']}</b> คน\n"
+        f"🚫 <b>ผู้ใช้บล็อกบอท:</b> <b>{summary['blocked_count']}</b> คน\n"
+        f"🗑️ <b>รวมข้อความบอทที่ลบไปแล้ว:</b> <b>{summary['total_deleted_msgs']:,}</b> ข้อความ\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    if sess.get("is_running"):
+        text += (
+            f"🔄 <b>Session ล่าสุด:</b> {sess.get('current_user_index', 0)}/{sess.get('total_users', 0)} บัญชี\n"
+            f"👤 <b>กำลังทำบัญชี:</b> <code>{cur_user}</code>\n\n"
+        )
+
+    if summary["in_progress_users"]:
+        text += "⏳ <b>บัญชีที่ทำค้างอยู่ (ทำต่อจาก ID เดิมได้ทันที):</b>\n"
+        for u in summary["in_progress_users"][:5]:
+            u_title = html.escape(u.get("full_name") or u.get("username") or f"User {u['user_id']}")
+            text += f"• {u_title} (<code>{u['user_id']}</code>) ➔ ทำถึง ID: <code>{u.get('scanned_down_to_id', 0):,}</code> จาก {u.get('max_id', 0):,} (ลบแล้ว {u.get('deleted_count', 0)} ข้อความ)\n"
+        text += "\n"
+
+    text += (
+        "💡 <i>เมื่อสั่งล้างแชทอีกครั้ง ระบบจะข้ามคนที่เสร็จแล้วอัตโนมัติ และทำต่อจาก ID เดิมของคนที่ค้างอยู่ทันที ไม่ต้องเริ่มใหม่ครับ</i>\n"
+        "🧹 <i>พิมพ์ <code>/clean_non_v2_chat</code> เพื่อสั่งกวาดล้างต่อ</i>"
+    )
+
+    clean_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🧹 สั่งลบข้อความ DM ทุกคนที่ไม่ใช่ V.2", callback_data="admin:confirm_clean_non_v2_dms"),
+            ],
+            [
+                InlineKeyboardButton(text="🔄 รีเฟรชสถานะ", callback_data="admin_menu:clean_status"),
+                InlineKeyboardButton(text="🔙 กลับเมนูแอดมิน", callback_data="admin_menu:main"),
+            ]
+        ]
+    )
+
+    try:
+        await callback.message.edit_text(text=text, reply_markup=clean_kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text=text, reply_markup=clean_kb, parse_mode="HTML")
 
 
 @router.message(Command("admin", "admin_help", "help_admin"))
