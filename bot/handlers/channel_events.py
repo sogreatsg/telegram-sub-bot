@@ -1,8 +1,8 @@
 import logging
 import html
 from datetime import datetime, timezone
-from aiogram import Router, Bot
-from aiogram.types import ChatMemberUpdated, ChatJoinRequest
+from aiogram import Router, Bot, F
+from aiogram.types import ChatMemberUpdated, ChatJoinRequest, Message
 from aiogram.enums import ChatMemberStatus
 from sqlalchemy import select
 
@@ -293,3 +293,26 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
             await bot.send_message(chat_id=config.ADMIN_GROUP_ID, text=admin_alert, parse_mode="HTML")
         except Exception:
             pass
+
+
+@router.message(F.left_chat_member)
+async def handle_left_chat_member_service_message(message: Message):
+    """ลบข้อความระบบของ Telegram อัตโนมัติเมื่อมีคนออกจากกลุ่มหรือถูกบอทเตะ (Clean Service Message: User left/removed)"""
+    if message.chat.type in ("group", "supergroup") and message.chat.id != config.ADMIN_GROUP_ID:
+        try:
+            await message.delete()
+            logger.info(f"Deleted left_chat_member service message in group {message.chat.id}")
+        except Exception:
+            pass
+
+
+@router.message(F.new_chat_members)
+async def handle_new_chat_members_service_message(message: Message):
+    """ลบข้อความระบบของ Telegram อัตโนมัติเมื่อมีคนเข้าร่วมกลุ่ม (Clean Service Message: User joined)"""
+    if message.chat.type in ("group", "supergroup") and message.chat.id != config.ADMIN_GROUP_ID:
+        try:
+            await message.delete()
+            logger.info(f"Deleted new_chat_members service message in group {message.chat.id}")
+        except Exception:
+            pass
+
