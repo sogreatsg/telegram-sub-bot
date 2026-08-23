@@ -20,7 +20,7 @@ from bot.services.chat_logger import log_chat_message
 from bot.services.referral import get_referral_link, get_share_url, is_referral_active
 from bot.services.trial import is_trial_active
 from bot.services.subscription import grant_subscription, subscription_status_label
-from bot.services.channel_service import get_user_target_channel_id, get_channel_label, unban_user_in_channel
+from bot.services.channel_service import get_user_target_channel_id, get_channel_label, unban_user_in_channel, is_user_v2_member
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -146,7 +146,7 @@ def format_time_remaining(expires_at: datetime) -> str:
 
 @router.message(CommandStart())
 async def handle_start(message: Message, state: FSMContext):
-    """จัดการคำสั่ง /start ตรวจสอบผู้ใช้ ล้างสถานะ FSM รองรับ Deep link แนะนำเพื่อน และแสดงเมนูหลัก"""
+    """จัดการคำสั่ง /start ตรวจสอบผู้ใช้ ล้างสถานะ FSM รองรับ Deep link แนะนำเพื่อน และแสดงเมนูหลัก (เฉพาะสมาชิก V.2)"""
     try:
         await state.clear()
     except Exception:
@@ -167,6 +167,7 @@ async def handle_start(message: Message, state: FSMContext):
 
     telegram_user = message.from_user
     trial_available = True
+    is_v2 = False
     try:
         async with get_session() as session:
             user, _ = await get_or_create_user(
@@ -177,8 +178,19 @@ async def handle_start(message: Message, state: FSMContext):
                 referred_by_id=referrer_id,
             )
             trial_available = not user.trial_used
+            is_v2 = is_user_v2_member(user)
     except Exception as e:
         logger.error(f"Error checking user in handle_start: {e}", exc_info=True)
+
+    try:
+        await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text="/start")
+    except Exception:
+        pass
+
+    # กฎ: ถ้าใครอยู่ V.1 หรือสมัครใหม่ ให้แชทบอทไม่ต้องตอบ (ตอบเฉพาะสมาชิก V.2)
+    if not is_v2:
+        logger.info(f"Bot ignored /start from non-V2 user {telegram_user.id} (@{telegram_user.username})")
+        return
 
     first_name_safe = html.escape(telegram_user.first_name or "")
     trial_bullet = "• <b>⏱️ ทดลองใช้ฟรี 15 นาที</b>: ทดลองเข้าชม Channel ฟรี 1 ครั้ง\n" if is_trial_active() else ""
@@ -204,15 +216,10 @@ async def handle_start(message: Message, state: FSMContext):
     except Exception as e:
         logger.error(f"Failed to send start message: {e}", exc_info=True)
 
-    try:
-        await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text="/start")
-    except Exception:
-        pass
-
 
 @router.callback_query(F.data.in_(["menu:main", "menu:packages"]))
 async def handle_menu_main(callback: CallbackQuery, state: FSMContext):
-    """จัดการการกดปุ่มกลับสู่เมนูหลัก"""
+    """จัดการการกดปุ่มกลับสู่เมนูหลัก (เฉพาะสมาชิก V.2)"""
     await state.clear()
     if not callback.from_user or not callback.message:
         return
@@ -224,6 +231,9 @@ async def handle_menu_main(callback: CallbackQuery, state: FSMContext):
             username=callback.from_user.username,
             full_name=callback.from_user.full_name or callback.from_user.first_name,
         )
+        if not is_user_v2_member(user):
+            await callback.answer()
+            return
         trial_available = not user.trial_used
 
     menu_text = (
@@ -279,6 +289,9 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
             username=callback.from_user.username,
             full_name=callback.from_user.full_name or callback.from_user.first_name,
         )
+        if not is_user_v2_member(user):
+            await callback.answer()
+            return
 
         # ตรวจสอบว่าเคยใช้สิทธิ์ทดลองไปแล้วหรือยัง (เข้าร่วม channel แล้ว)
         if user.trial_used:
@@ -408,6 +421,9 @@ async def handle_referral_menu(callback: CallbackQuery, bot: Bot, state: FSMCont
             username=callback.from_user.username,
             full_name=callback.from_user.full_name or callback.from_user.first_name,
         )
+        if not is_user_v2_member(user):
+            await callback.answer()
+            return
         ref_count = user.referral_count or 0
         bonus_days = user.referral_bonus_days or 0
 
@@ -474,6 +490,9 @@ async def handle_my_status(callback: CallbackQuery, state: FSMContext):
             username=callback.from_user.username,
             full_name=callback.from_user.full_name or callback.from_user.first_name,
         )
+        if not is_user_v2_member(user):
+            await callback.answer()
+            return
 
         sub = await session.get(Subscription, user_id)
 
@@ -526,8 +545,14 @@ async def handle_my_status(callback: CallbackQuery, state: FSMContext):
 async def handle_help(callback: CallbackQuery, state: FSMContext):
     """แสดงวิธีใช้งานและคำถามที่พบบ่อย (FAQ)"""
     await state.clear()
-    if not callback.message:
+    if not callback.message or not callback.from_user:
         return
+
+    async with get_session() as session:
+        user = await session.get(User, callback.from_user.id)
+        if not is_user_v2_member(user):
+            await callback.answer()
+            return
 
     help_parts = ["❓ <b>วิธีใช้งาน & คำถามที่พบบ่อย (FAQ)</b>\n"]
     if is_trial_active():
@@ -581,6 +606,8 @@ async def handle_status_command(message: Message, state: FSMContext):
             username=message.from_user.username,
             full_name=message.from_user.full_name or message.from_user.first_name,
         )
+        if not is_user_v2_member(user):
+            return
         sub = await session.get(Subscription, user_id)
 
     status_text = f"📊 <b>สถานะการเป็นสมาชิกของคุณ</b>\n\n"
@@ -633,8 +660,10 @@ async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
     from bot.handlers.payment import extract_truemoney_url
     angpao_url = extract_truemoney_url(message.text or "")
     if angpao_url:
-        # ตรวจสอบว่าผู้ใช้มีสลิปซองแดงที่เพิ่งส่งและรออนุมัติอยู่แล้วหรือไม่ (ป้องกันส่งซ้ำซ้อน)
+        is_v2 = False
         async with get_session() as session:
+            db_user = await session.get(User, user_id)
+            is_v2 = is_user_v2_member(db_user)
             dup_stmt = select(PaymentSlip).where(
                 PaymentSlip.user_id == user_id,
                 PaymentSlip.file_id == angpao_url,
@@ -642,26 +671,28 @@ async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
             )
             existing_dup = (await session.execute(dup_stmt)).scalars().first()
             if existing_dup:
-                await message.answer(
-                    f"ℹ️ <b>ระบบได้รับลิงก์ซองของขวัญนี้ไว้แล้วครับ (รายการ #{existing_dup.id})</b>\n\n"
-                    "ทีมงานแอดมินกำลังดำเนินการตรวจสอบและจะอนุมัติให้โดยเร็วครับ ขอบคุณครับ 🙏",
-                    parse_mode="HTML",
-                )
+                if is_v2:
+                    await message.answer(
+                        f"ℹ️ <b>ระบบได้รับลิงก์ซองของขวัญนี้ไว้แล้วครับ (รายการ #{existing_dup.id})</b>\n\n"
+                        "ทีมงานแอดมินกำลังดำเนินการตรวจสอบและจะอนุมัติให้โดยเร็วครับ ขอบคุณครับ 🙏",
+                        parse_mode="HTML",
+                    )
                 return
 
         await log_chat_message(user_id=user_id, sender_role="USER", message_text=f"[ส่งลิงก์ซองแดงนอกขั้นตอน]: {angpao_url}")
         
-        # 1. แจ้งเตือนผู้ใช้ให้ไปเลือกแพ็กเกจก่อน
-        await message.answer(
-            "⚠️ <b>กรุณาเลือกแพ็กเกจก่อนส่งลิงก์ซองของขวัญครับ</b>\n\n"
-            "เนื่องจากระบบต้องการทราบแพ็กเกจ VIP ที่คุณต้องการสมัคร\n"
-            "👉 <b>กรุณาพิมพ์ /start</b> แล้วกดเลือกแพ็กเกจ (12 ชั่วโมง, 3 วัน, 10 วัน, 30 วัน หรือ โปรโมชั่น)\n"
-            "จากนั้นเลือกช่องทาง <b>'🧧 ส่งซองของขวัญ TrueMoney'</b> แล้วค่อยส่งลิงก์เข้ามาครับ 🙏",
-            parse_mode="HTML",
-        )
-        await log_chat_message(user_id=user_id, sender_role="BOT", message_text="⚠️ กรุณาเลือกแพ็กเกจก่อนส่งลิงก์ซองของขวัญครับ")
+        # 1. แจ้งเตือนผู้ใช้ให้ไปเลือกแพ็กเกจก่อน (เฉพาะสมาชิก V.2)
+        if is_v2:
+            await message.answer(
+                "⚠️ <b>กรุณาเลือกแพ็กเกจก่อนส่งลิงก์ซองของขวัญครับ</b>\n\n"
+                "เนื่องจากระบบต้องการทราบแพ็กเกจ VIP ที่คุณต้องการสมัคร\n"
+                "👉 <b>กรุณาพิมพ์ /start</b> แล้วกดเลือกแพ็กเกจ (12 ชั่วโมง, 3 วัน, 10 วัน, 30 วัน หรือ โปรโมชั่น)\n"
+                "จากนั้นเลือกช่องทาง <b>'🧧 ส่งซองของขวัญ TrueMoney'</b> แล้วค่อยส่งลิงก์เข้ามาครับ 🙏",
+                parse_mode="HTML",
+            )
+            await log_chat_message(user_id=user_id, sender_role="BOT", message_text="⚠️ กรุณาเลือกแพ็กเกจก่อนส่งลิงก์ซองของขวัญครับ")
 
-        # 2. ส่งแจ้งเตือนให้แอดมินรับทราบ
+        # 2. ส่งแจ้งเตือนให้แอดมินรับทราบ (ส่งเสมอเพื่อให้แอดมินดูแลได้)
         admin_keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -679,7 +710,7 @@ async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
             f"🔗 <b>ลิงก์ที่ส่ง:</b> <code>{html.escape(angpao_url)}</code>\n"
             f"📅 <b>เวลา:</b> <code>{time_now} น.</code>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            "ℹ️ <i>บอทได้แนะนำให้ผู้ใช้พิมพ์ /start เพื่อกดเลือกแพ็กเกจก่อนแล้ว</i>\n\n"
+            "ℹ️ <i>บอทได้บันทึกข้อมูลและส่งให้แอดมินเรียบร้อยแล้ว</i>\n\n"
             "📋 <b>แตะข้อความด้านล่างเพื่อคัดลอกคำสั่ง:</b>\n"
             f"<code>/reply {user_id} </code>\n"
             f"<code>/add_vip {user_id} 30</code>"
@@ -741,7 +772,13 @@ async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
 
 @router.message(F.chat.type == "private", F.text.startswith("/"))
 async def handle_unknown_command(message: Message):
-    """Fallback สำหรับคำสั่งที่ไม่มีในระบบ (เพื่อไม่ให้บอทเมินเงียบๆ)"""
+    """Fallback สำหรับคำสั่งที่ไม่มีในระบบ (เฉพาะสมาชิก V.2)"""
+    if not message.from_user:
+        return
+    async with get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not is_user_v2_member(user):
+            return
     await message.answer(
         "❌ <b>ไม่รู้จักคำสั่งนี้ครับ</b>\n"
         "กรุณาตรวจสอบความถูกต้อง หรือพิมพ์ /start เพื่อกลับสู่เมนูหลักครับ",

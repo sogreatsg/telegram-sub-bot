@@ -54,6 +54,18 @@ def get_user_target_channel_id(user: Optional[User]) -> int:
     return config.CHANNEL_ID
 
 
+def is_user_v2_member(user: Optional[User]) -> bool:
+    """
+    ตรวจสอบว่าผู้ใช้เป็นสมาชิกของห้อง V.2 (BareLive V.2) หรือไม่
+    (is_moved_to_secondary=True หรือ assigned_channel='SECONDARY')
+    - คืนค่า True: ถ้าเป็นสมาชิก V.2 (บอทจะตอบกลับและให้บริการตามปกติ)
+    - คืนค่า False: ถ้าเป็นสมาชิก V.1 หรือเพิ่งสมัครใหม่ (บอทจะไม่ตอบกลับข้อความ)
+    """
+    if not user:
+        return False
+    return bool(getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", None) == "SECONDARY")
+
+
 _channel_title_cache: Dict[str, str] = {}
 
 

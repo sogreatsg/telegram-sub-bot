@@ -20,9 +20,10 @@ import asyncio
 from collections import defaultdict
 from sqlalchemy import select
 from bot.config import get_settings
-from bot.models.schema import PaymentSlip, SlipStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info, format_plan_duration
+from bot.models.schema import PaymentSlip, SlipStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info, format_plan_duration, User
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
+from bot.services.channel_service import is_user_v2_member
 from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
 
 logger = logging.getLogger(__name__)
@@ -130,9 +131,20 @@ def get_admin_slip_keyboard(slip_id: int, user_id: int) -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data.startswith("menu:subscribe"))
 async def handle_subscribe_plan_button(callback: CallbackQuery, state: FSMContext):
-    """แสดงหน้าจอเลือกวิธีชำระเงิน (สแกน QR Code หรือ ซองของขวัญ TrueMoney) สำหรับแพ็กเกจที่เลือก"""
+    """แสดงหน้าจอเลือกวิธีชำระเงิน (สแกน QR Code หรือ ซองของขวัญ TrueMoney) สำหรับแพ็กเกจที่เลือก (เฉพาะสมาชิก V.2)"""
     if not callback.from_user or not callback.message:
         return
+
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            full_name=callback.from_user.full_name or callback.from_user.first_name,
+        )
+        if not is_user_v2_member(user):
+            await callback.answer()
+            return
 
     # ระบุประเภทแพ็กเกจจาก Callback data
     plan_key = PlanType.VIP_30D.value
@@ -190,9 +202,20 @@ async def handle_subscribe_plan_button(callback: CallbackQuery, state: FSMContex
 
 @router.callback_query(F.data.startswith("payment:method:promptpay:"))
 async def handle_payment_method_promptpay(callback: CallbackQuery, state: FSMContext):
-    """เริ่มขั้นตอนการชำระเงินด้วย QR Code"""
+    """เริ่มขั้นตอนการชำระเงินด้วย QR Code (เฉพาะสมาชิก V.2)"""
     if not callback.from_user or not callback.message:
         return
+
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            full_name=callback.from_user.full_name or callback.from_user.first_name,
+        )
+        if not is_user_v2_member(user):
+            await callback.answer()
+            return
 
     plan_key = callback.data.split(":")[-1]
     plan_info = get_dynamic_plan_info(plan_key)
@@ -253,9 +276,20 @@ async def handle_payment_method_promptpay(callback: CallbackQuery, state: FSMCon
 
 @router.callback_query(F.data.startswith("payment:method:truemoney:"))
 async def handle_payment_method_truemoney(callback: CallbackQuery, state: FSMContext):
-    """เริ่มขั้นตอนการชำระเงินด้วยซองของขวัญ TrueMoney (ซองแดง)"""
+    """เริ่มขั้นตอนการชำระเงินด้วยซองของขวัญ TrueMoney (ซองแดง) (เฉพาะสมาชิก V.2)"""
     if not callback.from_user or not callback.message:
         return
+
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            full_name=callback.from_user.full_name or callback.from_user.first_name,
+        )
+        if not is_user_v2_member(user):
+            await callback.answer()
+            return
 
     plan_key = callback.data.split(":")[-1]
     plan_info = get_dynamic_plan_info(plan_key)
@@ -311,8 +345,17 @@ async def handle_payment_method_truemoney(callback: CallbackQuery, state: FSMCon
 
 @router.callback_query(F.data == "payment:cancel")
 async def handle_payment_cancel_callback(callback: CallbackQuery, state: FSMContext):
-    """ยกเลิกการทำรายการชำระเงินจากปุ่ม Inline Button"""
+    """ยกเลิกการทำรายการชำระเงินจากปุ่ม Inline Button (เฉพาะสมาชิก V.2)"""
     await state.clear()
+    if not callback.from_user:
+        return
+
+    async with get_session() as session:
+        user = await session.get(User, callback.from_user.id)
+        if not is_user_v2_member(user):
+            await callback.answer()
+            return
+
     if callback.message:
         await callback.message.answer(
             "❌ ยกเลิกการทำรายการเรียบร้อยแล้ว\nพิมพ์ /start เพื่อเปิดเมนูหลักอีกครั้ง",
@@ -327,7 +370,16 @@ async def handle_payment_cancel_callback(callback: CallbackQuery, state: FSMCont
 
 @router.message(Command("cancel"))
 async def handle_cancel_command(message: Message, state: FSMContext):
-    """จัดการคำสั่ง /cancel ในระหว่างขั้นตอน FSM"""
+    """จัดการคำสั่ง /cancel ในระหว่างขั้นตอน FSM (เฉพาะสมาชิก V.2)"""
+    if not message.from_user:
+        return
+
+    async with get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not is_user_v2_member(user):
+            await state.clear()
+            return
+
     current_state = await state.get_state()
     if current_state is None:
         await message.answer("ไม่มีรายการที่กำลังดำเนินการอยู่ครับ พิมพ์ /start เพื่อเปิดเมนูหลัก", parse_mode="HTML")
@@ -392,16 +444,17 @@ async def process_truemoney_submission(
         # 2. ล้างสถานะ FSM
         await state.clear()
 
-    # 3. แจ้งผู้ใช้
-    await message.answer(
-        f"✅ <b>ได้รับลิงก์ซองของขวัญ TrueMoney สำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"
-        f"🔗 <b>ลิงก์ที่ส่ง:</b> <code>{html.escape(angpao_url)}</code>\n\n"
-        "ระบบได้ส่งลิงก์ให้ทีมงานแอดมินเพื่อกดรับและตรวจสอบยอดเงินเรียบร้อยแล้วครับ\n"
-        "เมื่อได้รับการอนุมัติ คุณจะได้รับลิงก์เชิญเข้า Channel VIP ในแชทนี้ทันที\n\n"
-        "ขอบคุณที่ร่วมเป็นสมาชิก VIP ครับ!",
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
+    # 3. แจ้งผู้ใช้ (เฉพาะสมาชิก V.2)
+    if is_user_v2_member(user):
+        await message.answer(
+            f"✅ <b>ได้รับลิงก์ซองของขวัญ TrueMoney สำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"
+            f"🔗 <b>ลิงก์ที่ส่ง:</b> <code>{html.escape(angpao_url)}</code>\n\n"
+            "ระบบได้ส่งลิงก์ให้ทีมงานแอดมินเพื่อกดรับและตรวจสอบยอดเงินเรียบร้อยแล้วครับ\n"
+            "เมื่อได้รับการอนุมัติ คุณจะได้รับลิงก์เชิญเข้า Channel VIP ในแชทนี้ทันที\n\n"
+            "ขอบคุณที่ร่วมเป็นสมาชิก VIP ครับ!",
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
     await log_chat_message(
         user_id=telegram_user.id,
         sender_role="USER",
@@ -461,7 +514,12 @@ async def handle_truemoney_angpao_input(message: Message, state: FSMContext, bot
         await process_truemoney_submission(message=message, state=state, bot=bot, angpao_url=angpao_url)
         return
 
-    # กรณีส่งข้อความธรรมดาที่ไม่ใช่ลิงก์ TrueMoney
+    # กรณีส่งข้อความธรรมดาที่ไม่ใช่ลิงก์ TrueMoney (เฉพาะสมาชิก V.2)
+    async with get_session() as session:
+        user = await session.get(User, message.from_user.id)
+        if not is_user_v2_member(user):
+            return
+
     fsm_data = await state.get_data()
     plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
 
@@ -502,11 +560,13 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
             existing_dup = (await session.execute(dup_stmt)).scalars().first()
             if existing_dup:
                 await state.clear()
-                await message.answer(
-                    f"ℹ️ <b>คุณได้ส่งสลิปนี้เข้าระบบไว้แล้วครับ (รายการ #{existing_dup.id})</b>\n\n"
-                    "ทีมงานแอดมินกำลังดำเนินการตรวจสอบความถูกต้องครับ ขอบคุณครับ 🙏",
-                    parse_mode="HTML",
-                )
+                user = await session.get(User, telegram_user.id)
+                if is_user_v2_member(user):
+                    await message.answer(
+                        f"ℹ️ <b>คุณได้ส่งสลิปนี้เข้าระบบไว้แล้วครับ (รายการ #{existing_dup.id})</b>\n\n"
+                        "ทีมงานแอดมินกำลังดำเนินการตรวจสอบความถูกต้องครับ ขอบคุณครับ 🙏",
+                        parse_mode="HTML",
+                    )
                 return
 
             user, _ = await get_or_create_user(
@@ -530,14 +590,15 @@ async def handle_payment_slip_photo(message: Message, state: FSMContext, bot: Bo
         # 2. ล้างสถานะ FSM
         await state.clear()
 
-    # 3. ส่งข้อความยืนยันให้ผู้ใช้
-    await message.answer(
-        f"✅ <b>ได้รับสลิปการโอนเงินสำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"
-        "ระบบได้ส่งสลิปให้ทีมงานแอดมินเพื่อตรวจสอบความถูกต้องเรียบร้อยแล้วครับ\n"
-        "เมื่อได้รับการอนุมัติ คุณจะได้รับลิงก์เชิญเข้า Channel VIP ในแชทนี้ทันที\n\n"
-        "ขอบคุณที่ร่วมเป็นสมาชิก VIP ครับ!",
-        parse_mode="HTML",
-    )
+    # 3. ส่งข้อความยืนยันให้ผู้ใช้ (เฉพาะสมาชิก V.2)
+    if is_user_v2_member(user):
+        await message.answer(
+            f"✅ <b>ได้รับสลิปการโอนเงินสำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"
+            "ระบบได้ส่งสลิปให้ทีมงานแอดมินเพื่อตรวจสอบความถูกต้องเรียบร้อยแล้วครับ\n"
+            "เมื่อได้รับการอนุมัติ คุณจะได้รับลิงก์เชิญเข้า Channel VIP ในแชทนี้ทันที\n\n"
+            "ขอบคุณที่ร่วมเป็นสมาชิก VIP ครับ!",
+            parse_mode="HTML",
+        )
     await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text=f"[ส่งรูปภาพสลิปโอนเงิน #{slip_id} ({plan_info['badge']})]")
 
     # 4. ส่งต่อไปยังกลุ่ม Admin (เวลาไทย)
@@ -608,11 +669,13 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
             existing_dup = (await session.execute(dup_stmt)).scalars().first()
             if existing_dup:
                 await state.clear()
-                await message.answer(
-                    f"ℹ️ <b>คุณได้ส่งสลิปนี้เข้าระบบไว้แล้วครับ (รายการ #{existing_dup.id})</b>\n\n"
-                    "ทีมงานแอดมินกำลังดำเนินการตรวจสอบความถูกต้องครับ ขอบคุณครับ 🙏",
-                    parse_mode="HTML",
-                )
+                user = await session.get(User, telegram_user.id)
+                if is_user_v2_member(user):
+                    await message.answer(
+                        f"ℹ️ <b>คุณได้ส่งสลิปนี้เข้าระบบไว้แล้วครับ (รายการ #{existing_dup.id})</b>\n\n"
+                        "ทีมงานแอดมินกำลังดำเนินการตรวจสอบความถูกต้องครับ ขอบคุณครับ 🙏",
+                        parse_mode="HTML",
+                    )
                 return
 
             user, _ = await get_or_create_user(
@@ -636,12 +699,14 @@ async def handle_payment_slip_document(message: Message, state: FSMContext, bot:
         # 2. ล้างสถานะ FSM
         await state.clear()
 
-    await message.answer(
-        f"✅ <b>ได้รับไฟล์สลิปการโอนเงินสำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"
-        "ระบบได้ส่งสลิปให้ทีมงานแอดมินเพื่อตรวจสอบความถูกต้องเรียบร้อยแล้วครับ\n"
-        "เมื่อได้รับการอนุมัติ คุณจะได้รับลิงก์เชิญเข้า Channel VIP ทางแชทนี้ทันที",
-        parse_mode="HTML",
-    )
+    # 3. ส่งข้อความยืนยันให้ผู้ใช้ (เฉพาะสมาชิก V.2)
+    if is_user_v2_member(user):
+        await message.answer(
+            f"✅ <b>ได้รับไฟล์สลิปการโอนเงินสำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"
+            "ระบบได้ส่งสลิปให้ทีมงานแอดมินเพื่อตรวจสอบความถูกต้องเรียบร้อยแล้วครับ\n"
+            "เมื่อได้รับการอนุมัติ คุณจะได้รับลิงก์เชิญเข้า Channel VIP ทางแชทนี้ทันที",
+            parse_mode="HTML",
+        )
     await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text=f"[ส่งไฟล์เอกสารสลิป #{slip_id} ({plan_info['badge']})]")
 
     user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
@@ -730,17 +795,20 @@ async def handle_slip_text_input(message: Message, state: FSMContext, bot: Bot):
     except Exception as e:
         logger.error(f"Failed to forward slip question to Admin Group: {e}")
 
-    # 3. ตอบกลับผู้ใช้
-    fsm_data = await state.get_data()
-    plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
+    # 3. ตอบกลับผู้ใช้ (เฉพาะสมาชิก V.2)
+    async with get_session() as session:
+        user = await session.get(User, user_id)
+        if is_user_v2_member(user):
+            fsm_data = await state.get_data()
+            plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
 
-    await message.answer(
-        "⚠️ <b>กรุณาส่งรูปภาพสลิปการโอนเงิน หรือลิงก์ซองของขวัญ TrueMoney ครับ</b>\n\n"
-        "💡 <i>คุณสามารถกดปุ่มด้านล่างเพื่อเปลี่ยนวิธีชำระเงิน หรือพิมพ์ /cancel เพื่อยกเลิกครับ</i>",
-        reply_markup=get_payment_cancel_keyboard(plan_key),
-        parse_mode="HTML",
-    )
-    await log_chat_message(user_id=user_id, sender_role="BOT", message_text="⚠️ กรุณาส่งรูปภาพสลิปการโอนเงิน หรือลิงก์ซองของขวัญ TrueMoney ครับ")
+            await message.answer(
+                "⚠️ <b>กรุณาส่งรูปภาพสลิปการโอนเงิน หรือลิงก์ซองของขวัญ TrueMoney ครับ</b>\n\n"
+                "💡 <i>คุณสามารถกดปุ่มด้านล่างเพื่อเปลี่ยนวิธีชำระเงิน หรือพิมพ์ /cancel เพื่อยกเลิกครับ</i>",
+                reply_markup=get_payment_cancel_keyboard(plan_key),
+                parse_mode="HTML",
+            )
+            await log_chat_message(user_id=user_id, sender_role="BOT", message_text="⚠️ กรุณาส่งรูปภาพสลิปการโอนเงิน หรือลิงก์ซองของขวัญ TrueMoney ครับ")
 
 
 @router.message(F.chat.type == "private", F.photo | F.document)
@@ -755,6 +823,16 @@ async def handle_general_user_media(message: Message, bot: Bot):
     user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
     time_now = format_thai_datetime(datetime.now(timezone.utc))
     caption = message.caption or ""
+
+    is_v2 = False
+    async with get_session() as session:
+        user, _ = await get_or_create_user(
+            session=session,
+            telegram_id=user_id,
+            username=telegram_user.username,
+            full_name=telegram_user.full_name or telegram_user.first_name,
+        )
+        is_v2 = is_user_v2_member(user)
 
     media_type = "รูปภาพ" if message.photo else "ไฟล์เอกสาร"
     await log_chat_message(user_id=user_id, sender_role="USER", message_text=f"[{media_type}] {caption}")
@@ -804,10 +882,12 @@ async def handle_general_user_media(message: Message, bot: Bot):
     except Exception as e:
         logger.error(f"Failed to forward user media to Admin Group: {e}")
 
-    await message.answer(
-        f"💬 <b>ระบบได้รับ{media_type}ของคุณเรียบร้อยแล้วครับ</b>\n\n"
-        "ทีมงานแอดมินได้รับข้อมูลเรียบร้อยแล้วและจะติดต่อกลับโดยเร็วที่สุดครับ\n"
-        "💡 <i>หากคุณต้องการสมัครสมาชิก VIP กรุณาพิมพ์ /start แล้วกดเลือกแพ็กเกจก่อนส่งสลิปหรือลิงก์ซองของขวัญครับ</i>",
-        parse_mode="HTML",
-    )
-    await log_chat_message(user_id=user_id, sender_role="BOT", message_text=f"💬 ระบบได้รับ{media_type}ของคุณเรียบร้อยแล้วครับ")
+    # ส่งข้อความตอบกลับเฉพาะสมาชิก V.2
+    if is_v2:
+        await message.answer(
+            f"💬 <b>ระบบได้รับ{media_type}ของคุณเรียบร้อยแล้วครับ</b>\n\n"
+            "ทีมงานแอดมินได้รับข้อมูลเรียบร้อยแล้วและจะติดต่อกลับโดยเร็วที่สุดครับ\n"
+            "💡 <i>หากคุณต้องการสมัครสมาชิก VIP กรุณาพิมพ์ /start แล้วกดเลือกแพ็กเกจก่อนส่งสลิปหรือลิงก์ซองของขวัญครับ</i>",
+            parse_mode="HTML",
+        )
+        await log_chat_message(user_id=user_id, sender_role="BOT", message_text=f"💬 ระบบได้รับ{media_type}ของคุณเรียบร้อยแล้วครับ")
