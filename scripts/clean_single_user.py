@@ -21,7 +21,7 @@ from bot.services.chat_cleaner_state import (
     update_user_checkpoint,
 )
 
-async def clean_user_with_tuned_resume(target_user_id: int, override_start_id: int = None):
+async def clean_user_with_bulk_mode(target_user_id: int, override_start_id: int = None):
     config = get_settings()
     bot = Bot(token=config.BOT_TOKEN)
 
@@ -44,10 +44,17 @@ async def clean_user_with_tuned_resume(target_user_id: int, override_start_id: i
 
     total_remaining = start_mid
 
-    print(f"🚀 เริ่มต้นการกวาดล้างต่อด้วยความเร็ว Tuned Mode (6 Workers @ 18.8 IDs/s)", flush=True)
+    # แบ่ง Chunks ละ 100 ข้อความ
+    chunk_size = 100
+    chunks = []
+    for s in range(start_mid, 0, -chunk_size):
+        e = max(0, s - chunk_size)
+        chunks.append(list(range(s, e, -1)))
+
+    print(f"🚀 เริ่มต้นการกวาดล้างด้วยระบบ Bulk Delete (ชุดละ 100 ข้อความ - Bot API 7.0+)", flush=True)
     print(f"👤 User: {target_user_id}", flush=True)
     print(f"📊 Message ID สูงสุด: {max_id:,}", flush=True)
-    print(f"🔄 ทำต่อจาก Checkpoint: Message ID {start_mid:,} ลงไปจนถึง ID 1 (เหลือ {total_remaining:,} ข้อความ)", flush=True)
+    print(f"📦 จำนวน Chunks ทั้งหมด: {len(chunks):,} Chunks ({total_remaining:,} ข้อความ)", flush=True)
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", flush=True)
 
     deleted_count = 0
@@ -57,9 +64,9 @@ async def clean_user_with_tuned_resume(target_user_id: int, override_start_id: i
     lock = asyncio.Lock()
     pause_until = 0.0
 
-    queue: asyncio.Queue[int] = asyncio.Queue()
-    for mid in range(start_mid, 0, -1):
-        queue.put_nowait(mid)
+    queue: asyncio.Queue[list[int]] = asyncio.Queue()
+    for c in chunks:
+        queue.put_nowait(c)
 
     start_time = time.time()
 
@@ -71,44 +78,47 @@ async def clean_user_with_tuned_resume(target_user_id: int, override_start_id: i
                 await asyncio.sleep(pause_until - now + 0.1)
 
             try:
-                mid = queue.get_nowait()
+                chunk = queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
 
             try:
-                await bot.delete_message(chat_id=target_user_id, message_id=mid)
+                await bot.delete_messages(chat_id=target_user_id, message_ids=chunk)
                 async with lock:
-                    deleted_count += 1
-                    deleted_ids.append(mid)
-                    print(f"  🗑️ [ลบสำเร็จ] Message ID: {mid} | ยอดรวมบอทที่ลบได้: {accumulated_deleted + deleted_count} ข้อความ", flush=True)
-                await asyncio.sleep(0.015)
+                    deleted_count += len(chunk)
+                    deleted_ids.extend(chunk)
+                await asyncio.sleep(0.03)
             except TelegramBadRequest:
-                async with lock:
-                    skipped_count += 1
+                for mid in chunk:
+                    try:
+                        await bot.delete_message(chat_id=target_user_id, message_id=mid)
+                        async with lock:
+                            deleted_count += 1
+                            deleted_ids.append(mid)
+                    except Exception:
+                        async with lock:
+                            skipped_count += 1
             except TelegramRetryAfter as e:
                 async with lock:
                     pause_until = max(pause_until, time.time() + e.retry_after + 1.0)
-                    print(f"⚠️ [Rate Limit] Telegram แจ้งให้รอ {e.retry_after}s... ระบบหยุดพักที่ ID {mid}", flush=True)
-                queue.put_nowait(mid)
+                    print(f"⚠️ [Rate Limit] Telegram แจ้งให้รอ {e.retry_after}s... ระบบหยุดพักที่ Chunk {chunk[0]}..{chunk[-1]}", flush=True)
+                queue.put_nowait(chunk)
                 await asyncio.sleep(e.retry_after + 1.0)
             except Exception:
                 async with lock:
-                    skipped_count += 1
+                    skipped_count += len(chunk)
 
             async with lock:
-                scanned_count += 1
-                current_min_id = min(current_min_id, mid)
-                if scanned_count % 200 == 0 or scanned_count == total_remaining:
-                    pct = (scanned_count / total_remaining) * 100
-                    total_pct = ((max_id - current_min_id) / max_id) * 100
+                scanned_count += len(chunk)
+                current_min_id = min(current_min_id, chunk[-1])
+                if scanned_count % 1000 == 0 or scanned_count >= total_remaining:
                     elapsed = time.time() - start_time
-                    speed = scanned_count / max(1.0, elapsed)
-                    remain_sec = (total_remaining - scanned_count) / max(1.0, speed)
+                    speed = scanned_count / max(0.1, elapsed)
+                    remain_sec = (total_remaining - scanned_count) / max(0.1, speed)
+                    pct = (scanned_count / total_remaining) * 100
                     print(
-                        f"⏳ [ภาพรวม {total_pct:.1f}% | ช่วงนี้ {pct:.1f}%] "
-                        f"กำลังตรวจลบอยู่ที่ ID: {current_min_id:,} / {max_id:,} "
-                        f"(สปีด: {speed:.1f} IDs/s | เหลืออีก: {remain_sec/60:.1f} นาที) "
-                        f"| ลบข้อความบอทแล้ว: {accumulated_deleted + deleted_count} ข้อความ",
+                        f"⏳ [{pct:5.1f}%] กำลังกวาดล้างถึง ID: {current_min_id:,} / {total_remaining:,} "
+                        f"(สปีด: {speed:,.1f} IDs/s | เหลืออีก: {remain_sec:.1f} วินาที)",
                         flush=True
                     )
                     update_user_checkpoint(
@@ -121,39 +131,34 @@ async def clean_user_with_tuned_resume(target_user_id: int, override_start_id: i
                     )
 
             queue.task_done()
-            await asyncio.sleep(0.015)
+            await asyncio.sleep(0.03)
 
-    # 6 Tuned Workers (18.8 IDs/s Sweet Spot)
-    workers = [asyncio.create_task(worker(i)) for i in range(6)]
+    workers = [asyncio.create_task(worker(i)) for i in range(4)]
     await asyncio.gather(*workers)
 
-    total_del = accumulated_deleted + deleted_count
+    elapsed_total = time.time() - start_time
+    total_deleted_final = accumulated_deleted + deleted_count
+
     update_user_checkpoint(
         user_id=target_user_id,
         max_id=max_id,
         scanned_down_to_id=0,
-        deleted_count=total_del,
+        deleted_count=total_deleted_final,
         status="COMPLETED",
         deleted_ids=deleted_ids,
     )
 
-    elapsed_total = time.time() - start_time
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", flush=True)
-    print(f"🎉 กวาดล้างข้อความเสร็จสิ้น 100% ถึง ID 1 สำหรับ User: {target_user_id}", flush=True)
-    print(f"⏱️ ใช้เวลาทั้งหมดช่วงนี้: {elapsed_total/60:.2f} นาที", flush=True)
-    print(f"🔍 สแกนครบทั้งหมด: {scanned_count:,} Message IDs (ลงไปจนถึง ID 1)", flush=True)
-    print(f"🗑️ ลบข้อความของบอทสำเร็จจริงรวม: {total_del} ข้อความ", flush=True)
-    print(f"📋 รายการ Message ID ที่ลบได้: {deleted_ids}", flush=True)
-    print(f"⏭️ ข้ามข้อความฝั่งผู้ใช้ / ที่ไม่มีอยู่: {skipped_count:,} ข้อความ", flush=True)
+    print(f"🎉 ดำเนินการกวาดล้างแชท User {target_user_id} ครบ 100% เสร็จสิ้น!", flush=True)
+    print(f"⏱️ ใช้เวลาทั้งหมด: {elapsed_total:.2f} วินาที (สปีดเฉลี่ย: {total_remaining/max(0.1, elapsed_total):,.1f} IDs/s)", flush=True)
+    print(f"🔍 สแกนทั้งหมด: {scanned_count:,} ข้อความ", flush=True)
+    print(f"🗑️ ลบข้อความฝั่งบอทสำเร็จ: {total_deleted_final:,} ข้อความ", flush=True)
+    print(f"💾 อัปเดตสถานะ Checkpoint เป็น COMPLETED เรียบร้อยแล้ว", flush=True)
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", flush=True)
 
     await bot.session.close()
 
 if __name__ == "__main__":
-    uid = 8869252777
-    start_id = 11364  # Resume from 11,364
-    if len(sys.argv) > 1 and sys.argv[1].isdigit():
-        uid = int(sys.argv[1])
-    if len(sys.argv) > 2 and sys.argv[2].isdigit():
-        start_id = int(sys.argv[2])
-    asyncio.run(clean_user_with_tuned_resume(uid, override_start_id=start_id))
+    uid = int(sys.argv[1]) if len(sys.argv) > 1 else 8869252777
+    start_override = int(sys.argv[2]) if len(sys.argv) > 2 else None
+    asyncio.run(clean_user_with_bulk_mode(uid, start_override))

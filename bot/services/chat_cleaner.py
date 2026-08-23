@@ -124,6 +124,13 @@ async def clean_user_chat_messages(
                 result["resumed_from_id"] = start_mid
                 logger.info(f"User {user_id}: Resuming from Checkpoint ID {start_mid}")
 
+    # แบ่งเป็น Chunks ละ 100 IDs สำหรับ Telegram Bot API 7.0+ Bulk Delete
+    chunk_size = 100
+    chunks = []
+    for s in range(start_mid, target_end_mid, -chunk_size):
+        e = max(target_end_mid, s - chunk_size)
+        chunks.append(list(range(s, e, -1)))
+
     deleted_count = 0
     skipped_count = 0
     scanned_count = 0
@@ -131,11 +138,11 @@ async def clean_user_chat_messages(
     lock = asyncio.Lock()
     pause_until = 0.0
 
-    queue: asyncio.Queue[int] = asyncio.Queue()
-    for mid in range(start_mid, target_end_mid, -1):
-        queue.put_nowait(mid)
+    queue: asyncio.Queue[list[int]] = asyncio.Queue()
+    for c in chunks:
+        queue.put_nowait(c)
 
-    # 4. Worker Pool สำหรับสแกนและลบแบบความเร็วสูงสุดที่ไม่ติด Rate Limit (Tuned 6 Workers)
+    # 4. Worker Pool สำหรับ Bulk Delete กวาดทีละ 100 ข้อความต่อ Request
     async def worker(w_id: int):
         nonlocal scanned_count, skipped_count, deleted_count, current_min_id, pause_until
         while not queue.empty():
@@ -144,33 +151,41 @@ async def clean_user_chat_messages(
                 await asyncio.sleep(pause_until - now + 0.1)
 
             try:
-                mid = queue.get_nowait()
+                chunk = queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
 
             try:
-                await bot.delete_message(chat_id=user_id, message_id=mid)
+                await bot.delete_messages(chat_id=user_id, message_ids=chunk)
                 async with lock:
-                    deleted_count += 1
-                    deleted_ids.append(mid)
-                await asyncio.sleep(0.015)
+                    deleted_count += len(chunk)
+                    deleted_ids.extend(chunk)
+                await asyncio.sleep(0.03)
             except TelegramBadRequest:
-                async with lock:
-                    skipped_count += 1
+                # กรณีมีข้อผิดพลาดเฉพาะชุด ลองลบทีละ ID ใน Chunk นั้น
+                for mid in chunk:
+                    try:
+                        await bot.delete_message(chat_id=user_id, message_id=mid)
+                        async with lock:
+                            deleted_count += 1
+                            deleted_ids.append(mid)
+                    except Exception:
+                        async with lock:
+                            skipped_count += 1
             except TelegramRetryAfter as e:
                 async with lock:
                     pause_until = max(pause_until, time.time() + e.retry_after + 1.0)
-                    logger.info(f"Rate limit hit for user {user_id}: waiting {e.retry_after}s at ID {mid}")
-                queue.put_nowait(mid)
+                    logger.info(f"Rate limit hit for user {user_id}: waiting {e.retry_after}s at Chunk {chunk[0]}..{chunk[-1]}")
+                queue.put_nowait(chunk)
                 await asyncio.sleep(e.retry_after + 1.0)
             except Exception as e:
                 async with lock:
-                    skipped_count += 1
+                    skipped_count += len(chunk)
 
             async with lock:
-                scanned_count += 1
-                current_min_id = min(current_min_id, mid)
-                if scanned_count % 100 == 0:
+                scanned_count += len(chunk)
+                current_min_id = min(current_min_id, chunk[-1])
+                if scanned_count % 500 == 0:
                     update_user_checkpoint(
                         user_id=user_id,
                         max_id=max_id,
@@ -183,9 +198,9 @@ async def clean_user_chat_messages(
                     )
 
             queue.task_done()
-            await asyncio.sleep(0.015)
+            await asyncio.sleep(0.03)
 
-    workers = [asyncio.create_task(worker(i)) for i in range(num_workers)]
+    workers = [asyncio.create_task(worker(i)) for i in range(min(num_workers, 4))]
     await asyncio.gather(*workers)
 
     # 5. เมื่อสแกนครบถึง target_end_mid -> บันทึกสถานะ COMPLETED และอัปเดต last_scanned_max_id
