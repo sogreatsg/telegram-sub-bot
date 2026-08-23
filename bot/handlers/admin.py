@@ -614,7 +614,8 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "• <code>/set_vip [User ID/@user] [เวลา เช่น 30, 12h, 0]</code> — 🎯 ตั้งค่าเวลาคงเหลือใหม่โดยตรง\n"
         "• <code>/move_user [User ID/@user]</code> — 🚀 ย้ายสมาชิกไป Channel ใหม่ (ส่งลิงก์ 7 วัน)\n"
         "• <code>/unmove_user [User ID/@user]</code> — 🔄 ย้ายสมาชิกกลับ Channel เดิม\n"
-        "• <code>/kick [User ID]</code> — สั่งเตะออกจาก Channel VIP ทันที\n\n"
+        "• <code>/kick [User ID]</code> — สั่งเตะออกจาก Channel VIP ทันที\n"
+        "• <code>/kick_all_v1</code> — 🚪 สั่งเตะสมาชิกทุกคนออกจาก Channel V.1\n\n"
         "🗑️ <b>7. รีเซ็ตข้อมูล:</b>\n"
         "• <code>/reset_user [User ID/@user]</code> — ล้างข้อมูลผู้ใช้ทั้งหมดเพื่อเริ่มใหม่\n"
         "• <code>/reset_trial [User ID/@user]</code> — รีเซ็ตสิทธิ์ทดลองฟรีให้ผู้ใช้\n\n"
@@ -657,6 +658,9 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
             [
                 InlineKeyboardButton(text="⏱️ ระบบทดลองฟรี", callback_data="admin_menu:trial"),
                 InlineKeyboardButton(text="🔔 เตือนข้อความค้างตอบ", callback_data="admin_menu:unanswered_reminder"),
+            ],
+            [
+                InlineKeyboardButton(text="🚪 เตะทุกคนออกจาก V.1 (/kick_all_v1)", callback_data="admin:confirm_kick_all_v1"),
             ],
         ]
     )
@@ -4621,3 +4625,200 @@ async def handle_admin_deep_scan_command(message: Message, bot: Bot):
     except Exception as e:
         logger.error(f"Error in deep_scan: {e}", exc_info=True)
         await message.answer("❌ เกิดข้อผิดพลาดระหว่างทำ Deep Scan กรุณาลองใหม่อีกครั้ง")
+
+
+def get_kick_all_v1_confirmation_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
+    """สร้างข้อความและปุ่มยืนยันสำหรับคำสั่งเตะทุกคนออกจาก Channel V.1"""
+    channel_name = get_channel_label(config.CHANNEL_ID)
+    text = (
+        "⚠️ <b>ยืนยันการเตะสมาชิกทุกคนออกจาก Channel V.1?</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📢 <b>Channel เป้าหมาย (V.1):</b> <b>{channel_name}</b> (<code>{config.CHANNEL_ID}</code>)\n\n"
+        "🚨 <b>ผลกระทบของคำสั่งนี้:</b>\n"
+        "• ระบบจะตรวจสอบและสั่งเตะสมาชิกทั่วไปทุกคนออกจาก Channel V.1 (และกลุ่มพูดคุยที่เชื่อมโยง)\n"
+        "• ระบบจะทำการ <b>ปลดแบนทันที</b> (Soft-kick) เพื่อไม่ให้สมาชิกติด Blacklist ใน Telegram\n"
+        "• บัญชีผู้ดูแลระบบ (Admin) และผู้สร้างห้อง (Creator) จะ <b>ไม่ถูกเตะ</b> (ระบบข้ามให้อัตโนมัติ)\n"
+        "• สมาชิกใน Channel V.2 (BareLive V.2) จะ <b>ไม่ได้รับผลกระทบใดๆ</b> ทั้งสิ้น\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "👉 <i>กรุณากดยืนยันด้านล่างหากต้องการดำเนินการทันที</i>"
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="⚠️ ยืนยันเตะทุกคนออกจาก V.1", callback_data="admin:do_kick_all_v1"),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 ยกเลิก", callback_data="admin:cancel_kick_all_v1"),
+            ]
+        ]
+    )
+    return text, kb
+
+
+@router.message(Command("kick_all_v1", "kick_v1_all", "kick_channel_v1", "kick_v1", "wipe_v1"))
+async def handle_kick_all_v1_command(message: Message):
+    """คำสั่งแอดมินสำหรับเตะสมาชิกทุกคนออกจาก Channel V.1: /kick_all_v1"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+    text, kb = get_kick_all_v1_confirmation_text_and_kb()
+    await message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:confirm_kick_all_v1")
+async def handle_admin_confirm_kick_all_v1_callback(callback: CallbackQuery):
+    """Callback เปิดหน้าต่างยืนยันเตะทุกคนออกจาก V.1 จากปุ่มใน Admin Menu"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+    await callback.answer()
+    text, kb = get_kick_all_v1_confirmation_text_and_kb()
+    await callback.message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admin:cancel_kick_all_v1")
+async def handle_admin_cancel_kick_all_v1_callback(callback: CallbackQuery):
+    """Callback ยกเลิกการเตะสมาชิกออกจาก V.1"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+    await callback.answer("ยกเลิกคำสั่งเรียบร้อย")
+    try:
+        await callback.message.edit_text("❌ <b>ยกเลิกการเตะสมาชิกออกจาก Channel V.1 เรียบร้อยแล้ว</b>", parse_mode="HTML")
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data == "admin:do_kick_all_v1")
+async def handle_admin_do_kick_all_v1_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เริ่มกระบวนการเตะทุกคนออกจาก Channel V.1"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    admin_name = f"@{callback.from_user.username}" if callback.from_user.username else html.escape(callback.from_user.full_name)
+    await callback.answer("🚀 กำลังเริ่มเตะสมาชิกออกจาก V.1...")
+
+    status_msg = await callback.message.edit_text(
+        "🔄 <b>กำลังเริ่มกระบวนการเตะทุกคนออกจาก Channel V.1...</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👑 <b>ผู้สั่งการ:</b> {admin_name}\n"
+        "⏳ กรุณารอสักครู่ ระบบกำลังทยอยตรวจสอบสมาชิกและดำเนินการ...",
+        parse_mode="HTML"
+    )
+
+    v1_channel_id = config.CHANNEL_ID
+    linked_chat_id = None
+    try:
+        ch_info = await bot.get_chat(chat_id=v1_channel_id)
+        linked_chat_id = getattr(ch_info, "linked_chat_id", None)
+    except Exception:
+        pass
+
+    scanned_count = 0
+    kicked_v1_count = 0
+    kicked_linked_count = 0
+    admin_skip = 0
+    error_count = 0
+
+    try:
+        async with get_session() as session:
+            stmt = select(User.telegram_id)
+            user_ids = (await session.execute(stmt)).scalars().all()
+            total_users = len(user_ids)
+
+            for i, uid in enumerate(user_ids, 1):
+                scanned_count += 1
+                is_admin = False
+
+                # 1. ตรวจสอบใน Channel V.1
+                try:
+                    chat_member = await bot.get_chat_member(chat_id=v1_channel_id, user_id=uid)
+                    if chat_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR):
+                        is_admin = True
+                        admin_skip += 1
+                    elif chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
+                        try:
+                            await bot.ban_chat_member(chat_id=v1_channel_id, user_id=uid, revoke_messages=False)
+                            await bot.unban_chat_member(chat_id=v1_channel_id, user_id=uid, only_if_banned=True)
+                            kicked_v1_count += 1
+                        except Exception as e:
+                            logger.debug(f"Failed to kick user {uid} from V1 channel: {e}")
+                            error_count += 1
+                except TelegramBadRequest:
+                    pass
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(e.retry_after + 1)
+                except Exception:
+                    pass
+
+                # 2. ตรวจสอบใน Linked Discussion Group (ถ้ามี)
+                if linked_chat_id and not is_admin:
+                    try:
+                        grp_member = await bot.get_chat_member(chat_id=linked_chat_id, user_id=uid)
+                        if grp_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.RESTRICTED):
+                            await bot.ban_chat_member(chat_id=linked_chat_id, user_id=uid, revoke_messages=False)
+                            await bot.unban_chat_member(chat_id=linked_chat_id, user_id=uid, only_if_banned=True)
+                            kicked_linked_count += 1
+                    except Exception:
+                        pass
+
+                # 3. อัปเดตสถานะ Subscription ใน DB สำหรับคนที่อยู่ V1
+                sub = await session.get(Subscription, uid)
+                u = await session.get(User, uid)
+                if u and (not getattr(u, "is_moved_to_secondary", False) and getattr(u, "assigned_channel", "PRIMARY") == "PRIMARY"):
+                    if sub and sub.status in (SubStatus.ACTIVE.value, SubStatus.PENDING.value):
+                        sub.status = SubStatus.KICKED.value
+                        session.add(sub)
+
+                await asyncio.sleep(0.08)
+
+                if i % 25 == 0 or i == total_users:
+                    try:
+                        await status_msg.edit_text(
+                            "🔄 <b>กำลังดำเนินการเตะสมาชิกออกจาก Channel V.1...</b>\n"
+                            "━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📊 <b>ความคืบหน้า:</b> {i}/{total_users} บัญชี\n"
+                            f"👢 <b>เตะออกจาก V.1 สำเร็จ:</b> <b>{kicked_v1_count}</b> คน\n"
+                            + (f"💬 <b>เตะออกจากกลุ่มสนทนา:</b> {kicked_linked_count} คน\n" if linked_chat_id else "")
+                            + f"🛡️ <b>ข้ามแอดมิน:</b> {admin_skip} คน\n"
+                            "━━━━━━━━━━━━━━━━━━━━\n"
+                            "⏳ <i>กรุณารอสักครู่จนกว่าระบบจะทำงานเสร็จสิ้น...</i>",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+
+            await session.commit()
+
+        final_report = (
+            "🎉 <b>ดำเนินการเตะสมาชิกทุกคนออกจาก Channel V.1 เสร็จสมบูรณ์!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📢 <b>Channel เป้าหมาย (V.1):</b> <b>{get_channel_label(v1_channel_id)}</b> (<code>{v1_channel_id}</code>)\n"
+            f"👑 <b>ผู้สั่งการ:</b> {admin_name}\n"
+            f"🔍 <b>ตรวจสอบทั้งหมด:</b> <b>{scanned_count}</b> บัญชี\n"
+            f"👢 <b>เตะออกจาก Channel V.1 สำเร็จ:</b> <b>{kicked_v1_count}</b> คน\n"
+            + (f"💬 <b>เตะออกจากกลุ่มสนทนาที่เชื่อมโยง:</b> <b>{kicked_linked_count}</b> คน\n" if linked_chat_id else "")
+            + f"🛡️ <b>ข้ามแอดมิน/ผู้สร้าง:</b> <b>{admin_skip}</b> คน\n"
+            f"⚠️ <b>ข้อผิดพลาด:</b> <b>{error_count}</b> ครั้ง\n"
+            f"📅 <b>เวลาที่เสร็จสิ้น:</b> <code>{format_thai_datetime(datetime.now(timezone.utc))} น.</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "✨ <i>ระบบได้ทำการ Soft-kick และปลดแบนใน Telegram ให้ทุกคนเรียบร้อยแล้ว ไม่ติด Blacklist ครับ</i>"
+        )
+        try:
+            await status_msg.edit_text(final_report, parse_mode="HTML")
+        except Exception:
+            await callback.message.answer(final_report, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error in kick_all_v1: {e}", exc_info=True)
+        try:
+            await status_msg.edit_text(f"❌ <b>เกิดข้อผิดพลาดในการเตะสมาชิก V.1:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        except Exception:
+            await callback.message.answer(f"❌ <b>เกิดข้อผิดพลาด:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
