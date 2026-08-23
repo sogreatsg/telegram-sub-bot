@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Union
 from aiogram import Bot
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
@@ -230,57 +230,102 @@ def format_user_channel_presence(in_channels: List[int]) -> str:
     return "⚪ ออกจากห้องแล้ว (ไม่อยู่ในห้องใดเลย)"
 
 
-_discussion_chat_id_cache: Optional[int] = None
+from bot.services.notification_settings import get_saved_chat_group_id, save_chat_group_id
 
 
-async def get_discussion_chat_id(bot: Bot) -> Optional[int]:
+async def resolve_chat_group(bot: Bot, target: Union[str, int]) -> Optional[int]:
+    """แปลงข้อความเป้าหมาย (Chat ID, @username, หรือ Telegram link) เป็น Chat ID และตรวจสอบกับ Telegram"""
+    target_str = str(target).strip()
+    if target_str.startswith("https://t.me/"):
+        target_str = target_str.replace("https://t.me/", "")
+        if "/" in target_str:
+            target_str = target_str.split("/")[0]
+
+    # กรณีเป็นตัวเลข Chat ID (เช่น -1001234567890)
+    if target_str.lstrip("-").isdigit():
+        chat_id = int(target_str)
+        try:
+            ch = await bot.get_chat(chat_id)
+            if ch and ch.id:
+                save_chat_group_id(ch.id)
+                return ch.id
+        except Exception as e:
+            logger.warning(f"Could not get chat for ID {chat_id}: {e}")
+            save_chat_group_id(chat_id)
+            return chat_id
+
+    # กรณีเป็น @username หรือ username
+    uname = target_str if target_str.startswith("@") else f"@{target_str}"
+    try:
+        ch = await bot.get_chat(uname)
+        if ch and ch.id:
+            save_chat_group_id(ch.id)
+            return ch.id
+    except Exception as e:
+        logger.warning(f"Could not resolve username {uname}: {e}")
+
+    return None
+
+
+async def get_discussion_chat_id(bot: Bot, explicit_target: Optional[Union[str, int]] = None) -> Optional[int]:
     """
     ดึง Chat ID ของห้องพูดคุย (Discussion / Community Group)
-    โดยตรวจสอบจาก:
-    1. config.CHAT_GROUP_ID (หากตั้งค่าไว้ใน .env)
-    2. linked_chat_id ของ Channel หลัก V.1 (config.CHANNEL_ID)
-    3. linked_chat_id ของ Channel ใหม่ V.2 (config.SECONDARY_CHANNEL_ID)
-    4. Resolve Username จาก config.FREE_CHAT_GROUP_URL (เช่น @barelivechat)
+    โดยตรวจสอบตามลำดับความสำคัญ:
+    1. explicit_target ที่ส่งเข้ามาโดยตรง
+    2. config.CHAT_GROUP_ID (หากตั้งค่าไว้ใน .env)
+    3. saved_chat_group_id จาก data/notification_settings.json
+    4. linked_chat_id ของ Channel หลัก V.1 (config.CHANNEL_ID)
+    5. linked_chat_id ของ Channel ใหม่ V.2 (config.SECONDARY_CHANNEL_ID)
+    6. Resolve Username จาก config.FREE_CHAT_GROUP_URL (เช่น @barelivechat)
     """
-    global _discussion_chat_id_cache
-    if _discussion_chat_id_cache:
-        return _discussion_chat_id_cache
+    if explicit_target:
+        resolved = await resolve_chat_group(bot, explicit_target)
+        if resolved:
+            return resolved
 
     # 1. Config CHAT_GROUP_ID
     if getattr(config, "CHAT_GROUP_ID", None):
-        _discussion_chat_id_cache = config.CHAT_GROUP_ID
-        return _discussion_chat_id_cache
+        return config.CHAT_GROUP_ID
 
-    # 2. Check linked_chat_id of Primary Channel
+    # 2. Saved in JSON
+    saved_id = get_saved_chat_group_id()
+    if saved_id:
+        try:
+            return int(saved_id)
+        except Exception:
+            pass
+
+    # 3. Check linked_chat_id of Primary Channel
     try:
         ch = await bot.get_chat(config.CHANNEL_ID)
         if getattr(ch, "linked_chat_id", None):
-            _discussion_chat_id_cache = ch.linked_chat_id
-            return _discussion_chat_id_cache
+            save_chat_group_id(ch.linked_chat_id)
+            return ch.linked_chat_id
     except Exception:
         pass
 
-    # 3. Check linked_chat_id of Secondary Channel
+    # 4. Check linked_chat_id of Secondary Channel
     if config.SECONDARY_CHANNEL_ID:
         try:
             sec_ch = await bot.get_chat(config.SECONDARY_CHANNEL_ID)
             if getattr(sec_ch, "linked_chat_id", None):
-                _discussion_chat_id_cache = sec_ch.linked_chat_id
-                return _discussion_chat_id_cache
+                save_chat_group_id(sec_ch.linked_chat_id)
+                return sec_ch.linked_chat_id
         except Exception:
             pass
 
-    # 4. Resolve username from FREE_CHAT_GROUP_URL
+    # 5. Resolve username from FREE_CHAT_GROUP_URL
     if config.FREE_CHAT_GROUP_URL:
         uname = config.FREE_CHAT_GROUP_URL.rstrip("/").split("/")[-1]
         if uname and not uname.startswith("+"):
             try:
                 g_chat = await bot.get_chat(f"@{uname}")
                 if g_chat and g_chat.id:
-                    _discussion_chat_id_cache = g_chat.id
-                    return _discussion_chat_id_cache
+                    save_chat_group_id(g_chat.id)
+                    return g_chat.id
             except Exception:
                 pass
 
     return None
+
 

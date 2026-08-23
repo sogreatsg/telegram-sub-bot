@@ -41,3 +41,16 @@ def update_unanswered_dm_reminder_setting(is_active: bool) -> None:
 def is_unanswered_dm_reminder_active() -> bool:
     """ตรวจสอบว่าระบบแจ้งเตือนข้อความค้างตอบ (Unanswered DM Reminder) เปิดใช้งานอยู่หรือไม่"""
     return bool(get_notification_settings().get("unanswered_dm_reminder_active", True))
+
+
+def get_saved_chat_group_id() -> Any:
+    """ดึง Chat ID ของห้องพูดคุยที่บันทึกไว้"""
+    return get_notification_settings().get("chat_group_id")
+
+
+def save_chat_group_id(chat_id: int | None) -> None:
+    """บันทึก Chat ID ของห้องพูดคุยลงในไฟล์ JSON"""
+    settings = get_notification_settings()
+    settings["chat_group_id"] = chat_id
+    save_notification_settings(settings)
+

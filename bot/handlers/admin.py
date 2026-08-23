@@ -3,7 +3,7 @@ import html
 import asyncio
 import re
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.filters import Command
@@ -26,6 +26,8 @@ from bot.services.notification_settings import (
     is_unanswered_dm_reminder_active,
     update_unanswered_dm_reminder_setting,
     get_notification_settings,
+    get_saved_chat_group_id,
+    save_chat_group_id,
 )
 from bot.services.channel_service import (
     get_user_target_channel_id,
@@ -34,6 +36,7 @@ from bot.services.channel_service import (
     is_secondary_channel,
     get_channel_label,
     get_discussion_chat_id,
+    resolve_chat_group,
     kick_user_from_all_target_channels,
     unban_user_in_channel,
     unban_user_in_all_target_channels,
@@ -4827,9 +4830,11 @@ async def handle_admin_do_kick_all_v1_callback(callback: CallbackQuery, bot: Bot
             await callback.message.answer(f"❌ <b>เกิดข้อผิดพลาด:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
 
 
-async def get_kick_all_chat_confirmation_text_and_kb(bot: Bot) -> tuple[str, InlineKeyboardMarkup, Optional[int]]:
+async def get_kick_all_chat_confirmation_text_and_kb(
+    bot: Bot, explicit_target: Optional[Union[str, int]] = None
+) -> tuple[str, InlineKeyboardMarkup, Optional[int]]:
     """สร้างข้อความและปุ่มยืนยันสำหรับคำสั่งเตะทุกคนออกจากห้องพูดคุย (Community/Discussion Chat)"""
-    chat_id = await get_discussion_chat_id(bot)
+    chat_id = await get_discussion_chat_id(bot, explicit_target)
     chat_title = "ห้องพูดคุยชุมชน"
     if chat_id:
         try:
@@ -4842,7 +4847,13 @@ async def get_kick_all_chat_confirmation_text_and_kb(bot: Bot) -> tuple[str, Inl
     if not chat_id:
         text = (
             "⚠️ <b>ไม่พบข้อมูลห้องพูดคุยในระบบ</b>\n\n"
-            "กรุณาตรวจสอบว่าได้ตั้งค่า <code>CHAT_GROUP_ID</code> ใน .env หรือผูกห้องพูดคุยเข้ากับ Channel VIP แล้วครับ 🙏"
+            "📝 <b>วิธีระบุห้องพูดคุย (เลือกวิธีใดวิธีหนึ่ง):</b>\n"
+            "1. <b>ระบุในคำสั่งโดยตรง:</b>\n"
+            "   • <code>/kick_all_chat [Chat ID หรือ @username]</code>\n"
+            "   <i>ตัวอย่าง: <code>/kick_all_chat -1001234567890</code> หรือ <code>/kick_all_chat @barelivechat</code></i>\n\n"
+            "2. <b>หรือตั้งค่าห้องถาวร:</b>\n"
+            "   • <code>/set_chat_group [Chat ID หรือ @username]</code>\n\n"
+            "3. <b>หรือดึงบอทเข้ากลุ่มพูดคุยแล้วตั้งสิทธิ์ Admin ให้บอทครับ 🙏</b>"
         )
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -4866,7 +4877,7 @@ async def get_kick_all_chat_confirmation_text_and_kb(bot: Bot) -> tuple[str, Inl
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="⚠️ ยืนยันเตะทุกคนออกจากห้องแชท", callback_data="admin:do_kick_all_chat"),
+                InlineKeyboardButton(text="⚠️ ยืนยันเตะทุกคนออกจากห้องแชท", callback_data=f"admin:do_kick_all_chat:{chat_id}"),
             ],
             [
                 InlineKeyboardButton(text="🔙 ยกเลิก", callback_data="admin:cancel_kick_all_chat"),
@@ -4878,11 +4889,64 @@ async def get_kick_all_chat_confirmation_text_and_kb(bot: Bot) -> tuple[str, Inl
 
 @router.message(Command("kick_all_chat", "kick_chat_all", "kick_discussion_all", "kick_group_all", "wipe_chat"))
 async def handle_kick_all_chat_command(message: Message, bot: Bot):
-    """คำสั่งแอดมินสำหรับเตะสมาชิกทุกคนออกจากห้องพูดคุย: /kick_all_chat"""
+    """คำสั่งแอดมินสำหรับเตะสมาชิกทุกคนออกจากห้องพูดคุย: /kick_all_chat [Chat ID หรือ @username]"""
     if message.chat.id != config.ADMIN_GROUP_ID:
         return
-    text, kb, _ = await get_kick_all_chat_confirmation_text_and_kb(bot)
+    args = (message.text or "").split(maxsplit=1)
+    explicit_target = args[1].strip() if len(args) > 1 else None
+    text, kb, _ = await get_kick_all_chat_confirmation_text_and_kb(bot, explicit_target)
     await message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("set_chat_group", "set_discussion_group", "set_chat"))
+async def handle_set_chat_group_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับบันทึก Chat ID ของห้องพูดคุย: /set_chat_group <Chat ID หรือ @username>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        saved_id = get_saved_chat_group_id()
+        current_str = f"<code>{saved_id}</code>" if saved_id else "ยังไม่ได้ตั้งค่า"
+        await message.answer(
+            f"⚙️ <b>การตั้งค่าห้องพูดคุย (Community Chat Group)</b>\n\n"
+            f"💬 <b>สถานะปัจจุบัน:</b> {current_str}\n\n"
+            "📝 <b>วิธีตั้งค่าใหม่:</b>\n"
+            "• <code>/set_chat_group [Chat ID หรือ @username]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/set_chat_group -1001234567890</code>\n"
+            "• <code>/set_chat_group @barelivechat</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    target_raw = args[1].strip()
+    chat_id = await resolve_chat_group(bot, target_raw)
+    if not chat_id:
+        await message.answer(
+            f"❌ <b>ไม่สามารถค้นหาห้อง <code>{html.escape(target_raw)}</code> ได้</b>\n\n"
+            "💡 <i>คำแนะนำ: กรุณาตรวจสอบว่าพิมพ์ @username หรือ Chat ID ถูกต้อง และดึงบอทเข้ากลุ่มแล้วตั้งสิทธิ์ Admin เรียบร้อยแล้วครับ</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    save_chat_group_id(chat_id)
+    chat_title = "ห้องพูดคุย"
+    try:
+        ch = await bot.get_chat(chat_id)
+        if ch and ch.title:
+            chat_title = ch.title
+    except Exception:
+        pass
+
+    await message.answer(
+        f"✅ <b>บันทึกห้องพูดคุยเรียบร้อยแล้ว!</b>\n"
+        f"💬 <b>ชื่อกลุ่ม:</b> <b>{html.escape(chat_title)}</b>\n"
+        f"🔢 <b>Chat ID:</b> <code>{chat_id}</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✨ <i>สามารถใช้คำสั่ง <code>/kick_all_chat</code> หรือ <code>/kick_chat</code> ได้ทันทีครับ</i>",
+        parse_mode="HTML"
+    )
 
 
 @router.callback_query(F.data == "admin:confirm_kick_all_chat")
@@ -4913,7 +4977,7 @@ async def handle_admin_cancel_kick_all_chat_callback(callback: CallbackQuery):
         pass
 
 
-@router.callback_query(F.data == "admin:do_kick_all_chat")
+@router.callback_query(F.data.startswith("admin:do_kick_all_chat"))
 async def handle_admin_do_kick_all_chat_callback(callback: CallbackQuery, bot: Bot):
     """Callback เริ่มกระบวนการเตะทุกคนออกจากห้องพูดคุย"""
     if not callback.from_user or not callback.message:
@@ -4922,7 +4986,13 @@ async def handle_admin_do_kick_all_chat_callback(callback: CallbackQuery, bot: B
         await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
 
-    chat_id = await get_discussion_chat_id(bot)
+    target_cid = None
+    if ":" in callback.data:
+        parts = callback.data.split(":")
+        if len(parts) >= 3 and parts[2].lstrip("-").isdigit():
+            target_cid = int(parts[2])
+
+    chat_id = target_cid or await get_discussion_chat_id(bot)
     if not chat_id:
         await callback.answer("❌ ไม่พบข้อมูลห้องพูดคุย", show_alert=True)
         return
@@ -5025,27 +5095,33 @@ async def handle_admin_do_kick_all_chat_callback(callback: CallbackQuery, bot: B
 
 @router.message(Command("kick_chat", "kick_group"))
 async def handle_admin_kick_chat_command(message: Message, bot: Bot):
-    """คำสั่งแอดมินสำหรับเตะผู้ใช้รายคนออกจากห้องพูดคุย: /kick_chat <User ID หรือ @username>"""
+    """คำสั่งแอดมินสำหรับเตะผู้ใช้รายคนออกจากห้องพูดคุย: /kick_chat <User ID หรือ @username> [Chat ID หรือ @group]"""
     if message.chat.id != config.ADMIN_GROUP_ID:
         return
 
-    args = (message.text or "").split(maxsplit=1)
-    if len(args) < 2:
+    parts = (message.text or "").split()
+    if len(parts) < 2:
         await message.answer(
-            "❌ <b>วิธีใช้งาน:</b> <code>/kick_chat [User ID หรือ @username]</code>\n"
+            "❌ <b>วิธีใช้งาน:</b> <code>/kick_chat [User ID หรือ @username] [Chat ID ของกลุ่ม (ถ้ามี)]</code>\n"
             "ตัวอย่าง:\n"
             "• <code>/kick_chat 5125375696</code>\n"
-            "• <code>/kick_chat @username</code>",
+            "• <code>/kick_chat @username</code>\n"
+            "• <code>/kick_chat 5125375696 -1001234567890</code>",
             parse_mode="HTML"
         )
         return
 
-    chat_id = await get_discussion_chat_id(bot)
+    explicit_group = parts[2].strip() if len(parts) >= 3 else None
+    chat_id = await get_discussion_chat_id(bot, explicit_group)
     if not chat_id:
-        await message.answer("⚠️ ไม่พบข้อมูลห้องพูดคุยในระบบ กรุณาตรวจสอบการตั้งค่าใน .env ครับ", parse_mode="HTML")
+        await message.answer(
+            "⚠️ <b>ไม่พบข้อมูลห้องพูดคุยในระบบ</b>\n"
+            "สามารถระบุ Chat ID ของกลุ่มต่อท้ายได้ เช่น <code>/kick_chat 5125375696 -1001234567890</code> ครับ",
+            parse_mode="HTML"
+        )
         return
 
-    query = args[1].strip().lstrip("@")
+    query = parts[1].strip().lstrip("@")
     async with get_session() as session:
         if query.isdigit():
             user_stmt = select(User).where(User.telegram_id == int(query))
@@ -5085,5 +5161,6 @@ async def handle_admin_kick_chat_command(message: Message, bot: Bot):
         )
     except Exception as e:
         await message.answer(f"❌ <b>เตะไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
 
 
