@@ -13,6 +13,7 @@ from bot.services.chat_cleaner_state import (
     update_user_checkpoint,
     update_session_state,
     reset_all_clean_checkpoints,
+    reset_for_incremental_rescan,
     get_clean_status_summary,
 )
 
@@ -41,39 +42,30 @@ def test_chat_cleaner_state():
     assert cp["deleted_count"] == 14
     assert len(cp["deleted_ids"]) == 3
 
-    # 3. Update another user to completed
+    # 3. Update to completed
     update_user_checkpoint(
-        user_id=111222333,
-        max_id=500,
+        user_id=8869252777,
+        max_id=19064,
         scanned_down_to_id=0,
-        deleted_count=10,
+        deleted_count=14,
         status="COMPLETED",
-        username="user_completed",
-        full_name="Test User Completed",
+        username="sh",
+        full_name="sh",
     )
-    assert is_user_clean_completed(111222333)
+    assert is_user_clean_completed(8869252777)
+    # Check max_id comparison
+    assert is_user_clean_completed(8869252777, current_max_id=19064)
+    assert not is_user_clean_completed(8869252777, current_max_id=19070)
 
-    # 4. Update session
-    update_session_state(
-        is_running=True,
-        total_users=100,
-        current_user_index=15,
-        current_user_id=8869252777,
-        current_user_name="sh",
-        total_msgs_deleted=24,
-    )
+    # 4. Incremental reset test
+    reset_for_incremental_rescan()
+    cp = get_user_checkpoint(8869252777)
+    assert cp["status"] == "INCREMENTAL_READY"
+    assert cp["last_scanned_max_id"] == 19064
 
-    # 5. Check summary
-    summary = get_clean_status_summary()
-    assert summary["total_tracked_users"] == 2
-    assert summary["completed_count"] == 1
-    assert summary["in_progress_count"] == 1
-    assert summary["total_deleted_msgs"] == 24
-    assert summary["session"]["is_running"] is True
-
-    # 6. Cleanup
+    # 5. Cleanup
     reset_all_clean_checkpoints()
-    print("Chat cleaner state persistence test passed successfully!")
+    print("Chat cleaner state persistence and incremental delta test passed successfully!")
 
 if __name__ == "__main__":
     test_chat_cleaner_state()

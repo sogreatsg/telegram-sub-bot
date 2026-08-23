@@ -21,11 +21,11 @@ async def clean_user_chat_messages(
     force_restart: bool = False,
 ) -> Dict[str, Any]:
     """
-    ลบข้อความทั้งหมดที่บอทเคยส่งหา User ในแชทส่วนตัว (Private DM) ตั้งแต่ ID 1 ถึง max_id
-    มีระบบบันทึก State / Checkpoint อัตโนมัติ:
-    - หาก User คนนี้เคยทำเสร็จสมบูรณ์แล้ว (COMPLETED) -> ข้ามทันที (ไม่ต้องวนใหม่)
-    - หากเคยทำค้างไว้ที่ ID ใด -> เริ่มทำต่อจากจุดเดิม (Resume from Checkpoint)
-    - บันทึก Checkpoint ทุกๆ 100 ข้อความ และบันทึกสถานะเมื่อเสร็จสิ้น
+    ลบข้อความทั้งหมดที่บอทเคยส่งหา User ในแชทส่วนตัว (Private DM)
+    พร้อมระบบ Incremental Delta Scan และ Checkpoint Resume:
+    - หาก User คนนี้เคยสแกนครบแล้ว และไม่มีข้อความใหม่ (max_id <= last_scanned_max) -> ข้ามทันที (0 วินาที)
+    - หากมีข้อความใหม่เพิ่มขึ้นมา -> สแกนเฉพาะช่วงใหม่ (Delta Scan จาก new_max_id ลงมาถึง last_scanned_max)
+    - หากเคยทำค้างไว้ระหว่างทาง -> ทำต่อจาก Message ID ล่าสุดที่ค้างอยู่ (Resume from Checkpoint)
     """
     result = {
         "deleted_count": 0,
@@ -34,22 +34,13 @@ async def clean_user_chat_messages(
         "skipped_count": 0,
         "success": False,
         "already_completed": False,
+        "is_incremental_delta": False,
         "resumed_from_id": None,
+        "delta_scanned_range": None,
         "detail": ""
     }
 
-    # 1. ตรวจสอบ Checkpoint เดิม (ถ้าไม่ได้สั่ง force_restart)
-    cp = get_user_checkpoint(user_id)
-    if not force_restart and is_user_clean_completed(user_id):
-        result["success"] = True
-        result["already_completed"] = True
-        result["deleted_count"] = cp.get("deleted_count", 0) if cp else 0
-        result["max_id"] = cp.get("max_id", 0) if cp else 0
-        result["detail"] = "ALREADY_COMPLETED"
-        logger.info(f"User {user_id} was already cleaned to 100% completion. Skipping.")
-        return result
-
-    # 2. Probe หา Message ID สูงสุด
+    # 1. Probe หา Message ID สูงสุดล่าสุด
     try:
         probe = await bot.send_message(chat_id=user_id, text=".")
         max_id = probe.message_id
@@ -93,26 +84,49 @@ async def clean_user_chat_messages(
         result["detail"] = "NO_MESSAGES"
         return result
 
-    # 3. กำหนดจุดเริ่มต้นในการสแกน (ถ้ามี Checkpoint เดิม ให้ทำต่อจากจุดเดิม)
-    start_mid = max_id - 1
-    deleted_ids = []
-    accumulated_deleted = 0
+    # 2. ตรวจสอบ Checkpoint และประวัติการสแกนเดิม
+    cp = get_user_checkpoint(user_id)
+    last_scanned_max = cp.get("last_scanned_max_id", 0) if cp else 0
+    accumulated_deleted = cp.get("deleted_count", 0) if cp else 0
+    deleted_ids = list(cp.get("deleted_ids", [])) if cp else []
 
-    if cp and not force_restart:
-        prev_scanned_id = cp.get("scanned_down_to_id")
-        if prev_scanned_id and 1 < prev_scanned_id < max_id:
-            start_mid = prev_scanned_id
-            accumulated_deleted = cp.get("deleted_count", 0)
-            deleted_ids = list(cp.get("deleted_ids", []))
-            result["resumed_from_id"] = start_mid
-            logger.info(f"Resuming clean for user {user_id} from Checkpoint ID: {start_mid}")
+    # กรณีที่เคยสแกนครบ 100% แล้ว (COMPLETED)
+    if not force_restart and cp and cp.get("status") == "COMPLETED":
+        if max_id <= last_scanned_max:
+            # ไม่มีข้อความใหม่เพิ่มขึ้นมาเลย -> ข้ามทันที
+            result["success"] = True
+            result["already_completed"] = True
+            result["deleted_count"] = accumulated_deleted
+            result["max_id"] = max_id
+            result["detail"] = "NO_NEW_MESSAGES"
+            logger.info(f"User {user_id} has no new messages (max_id {max_id} <= {last_scanned_max}). Skipping.")
+            return result
+
+    # 3. กำหนดช่วง Message ID ในการสแกน (start_mid ลงมาหา target_end_mid)
+    start_mid = max_id - 1
+    target_end_mid = 0
+
+    if not force_restart and cp:
+        if cp.get("status") in ("COMPLETED", "INCREMENTAL_READY") and last_scanned_max > 0 and max_id > last_scanned_max:
+            # สแกนเฉพาะช่วง Delta ที่เพิ่มขึ้นมาใหม่
+            start_mid = max_id - 1
+            target_end_mid = last_scanned_max
+            result["is_incremental_delta"] = True
+            result["delta_scanned_range"] = f"{start_mid} down to {target_end_mid}"
+            logger.info(f"User {user_id}: Incremental delta scan from ID {start_mid} down to {target_end_mid}")
+        elif cp.get("status") == "IN_PROGRESS":
+            prev_scanned_id = cp.get("scanned_down_to_id")
+            if prev_scanned_id and 1 < prev_scanned_id < max_id:
+                start_mid = prev_scanned_id
+                result["resumed_from_id"] = start_mid
+                logger.info(f"User {user_id}: Resuming from Checkpoint ID {start_mid}")
 
     deleted_count = 0
     skipped_count = 0
     scanned_count = 0
 
-    # 4. วนลูปไล่ลบทีละ 1 ข้อความลงไปจนถึง ID 1
-    for mid in range(start_mid, 0, -1):
+    # 4. วนลูปไล่ลบทีละ 1 ข้อความลงไปจนถึง target_end_mid
+    for mid in range(start_mid, target_end_mid, -1):
         scanned_count += 1
         try:
             await bot.delete_message(chat_id=user_id, message_id=mid)
@@ -149,7 +163,7 @@ async def clean_user_chat_messages(
 
         await asyncio.sleep(0.02)
 
-    # 5. เมื่อสแกนครบจนถึง ID 1 -> บันทึกสถานะ COMPLETED
+    # 5. เมื่อสแกนครบถึง target_end_mid -> บันทึกสถานะ COMPLETED และอัปเดต last_scanned_max_id
     total_del = accumulated_deleted + deleted_count
     update_user_checkpoint(
         user_id=user_id,

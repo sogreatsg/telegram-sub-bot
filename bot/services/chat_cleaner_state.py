@@ -4,8 +4,6 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
-from bot.utils.time_utils import format_thai_datetime
-
 logger = logging.getLogger(__name__)
 
 STATE_FILE_PATH = os.path.join("data", "clean_chat_state.json")
@@ -65,12 +63,20 @@ def get_user_checkpoint(user_id: int) -> Optional[Dict[str, Any]]:
     return state.get("users", {}).get(str(user_id))
 
 
-def is_user_clean_completed(user_id: int) -> bool:
-    """ตรวจสอบว่า User คนนี้สแกนและลบข้อความเสร็จสิ้นครบ 100% แล้วหรือไม่"""
+def is_user_clean_completed(user_id: int, current_max_id: Optional[int] = None) -> bool:
+    """
+    ตรวจสอบว่า User คนนี้สแกนและลบข้อความเสร็จสิ้นครบถ้วนแล้วหรือไม่
+    หากมีการระบุ current_max_id: ถ้า current_max_id <= last_scanned_max_id แปลว่าไม่มีข้อความใหม่เพิ่มขึ้น -> เสร็จสมบูรณ์แล้ว
+    """
     cp = get_user_checkpoint(user_id)
     if not cp:
         return False
-    return cp.get("status") == "COMPLETED" or cp.get("scanned_down_to_id", 1) <= 1
+    if cp.get("status") != "COMPLETED":
+        return False
+    if current_max_id is not None:
+        last_max = cp.get("last_scanned_max_id", 0) or cp.get("max_id", 0)
+        return current_max_id <= last_max
+    return True
 
 
 def update_user_checkpoint(
@@ -94,6 +100,7 @@ def update_user_checkpoint(
             "username": username,
             "full_name": full_name,
             "max_id": max_id,
+            "last_scanned_max_id": max_id if status == "COMPLETED" else 0,
             "scanned_down_to_id": scanned_down_to_id,
             "deleted_count": deleted_count,
             "deleted_ids": deleted_ids or [],
@@ -116,6 +123,7 @@ def update_user_checkpoint(
         if deleted_ids is not None:
             u_data["deleted_ids"] = deleted_ids
         if status == "COMPLETED":
+            u_data["last_scanned_max_id"] = max(u_data.get("last_scanned_max_id", 0), max_id)
             u_data["completed_at"] = now_str
 
     save_clean_state(state)
@@ -154,8 +162,24 @@ def update_session_state(
     save_clean_state(state)
 
 
+def reset_for_incremental_rescan() -> None:
+    """
+    รีเซ็ตสถานะเพื่อให้รันสแกนรอบใหม่ โดยยังคงจำ last_scanned_max_id เดิมไว้
+    ทำให้รอบใหม่จะสแกนเฉพาะข้อความช่วงที่เพิ่มขึ้นมาใหม่ (Delta Scan) เท่านั้น
+    """
+    state = get_clean_state()
+    state["session"] = _get_default_state()["session"]
+    for u in state.get("users", {}).values():
+        if u.get("status") == "COMPLETED":
+            u["status"] = "INCREMENTAL_READY"
+            u["scanned_down_to_id"] = u.get("last_scanned_max_id", 0)
+        else:
+            u["status"] = "IN_PROGRESS"
+    save_clean_state(state)
+
+
 def reset_all_clean_checkpoints() -> None:
-    """รีเซ็ตประวัติ Checkpoint ทั้งหมดให้เริ่มต้นใหม่"""
+    """รีเซ็ตประวัติ Checkpoint ทั้งหมดแบบสมบูรณ์ 100% (ล้างเพื่อเริ่มจาก 0 ใหม่ทั้งหมด)"""
     state = _get_default_state()
     save_clean_state(state)
 
@@ -167,7 +191,7 @@ def get_clean_status_summary() -> Dict[str, Any]:
     session = state.get("session", {})
 
     completed_users = [u for u in users.values() if u.get("status") == "COMPLETED"]
-    in_progress_users = [u for u in users.values() if u.get("status") == "IN_PROGRESS"]
+    in_progress_users = [u for u in users.values() if u.get("status") in ("IN_PROGRESS", "INCREMENTAL_READY")]
     blocked_users = [u for u in users.values() if u.get("status") == "BLOCKED_BOT"]
     total_deleted_msgs = sum(u.get("deleted_count", 0) for u in users.values())
 
