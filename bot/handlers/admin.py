@@ -51,6 +51,7 @@ from bot.services.chat_cleaner_state import (
     update_session_state,
     get_clean_status_summary,
     reset_all_clean_checkpoints,
+    is_user_clean_completed,
 )
 from bot.services.payment_settings import (
     is_promptpay_active,
@@ -5373,6 +5374,7 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
 
     scanned_count = 0
     cleaned_user_count = 0
+    already_cleaned_count = 0
     skipped_v2_count = 0
     blocked_count = 0
     total_msgs_deleted = 0
@@ -5389,9 +5391,15 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
                 uid = user.telegram_id
                 u_name = user.full_name or user.username or f"User {uid}"
 
-                # ตรวจสอบว่าเป็นสมาชิก V.2 หรือไม่
+                # 1. ตรวจสอบว่าเป็นสมาชิก V.2 หรือไม่ -> ข้าม
                 if is_user_v2_member(user):
                     skipped_v2_count += 1
+                    continue
+
+                # 2. ตรวจสอบว่าเคยล้างเสร็จสิ้นสมบูรณ์แล้ว หรือล้างจาก Local เรียบร้อยแล้วหรือไม่ -> ข้ามทันที 0 วินาที
+                if is_user_clean_completed(uid) or uid == 8869252777:
+                    already_cleaned_count += 1
+                    cleaned_user_count += 1
                     continue
 
                 # อัปเดตสถานะ Session ว่ากำลังล้างใครอยู่
@@ -5432,7 +5440,7 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
                             "━━━━━━━━━━━━━━━━━━━━\n"
                             f"📊 <b>ความคืบหน้า:</b> {i}/{total_users} บัญชี ({(i/total_users)*100:.1f}%)\n"
                             f"👤 <b>กำลังทำบัญชี:</b> {html.escape(u_name)} (<code>{uid}</code>)\n"
-                            f"🧹 <b>ล้างแชทสำเร็จแล้ว:</b> <b>{cleaned_user_count}</b> คน\n"
+                            f"🧹 <b>ล้างแชทสำเร็จแล้ว:</b> <b>{cleaned_user_count}</b> คน (ข้ามคนที่เสร็จแล้ว/Local: {already_cleaned_count} คน)\n"
                             f"🗑️ <b>ยอดข้อความที่ลบแล้ว:</b> <b>{total_msgs_deleted:,}</b> ข้อความ\n"
                             f"🛡️ <b>ข้ามสมาชิก V.2 (ปลอดภัย):</b> {skipped_v2_count} คน\n"
                             f"🚫 <b>บล็อกบอท/ติดต่อไม่ได้:</b> {blocked_count} คน\n"
