@@ -14,11 +14,11 @@ async def test_chat_cleaner():
     probe_msg = MagicMock(message_id=25)
     bot.send_message.return_value = probe_msg
     bot.delete_message.return_value = True
-    bot.delete_messages.return_value = True
 
-    del_count, success, detail = await clean_user_chat_messages(bot, user_id=123456789)
-    assert success is True, "clean_user_chat_messages should succeed"
-    assert del_count > 0, "Should report deleted messages"
+    res = await clean_user_chat_messages(bot, user_id=123456789)
+    assert res["success"] is True, "clean_user_chat_messages should succeed"
+    assert res["deleted_count"] == 24, "Should report exactly 24 deleted messages (from ID 1 to 24)"
+    assert res["max_id"] == 25, "Max ID should be 25"
     assert bot.delete_message.called, "bot.delete_message should be called"
 
     print("Chat cleaner test passed successfully!")

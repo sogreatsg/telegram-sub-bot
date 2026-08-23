@@ -1,75 +1,86 @@
 import asyncio
 import logging
-from typing import Optional, Callable, Dict, Any, List
+from typing import Dict, Any
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
-from sqlalchemy import select
-
-from bot.models.schema import User
-from bot.services.database import get_session
-from bot.services.channel_service import is_user_v2_member
 
 logger = logging.getLogger(__name__)
 
 
-async def clean_user_chat_messages(bot: Bot, user_id: int) -> tuple[int, bool, str]:
+async def clean_user_chat_messages(bot: Bot, user_id: int) -> Dict[str, Any]:
     """
-    ลบข้อความทั้งหมดที่บอทเคยส่งหา User ในแชทส่วนตัว (Private DM) ตั้งแต่ข้อความแรกสุด (ID 1) ถึงข้อความล่าสุด:
-    - ส่ง Probe ข้อความสั้นๆ เพื่อหา message_id สูงสุดล่าสุด
-    - ลบ Probe ทันที
-    - กวาดล้างข้อความย้อนหลังของบอททั้งหมดตั้งแต่ ID 1 ถึง max_id แบบ 100% Full History
+    ลบข้อความทั้งหมดที่บอทเคยส่งหา User ในแชทส่วนตัว (Private DM) ตั้งแต่ ID 1 ถึง max_id
+    ไล่ลบจากข้อความล่าสุดย้อนไปหาข้อความแรกสุดทีละข้อความอย่างแม่นยำ พร้อมจัดการ Rate Limit
     
-    คืนค่า: (จำนวนข้อความที่ลบสำเร็จ, สถานะสำเร็จหรือไม่, รายละเอียดเพิ่มเติม)
+    คืนค่า dict:
+    - deleted_count: จำนวนข้อความของบอทที่ลบสำเร็จจริง
+    - max_id: Message ID สูงสุดที่พบในแชท
+    - scanned_count: จำนวน Message ID ที่สแกน
+    - skipped_count: จำนวนข้อความที่ข้าม (ของ User หรือที่ไม่มีอยู่)
+    - success: สำเร็จหรือไม่
+    - detail: รายละเอียดผลลัพธ์
     """
+    result = {
+        "deleted_count": 0,
+        "max_id": 0,
+        "scanned_count": 0,
+        "skipped_count": 0,
+        "success": False,
+        "detail": ""
+    }
+
     try:
         probe = await bot.send_message(chat_id=user_id, text=".")
         max_id = probe.message_id
+        result["max_id"] = max_id
         try:
             await bot.delete_message(chat_id=user_id, message_id=max_id)
         except Exception:
             pass
     except TelegramForbiddenError:
-        return 0, False, "BLOCKED_BOT"
+        result["detail"] = "BLOCKED_BOT"
+        return result
     except TelegramBadRequest as e:
         logger.debug(f"Cannot send probe to user {user_id}: {e}")
-        return 0, False, f"BAD_REQUEST: {e}"
+        result["detail"] = f"BAD_REQUEST: {e}"
+        return result
     except Exception as e:
         logger.debug(f"Error sending probe to user {user_id}: {e}")
-        return 0, False, str(e)
+        result["detail"] = str(e)
+        return result
 
-    # กวาดล้างตั้งแต่ข้อความที่ 1 จนถึงข้อความล่าสุดทั้งหมด
-    all_ids = list(range(1, max_id))
-    if not all_ids:
-        return 0, True, "NO_MESSAGES"
+    if max_id <= 1:
+        result["success"] = True
+        result["detail"] = "NO_MESSAGES"
+        return result
 
     deleted_count = 0
-    # Telegram Bot API deleteMessages รองรับได้สูงสุดครั้งละ 100 IDs
-    chunk_size = 100
-    for i in range(0, len(all_ids), chunk_size):
-        chunk = all_ids[i:i + chunk_size]
+    skipped_count = 0
+
+    # วนลูปไล่ลบตั้งแต่ข้อความล่าสุด (max_id - 1) ย้อนกลับไปหาข้อความแรกสุด (1)
+    for mid in range(max_id - 1, 0, -1):
+        result["scanned_count"] += 1
         try:
-            # ลองใช้ delete_messages ลบพร้อมกัน 100 ข้อความใน 1 API call
-            await bot.delete_messages(chat_id=user_id, message_ids=chunk)
-            deleted_count += len(chunk)
-        except (TelegramBadRequest, Exception):
-            # หากติดเงื่อนไข (เช่น มีข้อความของ User ปนอยู่) ให้ลบแยกแบบ Concurrent
-            async def _safe_delete(mid: int) -> int:
-                try:
-                    await bot.delete_message(chat_id=user_id, message_id=mid)
-                    return 1
-                except TelegramRetryAfter as e:
-                    await asyncio.sleep(e.retry_after + 0.5)
-                    try:
-                        await bot.delete_message(chat_id=user_id, message_id=mid)
-                        return 1
-                    except Exception:
-                        return 0
-                except Exception:
-                    return 0
+            await bot.delete_message(chat_id=user_id, message_id=mid)
+            deleted_count += 1
+            await asyncio.sleep(0.015)
+        except TelegramBadRequest:
+            # Telegram ไม่อนุญาตให้บอทลบข้อความของฝั่ง User หรือข้อความนี้ไม่มีอยู่แล้ว
+            skipped_count += 1
+        except TelegramRetryAfter as e:
+            logger.info(f"Rate limited by Telegram for user {user_id}, waiting {e.retry_after}s")
+            await asyncio.sleep(e.retry_after + 0.5)
+            try:
+                await bot.delete_message(chat_id=user_id, message_id=mid)
+                deleted_count += 1
+            except Exception:
+                skipped_count += 1
+        except Exception as e:
+            logger.debug(f"Error deleting message {mid} for user {user_id}: {e}")
+            skipped_count += 1
 
-            results = await asyncio.gather(*[_safe_delete(mid) for mid in chunk])
-            deleted_count += sum(results)
-
-        await asyncio.sleep(0.03)
-
-    return deleted_count, True, "SUCCESS"
+    result["deleted_count"] = deleted_count
+    result["skipped_count"] = skipped_count
+    result["success"] = True
+    result["detail"] = "SUCCESS"
+    return result

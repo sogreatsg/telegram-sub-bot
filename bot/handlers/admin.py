@@ -5390,11 +5390,11 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
 
                 # ดำเนินการลบข้อความใน DM
                 try:
-                    del_count, success, detail = await clean_user_chat_messages(bot, uid)
-                    if success:
+                    res = await clean_user_chat_messages(bot, uid)
+                    if res["success"]:
                         cleaned_user_count += 1
-                        total_msgs_deleted += del_count
-                    elif detail == "BLOCKED_BOT":
+                        total_msgs_deleted += res["deleted_count"]
+                    elif res.get("detail") == "BLOCKED_BOT":
                         blocked_count += 1
                     else:
                         error_count += 1
@@ -5402,7 +5402,7 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
                     logger.debug(f"Error cleaning DM for user {uid}: {e}")
                     error_count += 1
 
-                await asyncio.sleep(0.06)
+                await asyncio.sleep(0.04)
 
                 if i % 15 == 0 or i == total_users:
                     try:
@@ -5427,13 +5427,13 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
             f"👑 <b>ผู้สั่งการ:</b> {admin_name}\n"
             f"🔍 <b>ตรวจสอบผู้ใช้ทั้งหมด:</b> <b>{scanned_count}</b> บัญชี\n"
             f"🧹 <b>ล้างข้อความสำเร็จ:</b> <b>{cleaned_user_count}</b> คน\n"
-            f"🗑️ <b>จำนวนข้อความที่ลบทั้งหมด:</b> <b>{total_msgs_deleted:,}</b> ข้อความ\n"
+            f"🗑️ <b>จำนวนข้อความฝั่งบอทที่ลบทั้งหมด:</b> <b>{total_msgs_deleted:,}</b> ข้อความ\n"
             f"🛡️ <b>ข้ามสมาชิก V.2 (คงข้อความไว้):</b> <b>{skipped_v2_count}</b> คน\n"
             f"🚫 <b>ผู้ใช้บล็อกบอท:</b> <b>{blocked_count}</b> คน\n"
             f"⚠️ <b>ข้อผิดพลาดอื่นๆ:</b> <b>{error_count}</b> ครั้ง\n"
             f"📅 <b>เวลาที่เสร็จสิ้น:</b> <code>{format_thai_datetime(datetime.now(timezone.utc))} น.</code>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            "✨ <i>ข้อความ เมนู และปุ่มกดทั้งหมดของบอทในแชทของผู้ใช้ที่ไม่ใช่ V.2 ถูกลบออกเรียบร้อยแล้วครับ</i>"
+            "✨ <i>ข้อความ เมนู รูปภาพ QR Code และปุ่มกดทั้งหมดของบอทในแชทของผู้ใช้ที่ไม่ใช่ V.2 ถูกลบออกเรียบร้อยแล้วครับ</i>"
         )
         try:
             await status_msg.edit_text(final_report, parse_mode="HTML")
@@ -5484,21 +5484,32 @@ async def handle_admin_clean_chat_command(message: Message, bot: Bot):
         target_uid = user.telegram_id
         user_name = html.escape(user.full_name or f"User {target_uid}")
 
-    del_count, success, detail = await clean_user_chat_messages(bot, target_uid)
-    if success:
-        await message.answer(
-            f"✅ <b>ลบข้อความของบอทใน DM สำเร็จ!</b>\n"
-            f"👤 <b>ผู้ใช้:</b> {user_name} (<code>{target_uid}</code>)\n"
-            f"🗑️ <b>ลบข้อความทั้งหมด:</b> <b>{del_count:,}</b> ข้อความ\n"
+    status_msg = await message.answer(f"⏳ กำลังตรวจสอบและทยอยลบข้อความของบอทในแชท {user_name} (<code>{target_uid}</code>)...", parse_mode="HTML")
+
+    res = await clean_user_chat_messages(bot, target_uid)
+    if res["success"]:
+        report_text = (
+            f"✅ <b>ดำเนินการลบข้อความของบอทในแชท {user_name} เสร็จสิ้น!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            "✨ <i>ข้อความของบอทถูกลบออกจากหน้าจอแชทของผู้ใช้เรียบร้อยแล้ว</i>",
-            parse_mode="HTML"
+            f"👤 <b>ผู้ใช้:</b> {user_name} (<code>{target_uid}</code>)\n"
+            f"🎯 <b>Message ID สูงสุดที่ตรวจพบ:</b> <code>ID {res['max_id']}</code>\n"
+            f"🔍 <b>สแกนทั้งหมด:</b> <b>{res['scanned_count']}</b> ข้อความ (ตั้งแต่ ID 1 ถึง {max(1, res['max_id'] - 1)})\n"
+            f"🗑️ <b>ลบข้อความฝั่งบอทสำเร็จ:</b> <b>{res['deleted_count']}</b> ข้อความ\n"
+            f"⏭️ <b>ข้ามข้อความของฝั่ง User/ที่ไม่มีอยู่:</b> <b>{res['skipped_count']}</b> ข้อความ\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "✨ <i>ข้อความ รูปภาพ QR Code และเมนูปุ่มกดของบอทถูกลบออกจากหน้าจอผู้ใช้เรียบร้อยแล้ว</i>\n"
+            "⚠️ <i>หมายเหตุ: ข้อความฝั่งที่ User พิมพ์ส่งมาเอง (บับเบิ้ลขวา) Telegram ไม่อนุญาตให้บอทลบตามกฎความปลอดภัยครับ</i>"
         )
+        try:
+            await status_msg.edit_text(report_text, parse_mode="HTML")
+        except Exception:
+            await message.answer(report_text, parse_mode="HTML")
     else:
+        detail = res.get("detail", "")
         if detail == "BLOCKED_BOT":
-            await message.answer(f"⚠️ ไม่สามารถลบได้เนื่องจากผู้ใช้ <code>{target_uid}</code> บล็อกบอทไว้", parse_mode="HTML")
+            await status_msg.edit_text(f"⚠️ ไม่สามารถลบได้เนื่องจากผู้ใช้ <code>{target_uid}</code> บล็อกบอทไว้", parse_mode="HTML")
         else:
-            await message.answer(f"❌ <b>ลบไม่สำเร็จ:</b> <code>{html.escape(detail)}</code>", parse_mode="HTML")
+            await status_msg.edit_text(f"❌ <b>ลบไม่สำเร็จ:</b> <code>{html.escape(detail)}</code>", parse_mode="HTML")
 
 
 def get_payment_methods_status_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
