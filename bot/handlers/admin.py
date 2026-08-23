@@ -5015,10 +5015,32 @@ async def handle_admin_do_kick_all_chat_callback(callback: CallbackQuery, bot: B
     except Exception:
         pass
 
+    # ตรวจสอบสิทธิ์ Ban Users ของบอทก่อนดำเนินการ
+    try:
+        bot_user = await bot.get_me()
+        bot_member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_user.id)
+        can_restrict = getattr(bot_member, "can_restrict_members", False) or bot_member.status == ChatMemberStatus.CREATOR
+        if not can_restrict:
+            await callback.message.edit_text(
+                f"❌ <b>บอทไม่มีสิทธิ์ Ban Users ในกลุ่ม {html.escape(chat_title)}!</b>\n\n"
+                "กรุณาไปที่แอป Telegram ➔ แก้ไขกลุ่ม ➔ ผู้ดูแลระบบ (Administrators) ➔ เลือกบอท ➔ <b>เปิดสิทธิ์ 'Ban Users / แบนผู้ใช้'</b> ให้บอทก่อนครับ 🙏",
+                parse_mode="HTML"
+            )
+            return
+    except Exception as e:
+        logger.warning(f"Could not verify bot rights in group {chat_id}: {e}")
+
+    initial_member_count = 0
+    try:
+        initial_member_count = await bot.get_chat_member_count(chat_id)
+    except Exception:
+        pass
+
     status_msg = await callback.message.edit_text(
         "🔄 <b>กำลังเริ่มกระบวนการเตะทุกคนออกจากห้องพูดคุย...</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"💬 <b>ห้องเป้าหมาย:</b> <b>{html.escape(chat_title)}</b> (<code>{chat_id}</code>)\n"
+        f"👥 <b>สมาชิกปัจจุบันในกลุ่ม:</b> <b>{initial_member_count:,}</b> คน\n"
         f"👑 <b>ผู้สั่งการ:</b> {admin_name}\n"
         "⏳ กรุณารอสักครู่ ระบบกำลังทยอยตรวจสอบสมาชิกและดำเนินการ...",
         parse_mode="HTML"
@@ -5074,19 +5096,38 @@ async def handle_admin_do_kick_all_chat_callback(callback: CallbackQuery, bot: B
                     except Exception:
                         pass
 
+        final_member_count = 0
+        try:
+            final_member_count = await bot.get_chat_member_count(chat_id)
+        except Exception:
+            pass
+
         final_report = (
             "🎉 <b>ดำเนินการเตะสมาชิกทุกคนออกจากห้องพูดคุยเสร็จสมบูรณ์!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"💬 <b>ห้องเป้าหมาย:</b> <b>{html.escape(chat_title)}</b> (<code>{chat_id}</code>)\n"
             f"👑 <b>ผู้สั่งการ:</b> {admin_name}\n"
-            f"🔍 <b>ตรวจสอบทั้งหมด:</b> <b>{scanned_count}</b> บัญชี\n"
-            f"👢 <b>เตะออกจากห้องแชทสำเร็จ:</b> <b>{kicked_count}</b> คน\n"
+            f"👥 <b>สมาชิกก่อนดำเนินการ:</b> <b>{initial_member_count:,}</b> คน\n"
+            f"🔍 <b>ตรวจสอบบัญชีในฐานข้อมูล:</b> <b>{scanned_count:,}</b> บัญชี\n"
+            f"👢 <b>เตะออกจากห้องแชทสำเร็จ:</b> <b>{kicked_count:,}</b> คน\n"
             f"🛡️ <b>ข้ามแอดมิน/ผู้สร้าง:</b> <b>{admin_skip}</b> คน\n"
+            f"👥 <b>สมาชิกคงเหลือในกลุ่ม:</b> <b>{final_member_count:,}</b> คน (รวมแอดมิน)\n"
             f"⚠️ <b>ข้อผิดพลาด:</b> <b>{error_count}</b> ครั้ง\n"
             f"📅 <b>เวลาที่เสร็จสิ้น:</b> <code>{format_thai_datetime(datetime.now(timezone.utc))} น.</code>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            "✨ <i>ระบบได้ทำการ Soft-kick และปลดแบนใน Telegram ให้ทุกคนเรียบร้อยแล้ว ไม่ติด Blacklist ครับ</i>"
         )
+        if final_member_count > (admin_skip + 1):
+            final_report += (
+                "💡 <b>คำแนะนำเพิ่มเติม:</b>\n"
+                f"เนื่องจากยังมีสมาชิกคงเหลือ {final_member_count - admin_skip - 1} คน (เป็นผู้ที่กดเข้ากลุ่มเองโดยตรง ไม่เคยเริ่มใช้งานบอท จึงไม่มีบันทึก User ID ในฐานข้อมูล)\n"
+                "👉 <b>วิธีจัดการ:</b>\n"
+                "1. ใช้คำสั่ง <code>/kick_chat [User ID หรือ @username]</code> เพื่อเตะรายคน\n"
+                "2. พิมพ์ <code>/chat_info</code> เพื่อดูสิทธิ์บอทและรายชื่อแอดมินในกลุ่ม\n"
+                "3. หรือในแอป Telegram เข้าไปที่ Edit Group ➔ Permissions ➔ ปิด Send Messages หรือ Revoke ลิงก์กลุ่มเดิมครับ"
+            )
+        else:
+            final_report += "✨ <i>สมาชิกทั่วไปถูกเตะออกจากกลุ่มพูดคุยเรียบร้อยแล้ว ไม่ติด Blacklist ครับ</i>"
+
         try:
             await status_msg.edit_text(final_report, parse_mode="HTML")
         except Exception:
@@ -5098,6 +5139,62 @@ async def handle_admin_do_kick_all_chat_callback(callback: CallbackQuery, bot: B
             await status_msg.edit_text(f"❌ <b>เกิดข้อผิดพลาดในการเตะสมาชิกห้องแชท:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
         except Exception:
             await callback.message.answer(f"❌ <b>เกิดข้อผิดพลาด:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
+
+@router.message(Command("chat_info", "audit_chat", "group_info", "check_chat"))
+async def handle_chat_info_command(message: Message, bot: Bot):
+    """ตรวจสอบสถานะ สิทธิ์บอท และจำนวนสมาชิกในห้องพูดคุย: /chat_info [Chat ID หรือ @username]"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    parts = (message.text or "").split()
+    explicit_group = parts[1].strip() if len(parts) >= 2 else None
+    chat_id = await get_discussion_chat_id(bot, explicit_group)
+    if not chat_id:
+        await message.answer("⚠️ ไม่พบข้อมูลห้องพูดคุยในระบบ กรุณาใช้คำสั่ง <code>/set_chat_group [Chat ID หรือ @username]</code> ครับ", parse_mode="HTML")
+        return
+
+    try:
+        ch = await bot.get_chat(chat_id)
+        chat_title = ch.title or "ห้องพูดคุย"
+        member_count = await bot.get_chat_member_count(chat_id)
+
+        bot_user = await bot.get_me()
+        bot_member = await bot.get_chat_member(chat_id=chat_id, user_id=bot_user.id)
+
+        is_admin = bot_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+        can_restrict = getattr(bot_member, "can_restrict_members", False) or bot_member.status == ChatMemberStatus.CREATOR
+        can_delete = getattr(bot_member, "can_delete_messages", False) or bot_member.status == ChatMemberStatus.CREATOR
+
+        admins = await bot.get_chat_administrators(chat_id)
+        admin_names = []
+        for adm in admins:
+            if not adm.user.is_bot:
+                uname = f"@{adm.user.username}" if adm.user.username else html.escape(adm.user.full_name)
+                admin_names.append(uname)
+
+        info_text = (
+            "📊 <b>ข้อมูลห้องพูดคุย (Chat Group Info)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"💬 <b>ชื่อกลุ่ม:</b> <b>{html.escape(chat_title)}</b>\n"
+            f"🔢 <b>Chat ID:</b> <code>{chat_id}</code>\n"
+            f"👥 <b>จำนวนสมาชิกทั้งหมด:</b> <b>{member_count:,}</b> คน\n"
+            f"👑 <b>จำนวนแอดมิน (คน):</b> {len(admin_names)} คน ({', '.join(admin_names) if admin_names else 'ไม่มี'})\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🤖 <b>สถานะและสิทธิ์ของบอทในกลุ่ม:</b>\n"
+            f"• สถานะ: {'🟢 เป็น Admin' if is_admin else '🔴 ไม่ใช่ Admin (ต้องตั้งบอทเป็น Admin)'}\n"
+            f"• สิทธิ์แบน/เตะสมาชิก (Ban Users): {'✅ มีสิทธิ์' if can_restrict else '❌ ไม่มีสิทธิ์ (จำเป็นต้องเปิด!)'}\n"
+            f"• สิทธิ์ลบข้อความ (Delete Messages): {'✅ มีสิทธิ์' if can_delete else '❌ ไม่มีสิทธิ์'}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+        )
+        if not can_restrict:
+            info_text += "⚠️ <b>คำเตือน:</b> บอทยังไม่มีสิทธิ์ <b>Ban Users</b> ในกลุ่มนี้ ทำให้บอทไม่สามารถเตะสมาชิกได้ กรุณาไปที่ Edit Group ➔ Administrators ➔ บอท ➔ เปิดสิทธิ์ Ban Users ครับ"
+        else:
+            info_text += "✨ <i>บอทมีสิทธิ์พร้อมสำหรับการเตะและดูแลกลุ่มเรียบร้อยครับ</i>"
+
+        await message.answer(info_text, parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ <b>ไม่สามารถดึงข้อมูลกลุ่มได้:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
 
 
 @router.message(Command("kick_chat", "kick_group"))
