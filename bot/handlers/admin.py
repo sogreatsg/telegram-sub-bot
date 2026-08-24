@@ -3561,6 +3561,15 @@ async def handle_admin_block_user_command(message: Message, bot: Bot):
     except Exception as e:
         logger.warning(f"Failed to soft-kick blocked user {target_uid}: {e}")
 
+    # แบนออกจากห้องพูดคุยชุมชนด้วย (Ban from discussion / community group)
+    try:
+        disc_chat_id = await get_discussion_chat_id(bot)
+        if disc_chat_id:
+            await bot.ban_chat_member(chat_id=disc_chat_id, user_id=target_uid, revoke_messages=True)
+            logger.info(f"Banned blocked user {target_uid} from discussion chat {disc_chat_id}")
+    except Exception as e:
+        logger.debug(f"Failed to ban blocked user {target_uid} in discussion chat: {e}")
+
     user_header = format_user_title(user_name, user_username, target_uid)
     time_display = format_thai_datetime(now)
     reason_display = html.escape(reason) if reason else "ไม่ได้ระบุ"
@@ -3575,7 +3584,7 @@ async def handle_admin_block_user_command(message: Message, bot: Bot):
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🔒 <b>ผลของการบล็อก:</b>\n"
         "• ผู้ใช้จะไม่สามารถพิมพ์ข้อความ ขอรับสิทธิ์ หรือกดปุ่มใดๆ ในบอทได้อีกต่อไป (บอทจะเงียบสนิท 100%)\n"
-        "• ดำเนินการเตะออกจาก Channel VIP เรียบร้อยแล้ว\n"
+        "• ดำเนินการเตะออกจาก Channel VIP และแบนออกจากห้องพูดคุยชุมชนเรียบร้อยแล้ว\n"
         "• <b>ไม่มีการส่งข้อความแจ้งเตือนใดๆ ไปยังฝั่งผู้ใช้</b>"
     )
 
@@ -3648,6 +3657,15 @@ async def handle_admin_unblock_user_command(message: Message, bot: Bot):
     except Exception as e:
         logger.debug(f"Unban user in channels error: {e}")
 
+    # ปลดแบนในห้องพูดคุยชุมชนด้วย
+    try:
+        disc_chat_id = await get_discussion_chat_id(bot)
+        if disc_chat_id:
+            await bot.unban_chat_member(chat_id=disc_chat_id, user_id=target_uid, only_if_banned=True)
+            logger.info(f"Unbanned user {target_uid} in discussion chat {disc_chat_id}")
+    except Exception as e:
+        logger.debug(f"Failed to unban user {target_uid} in discussion chat: {e}")
+
     user_header = format_user_title(user_name, user_username, target_uid)
     time_display = format_thai_datetime(datetime.now(timezone.utc))
 
@@ -3660,7 +3678,7 @@ async def handle_admin_unblock_user_command(message: Message, bot: Bot):
         "━━━━━━━━━━━━━━━━━━━━\n"
         "✨ <b>ผลของการปลดบล็อก:</b>\n"
         "• ผู้ใช้สามารถกลับมาพิมพ์ข้อความ ขอรับสิทธิ์ หรือกดปุ่มเมนูต่างๆ ในบอทได้ตามปกติ\n"
-        "• ปลดแบนใน Channel VIP เรียบร้อยแล้ว (สามารถรับลิงก์เข้าห้องใหม่ได้)\n"
+        "• ปลดแบนใน Channel VIP และห้องพูดคุยชุมชนเรียบร้อยแล้ว\n"
         "• <b>ไม่มีการส่งข้อความแจ้งเตือนใดๆ ไปยังฝั่งผู้ใช้</b>"
     )
 
@@ -3731,6 +3749,15 @@ async def handle_admin_block_user_callback(callback: CallbackQuery, bot: Bot):
     except Exception as e:
         logger.warning(f"Failed to kick blocked user {target_uid}: {e}")
 
+    # แบนออกจากห้องพูดคุยชุมชนด้วย (Ban from discussion / community group)
+    try:
+        disc_chat_id = await get_discussion_chat_id(bot)
+        if disc_chat_id:
+            await bot.ban_chat_member(chat_id=disc_chat_id, user_id=target_uid, revoke_messages=True)
+            logger.info(f"Banned blocked user {target_uid} from discussion chat {disc_chat_id}")
+    except Exception as e:
+        logger.debug(f"Failed to ban blocked user {target_uid} in discussion chat: {e}")
+
     await callback.answer("🚫 บล็อกผู้ใช้เรียบร้อยแล้ว")
 
     user_header = format_user_title(user_name, user_username, target_uid)
@@ -3743,7 +3770,7 @@ async def handle_admin_block_user_callback(callback: CallbackQuery, bot: Bot):
         f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
         f"📅 <b>เวลาที่บล็อก:</b> <code>{time_display} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🔒 <i>ผู้ใช้จะไม่สามารถพิมพ์ข้อความหรือกดปุ่มในบอทได้อีกต่อไป (และไม่มีการแจ้งเตือนฝั่งผู้ใช้)</i>"
+        "🔒 <i>ผู้ใช้จะไม่สามารถพิมพ์ข้อความหรือกดปุ่มในบอท/ห้องแชทได้อีกต่อไป (และไม่มีการแจ้งเตือนฝั่งผู้ใช้)</i>"
     )
 
     unblock_kb = InlineKeyboardMarkup(
@@ -3793,6 +3820,15 @@ async def handle_admin_unblock_user_callback(callback: CallbackQuery, bot: Bot):
         await unban_user_in_all_target_channels(bot, target_uid)
     except Exception:
         pass
+
+    # ปลดแบนในห้องพูดคุยชุมชนด้วย
+    try:
+        disc_chat_id = await get_discussion_chat_id(bot)
+        if disc_chat_id:
+            await bot.unban_chat_member(chat_id=disc_chat_id, user_id=target_uid, only_if_banned=True)
+            logger.info(f"Unbanned user {target_uid} in discussion chat {disc_chat_id}")
+    except Exception as e:
+        logger.debug(f"Failed to unban user {target_uid} in discussion chat: {e}")
 
     await callback.answer("🟢 ปลดบล็อกผู้ใช้เรียบร้อยแล้ว")
 

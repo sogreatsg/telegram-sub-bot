@@ -39,6 +39,18 @@ async def handle_channel_member_updated(event: ChatMemberUpdated, bot: Bot):
         f"old_status={old_status}, new_status={new_status}, via_invite={bool(event.invite_link)}"
     )
 
+    # ถ้าเป็นห้องแชทกลุ่มทั่วไป (ที่ไม่ใช่กลุ่ม Admin) แล้วผู้ใช้เป็นคนที่ถูกบล็อก -> แบนออกจากกลุ่มทันที
+    if event.chat.type in ("group", "supergroup") and event.chat.id != config.ADMIN_GROUP_ID:
+        async with get_session() as session:
+            db_user = await session.get(User, user.id)
+            if db_user and getattr(db_user, "is_blocked", False):
+                try:
+                    await bot.ban_chat_member(chat_id=event.chat.id, user_id=user.id, revoke_messages=True)
+                    logger.info(f"[BLOCKED_USER_IN_GROUP] Banned blocked user {user.id} attempting to stay/join group {event.chat.id}")
+                except Exception:
+                    pass
+                return
+
     if not is_target_channel(event.chat.id):
         return
 
@@ -324,4 +336,37 @@ async def handle_new_chat_members_service_message(message: Message):
             logger.info(f"Deleted new_chat_members service message in group {message.chat.id}")
         except Exception:
             pass
+
+
+@router.message(F.chat.type.in_({"group", "supergroup"}), F.chat.id != config.ADMIN_GROUP_ID)
+async def handle_group_chat_blocked_user_guard(message: Message, bot: Bot):
+    """
+    ดักจับข้อความในห้องแชทกลุ่มชุมชนทั้งหมด (ยกเว้นกลุ่ม Admin):
+    - หากผู้ส่งเป็นผู้ใช้ที่ถูกบล็อก (is_blocked = True)
+    - ลบข้อความที่พิมพ์ออกทันที (Silent Delete)
+    - แบนผู้ใช้ออกจากห้องแชททันที (Ban from Chat Group)
+    """
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    user_id = message.from_user.id
+    async with get_session() as session:
+        db_user = await session.get(User, user_id)
+        if not db_user or not getattr(db_user, "is_blocked", False):
+            return
+
+    # 1. ลบข้อความที่ผู้ใช้พิมพ์ในกลุ่มทันที
+    try:
+        await message.delete()
+        logger.info(f"[BLOCKED_USER_IN_GROUP] Deleted message from blocked user {user_id} in group {message.chat.id}")
+    except Exception as e:
+        logger.debug(f"Failed to delete message from blocked user {user_id}: {e}")
+
+    # 2. แบนผู้ใช้ออกจากกลุ่มทันที
+    try:
+        await bot.ban_chat_member(chat_id=message.chat.id, user_id=user_id, revoke_messages=True)
+        logger.info(f"[BLOCKED_USER_IN_GROUP] Banned blocked user {user_id} from group {message.chat.id}")
+    except Exception as e:
+        logger.debug(f"Failed to ban blocked user {user_id} in group {message.chat.id}: {e}")
+
 

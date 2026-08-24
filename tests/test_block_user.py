@@ -123,6 +123,40 @@ async def test_block_and_unblock_flow():
     await cb_mw(handler, cb_event, data_user)
     assert handler.called, "Unblocked user should be able to send callbacks again"
 
+    # 11. Test Group Chat Protection:
+    # When blocked user sends message in group chat -> message is deleted and user is banned from group
+    from bot.handlers.channel_events import handle_group_chat_blocked_user_guard
+
+    async with get_session() as session:
+        u = await session.get(User, test_uid)
+        u.is_blocked = True
+        session.add(u)
+
+    mock_bot = MagicMock()
+    mock_bot.ban_chat_member = AsyncMock()
+
+    group_msg = MagicMock(spec=Message)
+    group_msg.chat = MagicMock(id=-1001999999999, type="supergroup")
+    group_msg.from_user = MagicMock(id=test_uid, is_bot=False)
+    group_msg.delete = AsyncMock()
+
+    await handle_group_chat_blocked_user_guard(group_msg, mock_bot)
+    assert group_msg.delete.called, "Blocked user's message in group chat must be deleted immediately"
+    assert mock_bot.ban_chat_member.called, "Blocked user must be banned from the group chat"
+
+    # When unblocked user sends message in group chat -> nothing happens
+    async with get_session() as session:
+        u = await session.get(User, test_uid)
+        u.is_blocked = False
+        session.add(u)
+
+    group_msg.delete.reset_mock()
+    mock_bot.ban_chat_member.reset_mock()
+
+    await handle_group_chat_blocked_user_guard(group_msg, mock_bot)
+    assert not group_msg.delete.called, "Unblocked user's message in group chat must NOT be deleted"
+    assert not mock_bot.ban_chat_member.called, "Unblocked user must NOT be banned"
+
     print("All Block & Unblock User tests passed successfully!")
 
 
