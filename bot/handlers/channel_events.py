@@ -74,6 +74,15 @@ async def handle_channel_join_request(event: ChatJoinRequest, bot: Bot):
     logger.info(f"[ChatJoinRequest] chat_id={event.chat.id}, user_id={user_id} ({user.full_name})")
 
     async with get_session() as session:
+        db_user = await session.get(User, user_id)
+        if db_user and getattr(db_user, "is_blocked", False):
+            try:
+                await bot.decline_chat_join_request(chat_id=event.chat.id, user_id=user_id)
+                logger.info(f"Silently declined ChatJoinRequest for blocked User {user_id}")
+            except Exception:
+                pass
+            return
+
         sub = await session.get(Subscription, user_id)
         has_claim = sub is not None and sub.status in (SubStatus.PENDING.value, SubStatus.ACTIVE.value)
 

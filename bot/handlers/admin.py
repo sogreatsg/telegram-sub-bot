@@ -659,6 +659,10 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "💳 <b>13. ระบบช่องทางชำระเงิน:</b>\n"
         "• <code>/promptpay</code> (หรือ <code>/promptpay_on</code> / <code>/promptpay_off</code>) — เปิด/ปิด/ดูสถานะชำระผ่าน QR Code\n"
         "• <code>/payment_methods</code> — ดูสถานะช่องทางชำระเงินทั้งหมด\n\n"
+        "🚫 <b>14. ระบบบล็อก & ปลดบล็อกผู้ใช้ (Block / Unblock):</b>\n"
+        "• <code>/block_user [User ID/@user] [เหตุผล]</code> — 🚫 สั่งบล็อกผู้ใช้ (ห้ามพิมพ์/กดปุ่มในบอท/เตะออกจากห้อง/ไม่เตือนฝั่ง User)\n"
+        "• <code>/unblock_user [User ID/@user]</code> — 🟢 ปลดบล็อกผู้ใช้ (กลับมาใช้งานบอทได้ตามปกติ)\n"
+        "• <code>/blocked_users</code> — 📋 ดูรายชื่อผู้ใช้ที่ถูกบล็อกทั้งหมด\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "💡 <i>แตะปุ่มด่วนด้านล่างเพื่อใช้งานเมนูหลักได้ทันทีครับ</i>"
     )
@@ -698,7 +702,8 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
                 InlineKeyboardButton(text="📊 สถานะล้างแชท (/clean_status)", callback_data="admin_menu:clean_status"),
             ],
             [
-                InlineKeyboardButton(text="💳 ตั้งค่าช่องทางชำระเงิน (QR/TrueMoney)", callback_data="admin_menu:payment_methods"),
+                InlineKeyboardButton(text="🚫 ผู้ใช้ที่ถูกบล็อก (/blocked_users)", callback_data="admin_menu:blocked_users"),
+                InlineKeyboardButton(text="💳 ช่องทางชำระเงิน", callback_data="admin_menu:payment_methods"),
             ],
         ]
     )
@@ -2318,6 +2323,7 @@ def build_admin_user_action_keyboard(user: Optional[User], user_id: int) -> Inli
     if user and config.SECONDARY_CHANNEL_ID:
         is_moved = getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", None) == "SECONDARY"
 
+    is_blocked = getattr(user, "is_blocked", False) if user else False
     sec_title = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
     pri_title = get_channel_label(config.CHANNEL_ID)
 
@@ -2339,8 +2345,16 @@ def build_admin_user_action_keyboard(user: Optional[User], user_id: int) -> Inli
                 InlineKeyboardButton(text=f"🔄 ย้ายกลับ {pri_title}", callback_data=f"admin:quick_unmove:{user_id}"),
             ])
 
+    if is_blocked:
+        block_btn = InlineKeyboardButton(text="🟢 ปลดบล็อกผู้ใช้", callback_data=f"admin:unblock_user:{user_id}")
+    else:
+        block_btn = InlineKeyboardButton(text="🚫 บล็อกผู้ใช้", callback_data=f"admin:block_user:{user_id}")
+
     buttons.append([
+        block_btn,
         InlineKeyboardButton(text="🔄 รีเซ็ต Trial", callback_data=f"admin:reset_trial:{user_id}"),
+    ])
+    buttons.append([
         InlineKeyboardButton(text="🗑️ ลบประวัติทั้งหมด", callback_data=f"admin:confirm_reset_user:{user_id}"),
     ])
 
@@ -2461,6 +2475,14 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
 
     user_header = format_user_title(user.full_name, user.username, user.telegram_id)
 
+    # สถานะการบล็อก
+    if getattr(user, "is_blocked", False):
+        blocked_time = format_thai_datetime(user.blocked_at) if user.blocked_at else "-"
+        reason_str = f" (เหตุผล: {html.escape(user.blocked_reason)})" if user.blocked_reason else ""
+        block_status_str = f"⛔ <b>ถูกบล็อกการใช้งานบอท</b> <i>(เมื่อ {blocked_time} น.){reason_str}</i>"
+    else:
+        block_status_str = "🟢 <b>ปกติ (ไม่ถูกบล็อก)</b>"
+
     # คำนวณสรุปยอดสิทธิ์และเวลาคงเหลือปัจจุบัน (ตรงกับ /summary ทุกประการ)
     now = datetime.now(timezone.utc)
     latest_active_sub = sub if (sub and sub.status == SubStatus.ACTIVE.value and sub.expires_at and ensure_utc(sub.expires_at) > now) else None
@@ -2469,6 +2491,7 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
         f"👤 <b>ข้อมูลผู้ใช้งาน:</b> {user_header}",
         f"🎯 <b>Channel ประจำตัว:</b> <b>{target_channel_label}</b> (<code>{target_channel_id}</code>)",
         f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> <b>{channel_status_str}</b>",
+        f"🚫 <b>สถานะการบล็อก:</b> {block_status_str}",
         f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
         f"🎁 <b>สถิติ Referral:</b> ชวนสำเร็จ {user.referral_count or 0} คน | โบนัสสะสม {user.referral_bonus_days or 0} วัน",
         f"🔗 <b>สมัครผ่านผู้แนะนำ (Referred By):</b> {ref_by_str}",
@@ -2541,6 +2564,11 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     resp.append(f"📋 <b>คำสั่งด่วน (แตะเพื่อคัดลอก):</b>")
     resp.append(f"💬 ตอบกลับข้อความ: <code>/reply {user.telegram_id} </code>")
     resp.append(f"➕ เพิ่ม VIP (30 วัน): <code>/add_vip {user.telegram_id} 30</code>")
+
+    if getattr(user, "is_blocked", False):
+        resp.append(f"🟢 ปลดบล็อกผู้ใช้: <code>/unblock_user {user.telegram_id}</code>")
+    else:
+        resp.append(f"🚫 บล็อกผู้ใช้: <code>/block_user {user.telegram_id}</code>")
 
     is_moved = False
     if user and config.SECONDARY_CHANNEL_ID:
@@ -2673,6 +2701,13 @@ async def handle_admin_reply_command(message: Message, bot: Bot):
         else:
             target_uid = user.telegram_id
             user_name = html.escape(user.full_name or f"User {target_uid}")
+            if user.is_blocked:
+                await message.answer(
+                    f"⚠️ <b>ผู้ใช้ {user_name} (<code>{target_uid}</code>) ถูกบล็อกการใช้งานบอทอยู่ครับ</b>\n\n"
+                    f"💡 หากต้องการส่งข้อความถึงผู้ใช้นี้ กรุณาปลดบล็อกก่อนด้วยคำสั่ง:\n<code>/unblock_user {target_uid}</code>",
+                    parse_mode="HTML"
+                )
+                return
 
     dm_msg = (
         "💬 <b>ข้อความจากทีมงานผู้ดูแลระบบ:</b>\n"
@@ -2715,6 +2750,16 @@ async def handle_admin_swipe_reply(message: Message, bot: Bot):
         
     target_uid = int(match.group(1))
     reply_text = message.text
+
+    async with get_session() as session:
+        user = await session.get(User, target_uid)
+        if user and getattr(user, "is_blocked", False):
+            await message.reply(
+                f"⚠️ <b>ผู้ใช้ User ID <code>{target_uid}</code> ถูกบล็อกการใช้งานบอทอยู่ครับ</b>\n\n"
+                f"💡 หากต้องการส่งข้อความถึงผู้ใช้นี้ กรุณาปลดบล็อกก่อนด้วยคำสั่ง:\n<code>/unblock_user {target_uid}</code>",
+                parse_mode="HTML"
+            )
+            return
 
     dm_msg = (
         "💬 <b>ข้อความจากทีมงานผู้ดูแลระบบ:</b>\n"
@@ -2966,9 +3011,18 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
     else:
         join_str = "🚪 <b>เวลากดเข้า Channel:</b> <i>ยังไม่เคยกดเข้าห้อง</i>"
 
+    # สถานะการบล็อก
+    if getattr(user, "is_blocked", False):
+        blocked_time = format_thai_datetime(user.blocked_at) if user.blocked_at else "-"
+        reason_str = f" (เหตุผล: {html.escape(user.blocked_reason)})" if user.blocked_reason else ""
+        block_status_str = f"⛔ <b>ถูกบล็อกการใช้งานบอท</b> <i>(เมื่อ {blocked_time} น.){reason_str}</i>"
+    else:
+        block_status_str = "🟢 <b>ปกติ (ไม่ถูกบล็อก)</b>"
+
     resp = [
         f"👤 <b>ข้อมูลผู้ใช้งาน: {full_name_safe}</b> ({user_handle})",
         f"🔢 <b>Telegram ID:</b> <code>{user.telegram_id}</code>",
+        f"🚫 <b>สถานะการบล็อก:</b> {block_status_str}",
         f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
         f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> {channel_status_str}",
         f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
@@ -2992,6 +3046,11 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
     resp.append(f"📋 <b>คำสั่งด่วน (แตะเพื่อคัดลอก):</b>")
     resp.append(f"💬 ตอบกลับข้อความ: <code>/reply {user_id} </code>")
     resp.append(f"➕ เพิ่ม VIP (30 วัน): <code>/add_vip {user_id} 30</code>")
+
+    if getattr(user, "is_blocked", False):
+        resp.append(f"🟢 ปลดบล็อกผู้ใช้: <code>/unblock_user {user_id}</code>")
+    else:
+        resp.append(f"🚫 บล็อกผู้ใช้: <code>/block_user {user_id}</code>")
 
     is_moved = getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", "PRIMARY") == "SECONDARY"
     sec_title = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
@@ -3420,6 +3479,486 @@ async def handle_admin_cancel_reset_callback(callback: CallbackQuery):
     await callback.answer("ยกเลิกการลบข้อมูลแล้ว")
 
 
+@router.message(Command("block_user", "block", "ban_user", "bot_block", "block_bot"))
+async def handle_admin_block_user_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับบล็อกผู้ใช้งาน: /block_user <User ID หรือ @username> [เหตุผล (ไม่บังคับ)]"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split(maxsplit=2)
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/block_user [User ID หรือ @username] [เหตุผล (ไม่บังคับ)]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/block_user 5125375696</code>\n"
+            "• <code>/block_user @some_user สแปมข้อความ</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    reason = args[2].strip() if len(args) > 2 else None
+    now = datetime.now(timezone.utc)
+
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+            user = (await session.execute(user_stmt)).scalar_one_or_none()
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+            user = (await session.execute(user_stmt)).scalar_one_or_none()
+            if not user:
+                user_stmt = select(User).where(User.full_name.ilike(f"%{query}%"))
+                user = (await session.execute(user_stmt)).scalars().first()
+
+        if not user:
+            if query.isdigit():
+                target_uid = int(query)
+                user = User(
+                    telegram_id=target_uid,
+                    username=None,
+                    full_name=f"User {target_uid}",
+                    trial_used=False,
+                    is_blocked=True,
+                    blocked_at=now,
+                    blocked_reason=reason,
+                )
+                session.add(user)
+                await session.flush()
+            else:
+                await message.answer(f"❌ ไม่พบผู้ใช้ <code>{html.escape(query)}</code> ในระบบ (กรุณาระบุเป็น User ID ตัวเลขเพื่อบล็อก)", parse_mode="HTML")
+                return
+        else:
+            if user.is_blocked:
+                user_header = format_user_title(user.full_name, user.username, user.telegram_id)
+                blocked_time = format_thai_datetime(user.blocked_at) if user.blocked_at else "-"
+                await message.answer(
+                    f"⚠️ <b>ผู้ใช้ {user_header} (<code>{user.telegram_id}</code>) ถูกบล็อกอยู่แล้วครับ</b>\n"
+                    f"📅 บล็อกเมื่อ: <code>{blocked_time} น.</code>",
+                    parse_mode="HTML"
+                )
+                return
+
+            user.is_blocked = True
+            user.blocked_at = now
+            user.blocked_reason = reason
+            session.add(user)
+
+        # อัปเดต Subscription เป็น KICKED
+        sub = await session.get(Subscription, user.telegram_id)
+        if sub and sub.status in (SubStatus.ACTIVE.value, SubStatus.PENDING.value):
+            sub.status = SubStatus.KICKED.value
+            session.add(sub)
+
+        await session.commit()
+        target_uid = user.telegram_id
+        user_name = user.full_name
+        user_username = user.username
+
+    # Soft-kick ออกจากทุก Channel ทันที (โดยไม่ส่ง DM แจ้งเตือนฝั่ง User)
+    try:
+        await kick_user_from_all_target_channels(bot, target_uid)
+    except Exception as e:
+        logger.warning(f"Failed to soft-kick blocked user {target_uid}: {e}")
+
+    user_header = format_user_title(user_name, user_username, target_uid)
+    time_display = format_thai_datetime(now)
+    reason_display = html.escape(reason) if reason else "ไม่ได้ระบุ"
+
+    resp = (
+        "🚫 <b>บล็อกผู้ใช้งานเรียบร้อยแล้ว!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้:</b> {user_header}\n"
+        f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
+        f"📅 <b>เวลาที่บล็อก:</b> <code>{time_display} น.</code>\n"
+        f"📝 <b>เหตุผล:</b> <i>{reason_display}</i>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🔒 <b>ผลของการบล็อก:</b>\n"
+        "• ผู้ใช้จะไม่สามารถพิมพ์ข้อความ ขอรับสิทธิ์ หรือกดปุ่มใดๆ ในบอทได้อีกต่อไป (บอทจะเงียบสนิท 100%)\n"
+        "• ดำเนินการเตะออกจาก Channel VIP เรียบร้อยแล้ว\n"
+        "• <b>ไม่มีการส่งข้อความแจ้งเตือนใดๆ ไปยังฝั่งผู้ใช้</b>"
+    )
+
+    unblock_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🟢 ปลดบล็อกผู้ใช้", callback_data=f"admin:unblock_user:{target_uid}"),
+                InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{target_uid}"),
+            ]
+        ]
+    )
+
+    await message.answer(resp, reply_markup=unblock_kb, parse_mode="HTML")
+
+
+@router.message(Command("unblock_user", "unblock", "unban_user", "bot_unblock", "unblock_bot"))
+async def handle_admin_unblock_user_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับปลดบล็อกผู้ใช้งาน: /unblock_user <User ID หรือ @username>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/unblock_user [User ID หรือ @username]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/unblock_user 5125375696</code>\n"
+            "• <code>/unblock_user @some_user</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+            user = (await session.execute(user_stmt)).scalar_one_or_none()
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+            user = (await session.execute(user_stmt)).scalar_one_or_none()
+            if not user:
+                user_stmt = select(User).where(User.full_name.ilike(f"%{query}%"))
+                user = (await session.execute(user_stmt)).scalars().first()
+
+        if not user:
+            await message.answer(f"❌ ไม่พบผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+            return
+
+        if not user.is_blocked:
+            user_header = format_user_title(user.full_name, user.username, user.telegram_id)
+            await message.answer(
+                f"ℹ️ <b>ผู้ใช้ {user_header} (<code>{user.telegram_id}</code>) ไม่ได้ถูกบล็อกอยู่ครับ</b>",
+                parse_mode="HTML"
+            )
+            return
+
+        user.is_blocked = False
+        user.blocked_at = None
+        user.blocked_reason = None
+        session.add(user)
+        await session.commit()
+        target_uid = user.telegram_id
+        user_name = user.full_name
+        user_username = user.username
+
+    # ปลดแบนในทุก Channel เผื่อติด blacklist
+    try:
+        await unban_user_in_all_target_channels(bot, target_uid)
+    except Exception as e:
+        logger.debug(f"Unban user in channels error: {e}")
+
+    user_header = format_user_title(user_name, user_username, target_uid)
+    time_display = format_thai_datetime(datetime.now(timezone.utc))
+
+    resp = (
+        "🟢 <b>ปลดบล็อกผู้ใช้งานเรียบร้อยแล้ว!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้:</b> {user_header}\n"
+        f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
+        f"📅 <b>เวลาที่ปลดบล็อก:</b> <code>{time_display} น.</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✨ <b>ผลของการปลดบล็อก:</b>\n"
+        "• ผู้ใช้สามารถกลับมาพิมพ์ข้อความ ขอรับสิทธิ์ หรือกดปุ่มเมนูต่างๆ ในบอทได้ตามปกติ\n"
+        "• ปลดแบนใน Channel VIP เรียบร้อยแล้ว (สามารถรับลิงก์เข้าห้องใหม่ได้)\n"
+        "• <b>ไม่มีการส่งข้อความแจ้งเตือนใดๆ ไปยังฝั่งผู้ใช้</b>"
+    )
+
+    block_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🚫 บล็อกผู้ใช้", callback_data=f"admin:block_user:{target_uid}"),
+                InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{target_uid}"),
+            ]
+        ]
+    )
+
+    await message.answer(resp, reply_markup=block_kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("admin:block_user:"))
+async def handle_admin_block_user_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เมื่อแอดมินกดปุ่ม [🚫 บล็อกผู้ใช้]"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    uid_str = callback.data.split(":")[-1]
+    if not uid_str.isdigit():
+        await callback.answer("❌ User ID ไม่ถูกต้อง")
+        return
+
+    target_uid = int(uid_str)
+    now = datetime.now(timezone.utc)
+
+    async with get_session() as session:
+        user = await session.get(User, target_uid)
+        if not user:
+            user = User(
+                telegram_id=target_uid,
+                username=None,
+                full_name=f"User {target_uid}",
+                trial_used=False,
+                is_blocked=True,
+                blocked_at=now,
+                blocked_reason="บล็อกผ่านปุ่มลัดแอดมิน",
+            )
+            session.add(user)
+        else:
+            if user.is_blocked:
+                await callback.answer("⚠️ ผู้ใช้รายนี้ถูกบล็อกอยู่แล้วครับ", show_alert=True)
+                return
+            user.is_blocked = True
+            user.blocked_at = now
+            user.blocked_reason = "บล็อกผ่านปุ่มลัดแอดมิน"
+            session.add(user)
+
+        # อัปเดต Subscription เป็น KICKED
+        sub = await session.get(Subscription, target_uid)
+        if sub and sub.status in (SubStatus.ACTIVE.value, SubStatus.PENDING.value):
+            sub.status = SubStatus.KICKED.value
+            session.add(sub)
+
+        await session.commit()
+        user_name = user.full_name
+        user_username = user.username
+
+    # Soft-kick ออกจาก Channel VIP
+    try:
+        await kick_user_from_all_target_channels(bot, target_uid)
+    except Exception as e:
+        logger.warning(f"Failed to kick blocked user {target_uid}: {e}")
+
+    await callback.answer("🚫 บล็อกผู้ใช้เรียบร้อยแล้ว")
+
+    user_header = format_user_title(user_name, user_username, target_uid)
+    time_display = format_thai_datetime(now)
+
+    resp = (
+        "🚫 <b>บล็อกผู้ใช้งานเรียบร้อยแล้ว!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้:</b> {user_header}\n"
+        f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
+        f"📅 <b>เวลาที่บล็อก:</b> <code>{time_display} น.</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🔒 <i>ผู้ใช้จะไม่สามารถพิมพ์ข้อความหรือกดปุ่มในบอทได้อีกต่อไป (และไม่มีการแจ้งเตือนฝั่งผู้ใช้)</i>"
+    )
+
+    unblock_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🟢 ปลดบล็อกผู้ใช้", callback_data=f"admin:unblock_user:{target_uid}"),
+                InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{target_uid}"),
+            ]
+        ]
+    )
+
+    await callback.message.answer(resp, reply_markup=unblock_kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("admin:unblock_user:"))
+async def handle_admin_unblock_user_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เมื่อแอดมินกดปุ่ม [🟢 ปลดบล็อกผู้ใช้]"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    uid_str = callback.data.split(":")[-1]
+    if not uid_str.isdigit():
+        await callback.answer("❌ User ID ไม่ถูกต้อง")
+        return
+
+    target_uid = int(uid_str)
+
+    async with get_session() as session:
+        user = await session.get(User, target_uid)
+        if not user or not user.is_blocked:
+            await callback.answer("ℹ️ ผู้ใช้รายนี้ไม่ได้ถูกบล็อกอยู่ครับ", show_alert=True)
+            return
+
+        user.is_blocked = False
+        user.blocked_at = None
+        user.blocked_reason = None
+        session.add(user)
+        await session.commit()
+        user_name = user.full_name
+        user_username = user.username
+
+    # ปลดแบนใน Channel VIP
+    try:
+        await unban_user_in_all_target_channels(bot, target_uid)
+    except Exception:
+        pass
+
+    await callback.answer("🟢 ปลดบล็อกผู้ใช้เรียบร้อยแล้ว")
+
+    user_header = format_user_title(user_name, user_username, target_uid)
+    time_display = format_thai_datetime(datetime.now(timezone.utc))
+
+    resp = (
+        "🟢 <b>ปลดบล็อกผู้ใช้งานเรียบร้อยแล้ว!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้:</b> {user_header}\n"
+        f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
+        f"📅 <b>เวลาที่ปลดบล็อก:</b> <code>{time_display} น.</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "✨ <i>ผู้ใช้สามารถกลับมาใช้งานบอทและพิมพ์ข้อความได้ตามปกติแล้วครับ (ไม่มีการแจ้งเตือนฝั่งผู้ใช้)</i>"
+    )
+
+    block_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🚫 บล็อกผู้ใช้", callback_data=f"admin:block_user:{target_uid}"),
+                InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{target_uid}"),
+            ]
+        ]
+    )
+
+    await callback.message.answer(resp, reply_markup=block_kb, parse_mode="HTML")
+
+
+BLOCKED_USERS_PER_PAGE = 8
+
+
+async def build_blocked_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+    """สร้างรายงานสรุปรายชื่อผู้ใช้งานที่ถูกบล็อกทั้งหมดในระบบ พร้อมระบบแบ่งหน้า"""
+    now = datetime.now(timezone.utc)
+    now_thai = format_thai_datetime(now)
+
+    async with get_session() as session:
+        total_blocked = (await session.execute(
+            select(func.count(User.telegram_id)).where(User.is_blocked == True)
+        )).scalar() or 0
+
+        if total_blocked == 0:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 กลับเมนูแอดมิน", callback_data="admin_menu:main")]
+                ]
+            )
+            return (
+                "🚫 <b>รายงานรายชื่อผู้ใช้ที่ถูกบล็อก (Blocked Users)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "🟢 <i>ขณะนี้ไม่มีผู้ใช้งานที่ถูกบล็อกในระบบครับ</i>",
+                kb,
+            )
+
+        total_pages = max(1, (total_blocked + BLOCKED_USERS_PER_PAGE - 1) // BLOCKED_USERS_PER_PAGE)
+        page = max(1, min(page, total_pages))
+
+        stmt = (
+            select(User)
+            .where(User.is_blocked == True)
+            .order_by(User.blocked_at.desc().nulls_last(), User.telegram_id.desc())
+            .offset((page - 1) * BLOCKED_USERS_PER_PAGE)
+            .limit(BLOCKED_USERS_PER_PAGE)
+        )
+        users = (await session.execute(stmt)).scalars().all()
+
+    lines = [
+        "🚫 <b>รายงานรายชื่อผู้ใช้ที่ถูกบล็อก (Blocked Users)</b>",
+        f"📅 <b>ข้อมูล ณ วันที่:</b> <code>{now_thai} น.</code>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"⛔ <b>ผู้ใช้ที่ถูกบล็อกทั้งหมด:</b> <b>{total_blocked} คน</b>",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+    ]
+
+    start_index = (page - 1) * BLOCKED_USERS_PER_PAGE + 1
+    buttons = []
+
+    for i, u in enumerate(users, start=start_index):
+        u_header = format_user_title(u.full_name, u.username, u.telegram_id)
+        blocked_time = format_thai_datetime(u.blocked_at) if u.blocked_at else "-"
+        reason_str = f"\n   • 📝 <b>เหตุผล:</b> <i>{html.escape(u.blocked_reason)}</i>" if u.blocked_reason else ""
+
+        lines.append(
+            f"<b>{i}.</b> {u_header}\n"
+            f"   • 📅 <b>บล็อกเมื่อ:</b> <code>{blocked_time} น.</code>{reason_str}\n"
+        )
+
+        btn_name = html.escape(u.full_name or f"User {u.telegram_id}")
+        buttons.append([
+            InlineKeyboardButton(text=f"🟢 ปลดบล็อก {btn_name}", callback_data=f"admin:unblock_user:{u.telegram_id}"),
+            InlineKeyboardButton(text="👤 ดูข้อมูล", callback_data=f"admin:view_user:{u.telegram_id}"),
+        ])
+
+    lines.append(f"📄 <b>หน้า {page}/{total_pages}</b> (แสดงครั้งละ {BLOCKED_USERS_PER_PAGE} คน)")
+    lines.append("💡 <i>พิมพ์ <code>/unblock_user [User ID]</code> เพื่อปลดบล็อก</i>")
+
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton(text="◀️ หน้าก่อน", callback_data=f"admin:blocked_users_page:{page-1}"))
+    nav_row.append(InlineKeyboardButton(text=f"📄 {page}/{total_pages}", callback_data="admin:noop"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton(text="หน้าถัดไป ▶️", callback_data=f"admin:blocked_users_page:{page+1}"))
+
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([
+        InlineKeyboardButton(text="🔄 รีเฟรช", callback_data=f"admin:blocked_users_page:{page}"),
+        InlineKeyboardButton(text="🔙 กลับเมนูแอดมิน", callback_data="admin_menu:main"),
+    ])
+
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.message(Command("blocked_users", "block_list", "blacklist", "blocked"))
+async def handle_admin_blocked_users_command(message: Message):
+    """คำสั่งดูรายชื่อผู้ใช้งานที่ถูกบล็อกทั้งหมด: /blocked_users [หน้าที่ต้องการดู]"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    args = (message.text or "").split()
+    page = 1
+    if len(args) >= 2 and args[1].isdigit():
+        page = int(args[1])
+
+    text, markup = await build_blocked_users_list_view(page=page)
+    await message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("admin:blocked_users_page:"))
+async def handle_admin_blocked_users_page_callback(callback: CallbackQuery):
+    """Callback เปลี่ยนหน้าสำหรับรายชื่อผู้ใช้ที่ถูกบล็อก"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    page_str = callback.data.split(":")[-1]
+    page = int(page_str) if page_str.isdigit() else 1
+
+    text, markup = await build_blocked_users_list_view(page=page)
+    try:
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_menu:blocked_users")
+async def handle_admin_menu_blocked_users_callback(callback: CallbackQuery):
+    """Callback จาก Admin Menu เพื่อดูรายชื่อผู้ใช้ที่ถูกบล็อก"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    text, markup = await build_blocked_users_list_view(page=1)
+    try:
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+    await callback.answer()
+
+
 USERS_PER_PAGE = 5
 
 
@@ -3438,6 +3977,9 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
         )).scalar() or 0
         total_trial_used = (await session.execute(
             select(func.count(User.telegram_id)).where(User.trial_used == True)
+        )).scalar() or 0
+        total_blocked = (await session.execute(
+            select(func.count(User.telegram_id)).where(User.is_blocked == True)
         )).scalar() or 0
         total_kick_failed = (await session.execute(
             select(func.count(Subscription.user_id)).where(Subscription.status == SubStatus.KICK_FAILED.value)
@@ -3468,7 +4010,7 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
         f"📅 <b>ข้อมูล ณ วันที่:</b> <code>{now_thai} น.</code>",
         "━━━━━━━━━━━━━━━━━━━━",
         f"👥 <b>ผู้ใช้ทั้งหมด:</b> <b>{total_users} คน</b> | 🟢 <b>Active:</b> <b>{total_active} คน</b>",
-        f"⏱️ <b>ใช้สิทธิ์ฟรี 15m แล้ว:</b> {total_trial_used} คน",
+        f"⏱️ <b>ใช้สิทธิ์ฟรี 15m แล้ว:</b> {total_trial_used} คน | 🚫 <b>ถูกบล็อก:</b> {total_blocked} คน",
     ]
     if total_kick_failed > 0:
         lines.append(f"⚠️ <b>สมาชิกเตะไม่สำเร็จ (Kick Failed):</b> {total_kick_failed} คน")
@@ -3480,9 +4022,10 @@ async def build_users_list_view(page: int = 1) -> tuple[str, Optional[InlineKeyb
     for i, u in enumerate(users, start=start_index):
         u_header = format_user_title(u.full_name, u.username, u.telegram_id)
         trial_str = "เคยใช้แล้ว ✅" if u.trial_used else "ยังไม่เคยใช้ ⏱️"
+        block_badge = " | 🚫 <b>[BLOCKED]</b>" if u.is_blocked else ""
         
         user_block = [
-            f"<b>{i}.</b> {u_header}",
+            f"<b>{i}.</b> {u_header}{block_badge}",
             f"   • สิทธิ์ฟรี: {trial_str} | 📅 <b>เข้าใช้บอทครั้งแรก:</b> <code>{format_thai_datetime(u.created_at)} น.</code>",
         ]
 
@@ -4362,6 +4905,9 @@ async def handle_broadcast_count_command(message: Message):
     now = datetime.now(timezone.utc)
     async with get_session() as session:
         total_users = (await session.execute(select(func.count(User.telegram_id)))).scalar() or 0
+        blocked_users = (await session.execute(
+            select(func.count(User.telegram_id)).where(User.is_blocked == True)
+        )).scalar() or 0
         active_users = (await session.execute(
             select(func.count(Subscription.user_id)).where(
                 Subscription.status == SubStatus.ACTIVE.value,
@@ -4372,14 +4918,17 @@ async def handle_broadcast_count_command(message: Message):
             select(func.count(User.telegram_id)).where(User.trial_used == True)
         )).scalar() or 0
         never_trial_users = total_users - trial_used_users
+        broadcastable_users = total_users - blocked_users
 
     resp = (
         "📢 <b>สถิติฐานผู้ใช้งานที่สามารถ Broadcast ได้ (Audience Reach)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"👥 <b>ผู้ใช้ทั้งหมดในระบบ:</b> <b>{total_users} คน</b>\n"
+        f"📡 <b>ผู้ใช้ที่ส่ง Broadcast ได้:</b> <b>{broadcastable_users} คน</b>\n"
         f"🟢 <b>สมาชิก VIP Active ปัจจุบัน:</b> {active_users} คน\n"
         f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรีแล้ว:</b> {trial_used_users} คน\n"
         f"🎁 <b>ยังไม่เคยใช้สิทธิ์ทดลองฟรี:</b> {never_trial_users} คน\n"
+        f"🚫 <b>ผู้ใช้ที่ถูกบล็อก (ไม่ส่ง):</b> {blocked_users} คน\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "💡 <b>คำสั่งสำหรับการส่งข้อความ:</b>\n"
         "• <code>/broadcast_menu</code> — บรอดแคสต์เมนูหลัก /start ล่าสุด (พร้อมปุ่มชวนเพื่อน/โปรโมชั่น) ให้ทุกคน\n"
@@ -4397,7 +4946,9 @@ async def handle_broadcast_menu_command(message: Message, bot: Bot):
         return
 
     async with get_session() as session:
-        users = (await session.execute(select(User).order_by(User.telegram_id))).scalars().all()
+        users = (await session.execute(
+            select(User).where(User.is_blocked == False).order_by(User.telegram_id)
+        )).scalars().all()
 
     total_count = len(users)
     if total_count == 0:
@@ -4406,7 +4957,7 @@ async def handle_broadcast_menu_command(message: Message, bot: Bot):
 
     status_msg = await message.answer(
         f"🚀 <b>กำลังเริ่ม Broadcast เมนูหลัก /start...</b>\n"
-        f"👥 จำนวนเป้าหมาย: <b>{total_count} คน</b>\n"
+        f"👥 จำนวนเป้าหมาย (ไม่รวมที่ถูกบล็อก): <b>{total_count} คน</b>\n"
         "⏳ กรุณารอสักครู่ ระบบกำลังทยอยส่งตาม Rate Limit...",
         parse_mode="HTML"
     )
@@ -4499,6 +5050,14 @@ async def handle_send_menu_to_user_command(message: Message, bot: Bot):
         await message.answer(f"❌ <b>ไม่พบผู้ใช้:</b> <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
         return
 
+    if getattr(target_user, "is_blocked", False):
+        await message.answer(
+            f"⚠️ <b>ผู้ใช้ User ID <code>{target_user.telegram_id}</code> ถูกบล็อกการใช้งานบอทอยู่ครับ</b>\n"
+            f"หากต้องการส่งเมนูให้ผู้ใช้ กรุณาปลดบล็อกก่อนด้วยคำสั่ง <code>/unblock_user {target_user.telegram_id}</code>",
+            parse_mode="HTML"
+        )
+        return
+
     menu_text, menu_kb = get_start_menu_content(trial_available=not target_user.trial_used)
     try:
         await bot.send_message(
@@ -4556,7 +5115,9 @@ async def handle_broadcast_custom_command(message: Message, bot: Bot):
         return
 
     async with get_session() as session:
-        users = (await session.execute(select(User).order_by(User.telegram_id))).scalars().all()
+        users = (await session.execute(
+            select(User).where(User.is_blocked == False).order_by(User.telegram_id)
+        )).scalars().all()
 
     total_count = len(users)
     if total_count == 0:

@@ -180,6 +180,9 @@ class User(Base):
     referral_rewarded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     assigned_channel: Mapped[str] = mapped_column(String(32), default="PRIMARY", nullable=False)
     is_moved_to_secondary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    blocked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    blocked_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )

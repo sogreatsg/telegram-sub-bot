@@ -310,6 +310,18 @@ async def init_db() -> None:
             except Exception:
                 pass
             try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT 0;"))
+            except Exception:
+                pass
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN blocked_at DATETIME;"))
+            except Exception:
+                pass
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN blocked_reason VARCHAR(255);"))
+            except Exception:
+                pass
+            try:
                 await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_created_at ON users (created_at DESC);"))
             except Exception:
                 pass
@@ -368,6 +380,7 @@ async def get_or_create_user(
         referral_rewarded=False,
         assigned_channel="PRIMARY",
         is_moved_to_secondary=False,
+        is_blocked=False,
     )
     session.add(new_user)
     await session.flush()

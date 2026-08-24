@@ -330,6 +330,10 @@ async def check_expiring_soon_subscriptions(bot: Bot) -> None:
             if not warn_type:
                 continue
 
+            # หากผู้ใช้ถูกบล็อก ห้ามส่ง DM แจ้งเตือนใดๆ ทั้งสิ้น
+            if user_obj and getattr(user_obj, "is_blocked", False):
+                continue
+
             session.add(sub)
 
             if warn_type == "1h":
@@ -448,33 +452,34 @@ async def check_expired_subscriptions(bot: Bot) -> None:
                 sub.status = SubStatus.KICKED.value
                 session.add(sub)
 
-                # 1. ส่งข้อความแจ้งเตือนทาง DM ให้ผู้ใช้
-                try:
-                    if is_trial:
-                        dm_text = (
-                            f"⏰ <b>หมดเวลาทดลองใช้งานฟรี ({config.TRIAL_DURATION_MINUTES} นาที) แล้วครับ</b>\n\n"
-                            "ระยะเวลาทดลองใช้งานฟรีของคุณสิ้นสุดลง และระบบได้นำคุณออกจาก Channel เรียบร้อยแล้วครับ\n\n"
-                            "✨ <b>ต้องการเข้าใช้งานต่อเนื่องแบบไม่จำกัด?</b>\n"
-                            "คุณสามารถพิมพ์ <b>/start</b> และกดสมัครแพ็กเกจ VIP 30 วันเข้ามาใหม่ได้เลยครับ"
-                        )
-                    else:
-                        dm_text = (
-                            "⏰ <b>แพ็กเกจสมาชิก VIP ของคุณหมดอายุแล้วครับ</b>\n\n"
-                            "ระยะเวลาสมาชิกของคุณสิ้นสุดลง และระบบได้นำคุณออกจาก Channel เรียบร้อยแล้วครับ ขอบคุณที่ร่วมเป็นสมาชิกกับเรา!\n\n"
-                            "🔄 <b>ต่ออายุสมาชิก:</b>\n"
-                            "คุณสามารถต่ออายุสมาชิก VIP ได้ง่ายๆ เพียงพิมพ์ <b>/start</b> และกดสมัครแพ็กเกจ 30 วันเข้ามาใหม่ได้เลยครับ"
-                        )
+                # 1. ส่งข้อความแจ้งเตือนทาง DM ให้ผู้ใช้ (เฉพาะผู้ใช้ที่ไม่ถูกบล็อก)
+                if not (user_obj and getattr(user_obj, "is_blocked", False)):
+                    try:
+                        if is_trial:
+                            dm_text = (
+                                f"⏰ <b>หมดเวลาทดลองใช้งานฟรี ({config.TRIAL_DURATION_MINUTES} นาที) แล้วครับ</b>\n\n"
+                                "ระยะเวลาทดลองใช้งานฟรีของคุณสิ้นสุดลง และระบบได้นำคุณออกจาก Channel เรียบร้อยแล้วครับ\n\n"
+                                "✨ <b>ต้องการเข้าใช้งานต่อเนื่องแบบไม่จำกัด?</b>\n"
+                                "คุณสามารถพิมพ์ <b>/start</b> และกดสมัครแพ็กเกจ VIP 30 วันเข้ามาใหม่ได้เลยครับ"
+                            )
+                        else:
+                            dm_text = (
+                                "⏰ <b>แพ็กเกจสมาชิก VIP ของคุณหมดอายุแล้วครับ</b>\n\n"
+                                "ระยะเวลาสมาชิกของคุณสิ้นสุดลง และระบบได้นำคุณออกจาก Channel เรียบร้อยแล้วครับ ขอบคุณที่ร่วมเป็นสมาชิกกับเรา!\n\n"
+                                "🔄 <b>ต่ออายุสมาชิก:</b>\n"
+                                "คุณสามารถต่ออายุสมาชิก VIP ได้ง่ายๆ เพียงพิมพ์ <b>/start</b> และกดสมัครแพ็กเกจ 30 วันเข้ามาใหม่ได้เลยครับ"
+                            )
 
-                    await bot.send_message(
-                        chat_id=user_id,
-                        text=dm_text,
-                        parse_mode="HTML",
-                    )
-                    logger.info(f"Sent expiration DM notification to User ID={user_id}.")
-                except TelegramForbiddenError:
-                    logger.info(f"Cannot send expiration DM: User ID={user_id} has blocked the bot.")
-                except Exception as e:
-                    logger.warning(f"Failed to send expiration DM to User ID={user_id}: {e}")
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=dm_text,
+                            parse_mode="HTML",
+                        )
+                        logger.info(f"Sent expiration DM notification to User ID={user_id}.")
+                    except TelegramForbiddenError:
+                        logger.info(f"Cannot send expiration DM: User ID={user_id} has blocked the bot.")
+                    except Exception as e:
+                        logger.warning(f"Failed to send expiration DM to User ID={user_id}: {e}")
 
                 # 2. ส่งข้อความแจ้งเตือนเข้ากลุ่ม Admin พร้อม Start/End และข้อมูลแพ็กเกจ
                 start_time_thai = format_thai_datetime(sub.joined_at or sub.created_at)
@@ -943,6 +948,10 @@ async def check_unanswered_user_dms_reminder(bot: Bot) -> None:
 
             unanswered = []
             for msg in latest_user_msgs:
+                # ข้ามผู้ใช้ที่ถูกบล็อก
+                if msg.user and getattr(msg.user, "is_blocked", False):
+                    continue
+
                 created_at = ensure_utc(msg.created_at)
                 time_waiting = (now - created_at).total_seconds()
                 # ต้องรอนานเกิน 10 นาที (600 วินาที)

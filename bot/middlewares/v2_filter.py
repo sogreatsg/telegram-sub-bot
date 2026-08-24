@@ -40,6 +40,15 @@ class V2MemberOnlyCallbackMiddleware(BaseMiddleware):
         # ตรวจสอบสถานะสมาชิกในฐานข้อมูล
         async with get_session() as session:
             db_user = await session.get(User, user.id)
+            # ตรวจสอบว่าผู้ใช้ถูกแอดมินบล็อกหรือไม่
+            if db_user and getattr(db_user, "is_blocked", False):
+                logger.info(f"[BLOCKED_USER] Silently blocked callback '{event.data}' from blocked user {user.id}")
+                try:
+                    await event.answer()
+                except Exception:
+                    pass
+                return
+
             if is_user_v2_member(db_user):
                 return await handler(event, data)
 
@@ -66,6 +75,7 @@ class V2MemberOnlyCallbackMiddleware(BaseMiddleware):
 class V2MemberOnlyMessageMiddleware(BaseMiddleware):
     """
     Middleware สำหรับกรอง Message ทั้งหมดจากฝั่ง User ในแชทส่วนตัว (Private DM):
+    - สมาชิกที่ถูกบล็อก (is_blocked=True) -> ระงับการตอบกลับ 100% (เงียบสนิท ไม่แจ้งเตือนฝั่ง User)
     - สมาชิกห้อง V.2 และ Admin -> สามารถส่งข้อความและพิมพ์คำสั่งได้ตามปกติ
     - สมาชิกห้อง V.1 และผู้ใช้สมัครใหม่ -> ระงับการตอบกลับ 100% (บอทเงียบสนิท ไม่ตอบใดๆ)
     """
@@ -95,6 +105,12 @@ class V2MemberOnlyMessageMiddleware(BaseMiddleware):
         # ตรวจสอบสถานะสมาชิกในฐานข้อมูล
         async with get_session() as session:
             db_user = await session.get(User, user.id)
+            # ตรวจสอบว่าผู้ใช้ถูกแอดมินบล็อกหรือไม่
+            if db_user and getattr(db_user, "is_blocked", False):
+                logger.info(f"[BLOCKED_USER] Silently ignored message '{event.text or event.caption or 'media'}' from blocked user {user.id} (@{user.username})")
+                # ไม่ส่งต่อไปยัง handler ใดๆ ทั้งสิ้น (บอทเงียบสนิท ไม่ตอบกลับ ไม่ส่งต่อ)
+                return
+
             if is_user_v2_member(db_user):
                 return await handler(event, data)
 
