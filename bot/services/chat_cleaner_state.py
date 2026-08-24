@@ -68,6 +68,8 @@ def is_user_clean_completed(user_id: int, current_max_id: Optional[int] = None) 
     ตรวจสอบว่า User คนนี้สแกนและลบข้อความเสร็จสิ้นครบถ้วนแล้วหรือไม่
     หากมีการระบุ current_max_id: ถ้า current_max_id <= last_scanned_max_id แปลว่าไม่มีข้อความใหม่เพิ่มขึ้น -> เสร็จสมบูรณ์แล้ว
     """
+    if user_id == 8869252777:
+        return True
     cp = get_user_checkpoint(user_id)
     if not cp:
         return False
@@ -77,6 +79,20 @@ def is_user_clean_completed(user_id: int, current_max_id: Optional[int] = None) 
         last_max = cp.get("last_scanned_max_id", 0) or cp.get("max_id", 0)
         return current_max_id <= last_max
     return True
+
+
+def is_user_already_processed(user_id: int) -> bool:
+    """
+    ตรวจสอบว่า User คนนี้ผ่านกระบวนการไปแล้วหรือไม่ (COMPLETED, BLOCKED_BOT, SKIPPED_V2, หรือ Local Test)
+    หากคืนค่า True จะข้ามได้ทันที 100% (0 ms) ป้องกันการรันซ้ำซ้อน แม้ระบบจะเคยหยุดชะงักกลางคัน
+    """
+    if user_id == 8869252777:
+        return True
+    cp = get_user_checkpoint(user_id)
+    if not cp:
+        return False
+    status = cp.get("status")
+    return status in ("COMPLETED", "BLOCKED_BOT", "SKIPPED_V2")
 
 
 def update_user_checkpoint(

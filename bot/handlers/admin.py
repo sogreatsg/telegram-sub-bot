@@ -52,6 +52,7 @@ from bot.services.chat_cleaner_state import (
     get_clean_status_summary,
     reset_all_clean_checkpoints,
     is_user_clean_completed,
+    is_user_already_processed,
 )
 from bot.services.payment_settings import (
     is_promptpay_active,
@@ -5422,26 +5423,12 @@ async def handle_admin_cancel_clean_non_v2_dms_callback(callback: CallbackQuery)
         pass
 
 
-@router.callback_query(F.data == "admin:do_clean_non_v2_dms")
-async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot: Bot):
-    """Callback เริ่มกระบวนการกวาดล้างข้อความ DM ของทุกคนที่ไม่ใช่สมาชิก V.2"""
-    if not callback.from_user or not callback.message:
-        return
-    if callback.message.chat.id != config.ADMIN_GROUP_ID:
-        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
-        return
+_active_clean_task: Optional[asyncio.Task] = None
 
-    admin_name = f"@{callback.from_user.username}" if callback.from_user.username else html.escape(callback.from_user.full_name)
-    await callback.answer("🚀 กำลังเริ่มกระบวนการลบข้อความ DM...")
 
-    status_msg = await callback.message.edit_text(
-        "🔄 <b>กำลังเริ่มกระบวนการลบข้อความ DM ของทุกคนที่ไม่ใช่สมาชิก V.2...</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"👑 <b>ผู้สั่งการ:</b> {admin_name}\n"
-        "⏳ กรุณารอสักครู่ ระบบกำลังค้นหารายชื่อผู้ใช้และทยอยดำเนินการ...",
-        parse_mode="HTML"
-    )
-
+async def run_clean_non_v2_dms_background(bot: Bot, status_msg: Message, admin_name: str, admin_chat_id: int):
+    """ฟังก์ชัน Background Job สำหรับกวาดล้างข้อความ DM พร้อมระบบป้องกันการรันซ้ำและ Auto-Resume 100%"""
+    global _active_clean_task
     scanned_count = 0
     cleaned_user_count = 0
     already_cleaned_count = 0
@@ -5456,33 +5443,69 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
             all_users = (await session.execute(stmt)).scalars().all()
             total_users = len(all_users)
 
-            for i, user in enumerate(all_users, 1):
-                scanned_count += 1
+            # คัดแยกหมวดหมู่ล่วงหน้าเพื่อข้ามคนที่ทำเสร็จแล้วทันที 100% (0 ms)
+            v2_users = []
+            already_done_users = []
+            pending_users = []
+
+            for u in all_users:
+                if is_user_v2_member(u):
+                    v2_users.append(u)
+                elif is_user_already_processed(u.telegram_id):
+                    already_done_users.append(u)
+                else:
+                    pending_users.append(u)
+
+            skipped_v2_count = len(v2_users)
+            already_cleaned_count = len(already_done_users)
+            cleaned_user_count = already_cleaned_count
+            total_pending = len(pending_users)
+
+            if total_pending == 0:
+                update_session_state(
+                    is_running=False,
+                    total_users=total_users,
+                    current_user_index=total_users,
+                    total_msgs_deleted=total_msgs_deleted,
+                )
+                done_text = (
+                    "🎉 <b>การกวาดล้างข้อความ DM ของทุกคนที่ไม่ใช่สมาชิก V.2 ครบถ้วน 100% แล้ว!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👑 <b>ผู้สั่งการ:</b> {admin_name}\n"
+                    f"👥 <b>ผู้ใช้ทั้งหมดในระบบ:</b> <b>{total_users}</b> คน\n"
+                    f"🛡️ <b>สมาชิก V.2 (ปลอดภัย):</b> <b>{skipped_v2_count}</b> คน\n"
+                    f"🧹 <b>ล้างข้อความเรียบร้อยแล้ว:</b> <b>{already_cleaned_count}</b> คน (100%)\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "✨ <i>ไม่มีข้อความหรือบัญชีค้างที่ต้องดำเนินการเพิ่มครับ</i>"
+                )
+                try:
+                    await status_msg.edit_text(done_text, parse_mode="HTML")
+                except Exception:
+                    pass
+                return
+
+            update_session_state(
+                is_running=True,
+                total_users=total_users,
+                current_user_index=already_cleaned_count,
+                total_msgs_deleted=total_msgs_deleted,
+            )
+
+            # ดำเนินการเฉพาะคนที่ยังไม่เคยทำ (Pending Users) ด้วยระบบ Bulk Delete 7.0+
+            for idx, user in enumerate(pending_users, 1):
                 uid = user.telegram_id
                 u_name = user.full_name or user.username or f"User {uid}"
+                curr_idx = already_cleaned_count + idx
 
-                # 1. ตรวจสอบว่าเป็นสมาชิก V.2 หรือไม่ -> ข้าม
-                if is_user_v2_member(user):
-                    skipped_v2_count += 1
-                    continue
-
-                # 2. ตรวจสอบว่าเคยล้างเสร็จสิ้นสมบูรณ์แล้ว หรือล้างจาก Local เรียบร้อยแล้วหรือไม่ -> ข้ามทันที 0 วินาที
-                if is_user_clean_completed(uid) or uid == 8869252777:
-                    already_cleaned_count += 1
-                    cleaned_user_count += 1
-                    continue
-
-                # อัปเดตสถานะ Session ว่ากำลังล้างใครอยู่
                 update_session_state(
                     is_running=True,
                     total_users=total_users,
-                    current_user_index=i,
+                    current_user_index=curr_idx,
                     current_user_id=uid,
                     current_user_name=u_name,
                     total_msgs_deleted=total_msgs_deleted,
                 )
 
-                # ดำเนินการลบข้อความใน DM (พร้อมระบบ Checkpoint จำตำแหน่ง ID อัตโนมัติ)
                 try:
                     res = await clean_user_chat_messages(
                         bot=bot,
@@ -5498,24 +5521,26 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
                     else:
                         error_count += 1
                 except Exception as e:
-                    logger.debug(f"Error cleaning DM for user {uid}: {e}")
+                    logger.warning(f"Error cleaning DM for user {uid}: {e}")
                     error_count += 1
 
                 await asyncio.sleep(0.04)
 
-                if i % 10 == 0 or i == total_users:
+                if idx % 5 == 0 or idx == total_pending:
                     try:
+                        pct = (curr_idx / total_users) * 100
                         await status_msg.edit_text(
                             "🔄 <b>กำลังดำเนินการลบข้อความ DM ของทุกคนที่ไม่ใช่ V.2...</b>\n"
                             "━━━━━━━━━━━━━━━━━━━━\n"
-                            f"📊 <b>ความคืบหน้า:</b> {i}/{total_users} บัญชี ({(i/total_users)*100:.1f}%)\n"
+                            f"📊 <b>ความคืบหน้าภาพรวม:</b> {curr_idx}/{total_users} บัญชี ({pct:.1f}%)\n"
+                            f"⏳ <b>รอบปัจจุบัน:</b> กำลังทำ {idx}/{total_pending} คนที่เหลือ\n"
                             f"👤 <b>กำลังทำบัญชี:</b> {html.escape(u_name)} (<code>{uid}</code>)\n"
-                            f"🧹 <b>ล้างแชทสำเร็จแล้ว:</b> <b>{cleaned_user_count}</b> คน (ข้ามคนที่เสร็จแล้ว/Local: {already_cleaned_count} คน)\n"
+                            f"🧹 <b>ล้างแชทสำเร็จแล้ว:</b> <b>{cleaned_user_count}</b> คน (ข้ามเดิม/Local: {already_cleaned_count} คน)\n"
                             f"🗑️ <b>ยอดข้อความที่ลบแล้ว:</b> <b>{total_msgs_deleted:,}</b> ข้อความ\n"
                             f"🛡️ <b>ข้ามสมาชิก V.2 (ปลอดภัย):</b> {skipped_v2_count} คน\n"
                             f"🚫 <b>บล็อกบอท/ติดต่อไม่ได้:</b> {blocked_count} คน\n"
                             "━━━━━━━━━━━━━━━━━━━━\n"
-                            "💾 <i>ระบบบันทึก Checkpoint ตลอดเวลา หากหยุดชั่วคราวจะทำต่อจากจุดเดิมได้ทันที</i>",
+                            "💾 <i>ระบบบันทึก Checkpoint ต่อเนื่อง ป้องกันการรันซ้ำ 100%</i>",
                             parse_mode="HTML"
                         )
                     except Exception:
@@ -5533,7 +5558,7 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
             "🎉 <b>ดำเนินการกวาดล้างข้อความ DM ของทุกคนที่ไม่ใช่สมาชิก V.2 เสร็จสมบูรณ์!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"👑 <b>ผู้สั่งการ:</b> {admin_name}\n"
-            f"🔍 <b>ตรวจสอบผู้ใช้ทั้งหมด:</b> <b>{scanned_count}</b> บัญชี\n"
+            f"👥 <b>ผู้ใช้ทั้งหมดในระบบ:</b> <b>{total_users}</b> บัญชี\n"
             f"🧹 <b>ล้างข้อความสำเร็จ:</b> <b>{cleaned_user_count}</b> คน\n"
             f"🗑️ <b>จำนวนข้อความฝั่งบอทที่ลบทั้งหมด:</b> <b>{total_msgs_deleted:,}</b> ข้อความ\n"
             f"🛡️ <b>ข้ามสมาชิก V.2 (คงข้อความไว้):</b> <b>{skipped_v2_count}</b> คน\n"
@@ -5546,15 +5571,54 @@ async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot
         try:
             await status_msg.edit_text(final_report, parse_mode="HTML")
         except Exception:
-            await callback.message.answer(final_report, parse_mode="HTML")
+            await bot.send_message(chat_id=admin_chat_id, text=final_report, parse_mode="HTML")
 
     except Exception as e:
-        logger.error(f"Error in clean_non_v2_dms: {e}", exc_info=True)
+        logger.error(f"Error in clean_non_v2_dms background job: {e}", exc_info=True)
         update_session_state(is_running=False)
         try:
             await status_msg.edit_text(f"❌ <b>เกิดข้อผิดพลาดในการลบข้อความ DM:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
         except Exception:
-            await callback.message.answer(f"❌ <b>เกิดข้อผิดพลาด:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+            pass
+    finally:
+        _active_clean_task = None
+
+
+@router.callback_query(F.data == "admin:do_clean_non_v2_dms")
+async def handle_admin_do_clean_non_v2_dms_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เริ่มกระบวนการกวาดล้างข้อความ DM ของทุกคนที่ไม่ใช่สมาชิก V.2 (พร้อมตรวจจับการรันซ้ำซ้อน)"""
+    global _active_clean_task
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    # ตรวจสอบว่ามี Background Job ล้างแชทกำลังทำงานอยู่หรือไม่
+    if _active_clean_task is not None and not _active_clean_task.done():
+        await callback.answer("⚠️ ระบบกำลังล้างแชทอยู่แล้ว ไม่สามารถรันซ้ำซ้อนได้ กรุณารอให้งานปัจจุบันเสร็จสิ้น", show_alert=True)
+        return
+
+    admin_name = f"@{callback.from_user.username}" if callback.from_user.username else html.escape(callback.from_user.full_name)
+    await callback.answer("🚀 กำลังเริ่มกระบวนการลบข้อความ DM...")
+
+    status_msg = await callback.message.edit_text(
+        "🔄 <b>กำลังเริ่มกระบวนการลบข้อความ DM ของทุกคนที่ไม่ใช่สมาชิก V.2...</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👑 <b>ผู้สั่งการ:</b> {admin_name}\n"
+        "⏳ กรุณารอสักครู่ ระบบกำลังค้นหารายชื่อผู้ใช้และทยอยดำเนินการ...",
+        parse_mode="HTML"
+    )
+
+    # รันแบบ Background Task ที่ไม่ถูกตัดตอนจาก Callback Timeout
+    _active_clean_task = asyncio.create_task(
+        run_clean_non_v2_dms_background(
+            bot=bot,
+            status_msg=status_msg,
+            admin_name=admin_name,
+            admin_chat_id=callback.message.chat.id,
+        )
+    )
 
 
 @router.message(Command("clean_status", "clean_progress", "clean_state"))
