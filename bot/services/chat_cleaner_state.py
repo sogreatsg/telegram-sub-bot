@@ -25,10 +25,18 @@ def _get_default_state() -> Dict[str, Any]:
     }
 
 
+_cached_state: Optional[Dict[str, Any]] = None
+
+
 def get_clean_state() -> Dict[str, Any]:
-    """โหลด State การลบข้อความจากไฟล์ JSON"""
+    """โหลด State การลบข้อความจากไฟล์ JSON หรือ Memory Cache"""
+    global _cached_state
+    if _cached_state is not None:
+        return _cached_state
+
     if not os.path.exists(STATE_FILE_PATH):
-        return _get_default_state()
+        _cached_state = _get_default_state()
+        return _cached_state
     try:
         with open(STATE_FILE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -36,19 +44,24 @@ def get_clean_state() -> Dict[str, Any]:
                 data["session"] = _get_default_state()["session"]
             if "users" not in data:
                 data["users"] = {}
+            _cached_state = data
             return data
     except Exception as e:
         logger.error(f"Error reading clean_chat_state.json: {e}")
-        return _get_default_state()
+        _cached_state = _get_default_state()
+        return _cached_state
 
 
 def save_clean_state(state: Dict[str, Any]) -> None:
-    """บันทึก State การลบข้อความลงไฟล์ JSON แบบ Atomic Safe"""
+    """บันทึก State การลบข้อความลงไฟล์ JSON แบบ Compact & Atomic Safe"""
+    global _cached_state
+    _cached_state = state
     try:
         os.makedirs(os.path.dirname(STATE_FILE_PATH), exist_ok=True)
         tmp_path = f"{STATE_FILE_PATH}.tmp"
+        # ใช้ compact format (separators) เพื่อความเร็วสูงสุดและประหยัด CPU/I/O
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+            json.dump(state, f, ensure_ascii=False, separators=(',', ':'))
         if os.path.exists(STATE_FILE_PATH):
             os.replace(tmp_path, STATE_FILE_PATH)
         else:
@@ -115,7 +128,6 @@ def update_user_checkpoint(
             "last_scanned_max_id": max_id if status == "COMPLETED" else 0,
             "scanned_down_to_id": scanned_down_to_id,
             "deleted_count": deleted_count,
-            "deleted_ids": deleted_ids or [],
             "status": status,
             "started_at": now_str,
             "updated_at": now_str,
@@ -132,8 +144,8 @@ def update_user_checkpoint(
             u_data["username"] = username
         if full_name:
             u_data["full_name"] = full_name
-        if deleted_ids is not None:
-            u_data["deleted_ids"] = deleted_ids
+        # ลบ deleted_ids ขยะเดิมออกหากมี เพื่อรักษาขนาดไฟล์ให้เล็กและเบา CPU
+        u_data.pop("deleted_ids", None)
         if status == "COMPLETED":
             u_data["last_scanned_max_id"] = max(u_data.get("last_scanned_max_id", 0), max_id)
             u_data["completed_at"] = now_str

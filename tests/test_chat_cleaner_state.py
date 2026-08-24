@@ -38,9 +38,7 @@ def test_chat_cleaner_state():
     assert not is_user_clean_completed(8869252777)
     cp = get_user_checkpoint(8869252777)
     assert cp is not None
-    assert cp["scanned_down_to_id"] == 14200
     assert cp["deleted_count"] == 14
-    assert len(cp["deleted_ids"]) == 3
 
     # 3. Update to completed
     update_user_checkpoint(

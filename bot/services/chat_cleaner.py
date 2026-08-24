@@ -142,7 +142,7 @@ async def clean_user_chat_messages(
     for c in chunks:
         queue.put_nowait(c)
 
-    # 4. Worker Pool สำหรับ Bulk Delete กวาดทีละ 100 ข้อความต่อ Request
+    # 4. Worker Pool สำหรับ Bulk Delete กวาดทีละ 100 ข้อความต่อ Request (CPU-Optimized & Low Latency)
     async def worker(w_id: int):
         nonlocal scanned_count, skipped_count, deleted_count, current_min_id, pause_until
         while not queue.empty():
@@ -155,52 +155,59 @@ async def clean_user_chat_messages(
             except asyncio.QueueEmpty:
                 break
 
+            chunk_deleted = 0
+            chunk_skipped = 0
+
             try:
                 await bot.delete_messages(chat_id=user_id, message_ids=chunk)
-                async with lock:
-                    deleted_count += len(chunk)
-                    deleted_ids.extend(chunk)
-                await asyncio.sleep(0.03)
+                chunk_deleted = len(chunk)
+                await asyncio.sleep(0.04)
             except TelegramBadRequest:
                 # กรณีมีข้อผิดพลาดเฉพาะชุด ลองลบทีละ ID ใน Chunk นั้น
                 for mid in chunk:
                     try:
                         await bot.delete_message(chat_id=user_id, message_id=mid)
-                        async with lock:
-                            deleted_count += 1
-                            deleted_ids.append(mid)
+                        chunk_deleted += 1
                     except Exception:
-                        async with lock:
-                            skipped_count += 1
+                        chunk_skipped += 1
+                    # Micro-delay เพื่อป้องกัน CPU 100% และให้อิสระแก่ Event Loop
+                    await asyncio.sleep(0.003)
             except TelegramRetryAfter as e:
                 async with lock:
                     pause_until = max(pause_until, time.time() + e.retry_after + 1.0)
                     logger.info(f"Rate limit hit for user {user_id}: waiting {e.retry_after}s at Chunk {chunk[0]}..{chunk[-1]}")
                 queue.put_nowait(chunk)
                 await asyncio.sleep(e.retry_after + 1.0)
+                queue.task_done()
+                continue
             except Exception as e:
-                async with lock:
-                    skipped_count += len(chunk)
+                chunk_skipped = len(chunk)
 
+            # อัปเดตสถิติส่วนกลางครั้งเดียวต่อ Chunk นอกลูปย่อย เพื่อลด Lock Contention 100x
+            should_save_cp = False
             async with lock:
+                deleted_count += chunk_deleted
+                skipped_count += chunk_skipped
                 scanned_count += len(chunk)
                 current_min_id = min(current_min_id, chunk[-1])
-                if scanned_count % 500 == 0:
-                    update_user_checkpoint(
-                        user_id=user_id,
-                        max_id=max_id,
-                        scanned_down_to_id=current_min_id,
-                        deleted_count=accumulated_deleted + deleted_count,
-                        status="IN_PROGRESS",
-                        username=username,
-                        full_name=full_name,
-                        deleted_ids=deleted_ids,
-                    )
+                if scanned_count % 1000 == 0:
+                    should_save_cp = True
+
+            if should_save_cp:
+                update_user_checkpoint(
+                    user_id=user_id,
+                    max_id=max_id,
+                    scanned_down_to_id=current_min_id,
+                    deleted_count=accumulated_deleted + deleted_count,
+                    status="IN_PROGRESS",
+                    username=username,
+                    full_name=full_name,
+                )
 
             queue.task_done()
-            await asyncio.sleep(0.03)
+            await asyncio.sleep(0.02)
 
-    workers = [asyncio.create_task(worker(i)) for i in range(min(num_workers, 4))]
+    workers = [asyncio.create_task(worker(i)) for i in range(min(num_workers, 2))]
     await asyncio.gather(*workers)
 
     # 5. เมื่อสแกนครบถึง target_end_mid -> บันทึกสถานะ COMPLETED และอัปเดต last_scanned_max_id
@@ -213,7 +220,6 @@ async def clean_user_chat_messages(
         status="COMPLETED",
         username=username,
         full_name=full_name,
-        deleted_ids=deleted_ids,
     )
 
     result["deleted_count"] = total_del
