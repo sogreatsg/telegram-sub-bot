@@ -3570,6 +3570,12 @@ async def handle_admin_block_user_command(message: Message, bot: Bot):
     except Exception as e:
         logger.debug(f"Failed to ban blocked user {target_uid} in discussion chat: {e}")
 
+    # ล้างข้อความของบอทใน DM ของผู้ใช้ทิ้งทั้งหมดทันที (Wipe Bot Messages in DM)
+    try:
+        asyncio.create_task(clean_user_chat_messages(bot=bot, user_id=target_uid, username=user_username, full_name=user_name))
+    except Exception as e:
+        logger.debug(f"Failed to trigger DM clean for blocked user {target_uid}: {e}")
+
     user_header = format_user_title(user_name, user_username, target_uid)
     time_display = format_thai_datetime(now)
     reason_display = html.escape(reason) if reason else "ไม่ได้ระบุ"
@@ -3583,8 +3589,9 @@ async def handle_admin_block_user_command(message: Message, bot: Bot):
         f"📝 <b>เหตุผล:</b> <i>{reason_display}</i>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🔒 <b>ผลของการบล็อก:</b>\n"
-        "• ผู้ใช้จะไม่สามารถพิมพ์ข้อความ ขอรับสิทธิ์ หรือกดปุ่มใดๆ ในบอทได้อีกต่อไป (บอทจะเงียบสนิท 100%)\n"
-        "• ดำเนินการเตะออกจาก Channel VIP และแบนออกจากห้องพูดคุยชุมชนเรียบร้อยแล้ว\n"
+        "• บล็อกการพิมพ์/กดปุ่มใน DM กับบอท 100% (บอทเงียบสนิท ไม่ตอบกลับ ไม่ส่งต่อแอดมิน)\n"
+        "• ล้างข้อความ เมนู และปุ่มกดของบอทใน DM ของผู้ใช้ออกทั้งหมด\n"
+        "• เตะออกจาก Channel VIP และแบนออกจากห้องพูดคุยชุมชนเรียบร้อยแล้ว\n"
         "• <b>ไม่มีการส่งข้อความแจ้งเตือนใดๆ ไปยังฝั่งผู้ใช้</b>"
     )
 
@@ -3758,6 +3765,12 @@ async def handle_admin_block_user_callback(callback: CallbackQuery, bot: Bot):
     except Exception as e:
         logger.debug(f"Failed to ban blocked user {target_uid} in discussion chat: {e}")
 
+    # ล้างข้อความของบอทใน DM ของผู้ใช้ทิ้งทั้งหมดทันที (Wipe Bot Messages in DM)
+    try:
+        asyncio.create_task(clean_user_chat_messages(bot=bot, user_id=target_uid, username=user_username, full_name=user_name))
+    except Exception as e:
+        logger.debug(f"Failed to trigger DM clean for blocked user {target_uid}: {e}")
+
     await callback.answer("🚫 บล็อกผู้ใช้เรียบร้อยแล้ว")
 
     user_header = format_user_title(user_name, user_username, target_uid)
@@ -3770,7 +3783,7 @@ async def handle_admin_block_user_callback(callback: CallbackQuery, bot: Bot):
         f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
         f"📅 <b>เวลาที่บล็อก:</b> <code>{time_display} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "🔒 <i>ผู้ใช้จะไม่สามารถพิมพ์ข้อความหรือกดปุ่มในบอท/ห้องแชทได้อีกต่อไป (และไม่มีการแจ้งเตือนฝั่งผู้ใช้)</i>"
+        "🔒 <i>บล็อกการพิมพ์/กดปุ่มใน DM และห้องแชท 100% พร้อมล้างข้อความใน DM ออกเรียบร้อย (ไม่มีการแจ้งเตือนฝั่งผู้ใช้)</i>"
     )
 
     unblock_kb = InlineKeyboardMarkup(
