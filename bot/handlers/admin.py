@@ -59,6 +59,8 @@ from bot.services.payment_settings import (
     update_promptpay_setting,
     is_truemoney_active,
     update_truemoney_setting,
+    is_auto_approve_active,
+    update_auto_approve_setting,
 )
 from bot.handlers.user_menu import get_main_menu_keyboard
 from bot.utils.time_utils import (
@@ -596,6 +598,162 @@ async def handle_admin_reject(callback: CallbackQuery, bot: Bot):
         await callback.answer(f"❌ เกิดข้อผิดพลาด: {e}", show_alert=True)
 
 
+@router.callback_query(F.data.startswith("admin:reject_auto:"))
+async def handle_admin_reject_auto(callback: CallbackQuery, bot: Bot):
+    """จัดการเมื่อ Admin กดปฏิเสธ/ยกเลิกสลิปที่ถูก Auto-Approve ไปแล้ว หลังตรวจสอบย้อนหลังพบว่าซองไม่ถูกต้อง"""
+    if not callback.from_user or not callback.message:
+        return
+
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คุณไม่มีสิทธิ์ดำเนินการนี้ (เฉพาะแอดมินเท่านั้น)", show_alert=True)
+        return
+
+    admin_user = callback.from_user
+    slip_id_str = callback.data.split(":")[-1]
+
+    try:
+        slip_id = int(slip_id_str)
+    except ValueError:
+        await callback.answer("❌ รหัสสลิปไม่ถูกต้อง", show_alert=True)
+        return
+
+    try:
+        requested_plan = PlanType.VIP_30D.value
+        kicked = False
+        target_user_id = None
+
+        async with get_session() as session:
+            stmt = select(PaymentSlip).where(PaymentSlip.id == slip_id)
+            result = await session.execute(stmt)
+            slip = result.scalar_one_or_none()
+
+            if not slip:
+                await callback.answer("❌ ไม่พบข้อมูลสลิปในระบบ", show_alert=True)
+                return
+
+            if slip.status == SlipStatus.REJECTED.value:
+                await callback.answer(
+                    "⚠️ สลิปนี้ได้รับการปฏิเสธ/ยกเลิกไปแล้ว!",
+                    show_alert=True,
+                )
+                return
+
+            slip.status = SlipStatus.REJECTED.value
+            slip.admin_id = admin_user.id
+            session.add(slip)
+            target_user_id = slip.user_id
+            requested_plan = getattr(slip, "plan_type", None) or PlanType.VIP_30D.value
+
+            # ค้นหา Grant ที่ตรงกับการซื้อนี้เพื่อลบออกจาก Ledger แล้ว Reconcile วันหมดอายุใหม่
+            grants_stmt = (
+                select(SubscriptionGrant)
+                .where(
+                    SubscriptionGrant.user_id == target_user_id,
+                    SubscriptionGrant.grant_type.in_([GrantType.PURCHASE.value, GrantType.PROMOTION.value]),
+                )
+                .order_by(SubscriptionGrant.id.desc())
+            )
+            grants = (await session.execute(grants_stmt)).scalars().all()
+            if grants:
+                await session.delete(grants[0])
+                await session.flush()
+
+            # ทำการ Reconcile วันหมดอายุและสถานะใหม่
+            reconcile_res = await reconcile_user(session, target_user_id, commit=False)
+
+            sub = await session.get(Subscription, target_user_id)
+            if sub and sub.status == SubStatus.PENDING.value and (sub.pending_days or 0) <= 0 and (sub.pending_minutes or 0) <= 0:
+                sub.status = SubStatus.EXPIRED.value
+                sub.pending_days = 0
+                sub.pending_minutes = 0
+                sub.pending_has_value = False
+                sub.pending_since = None
+                session.add(sub)
+
+            await session.commit()
+
+            if reconcile_res and not reconcile_res.is_active:
+                try:
+                    await kick_user_from_all_target_channels(bot, target_user_id)
+                    kicked = True
+                except Exception as e:
+                    logger.warning(f"Could not kick user {target_user_id} after auto-reject: {e}")
+
+        plan_info = get_dynamic_plan_info(requested_plan)
+        plan_price_str = f"{plan_info['price']:,} บาท"
+
+        # 1. ส่งข้อความแจ้งเตือนผู้ใช้ทาง DM
+        if target_user_id:
+            try:
+                rejection_message = (
+                    "❌ <b>แจ้งเตือนผลการตรวจสอบการชำระเงินย้อนหลัง</b>\n\n"
+                    "ทีมงานได้ตรวจสอบลิงก์ซองของขวัญ TrueMoney ย้อนหลังและไม่สามารถยืนยันยอดเงินได้ครับ\n"
+                    f"• <b>รหัสรายการ:</b> <code>#{slip_id}</code>\n"
+                    f"• <b>แพ็กเกจ:</b> {plan_info['badge']} ({plan_price_str})\n\n"
+                    "สาเหตุที่เป็นไปได้:\n"
+                    "• ลิงก์ซองของขวัญถูกกดรับไปแล้วก่อนหน้า หรือลิงก์หมดอายุ\n"
+                    "• ยอดเงินในซองไม่ตรงกับค่าบริการ\n"
+                    "• ซองของขวัญถูกยกเลิก\n\n"
+                    "ระบบจึงได้ทำการยกเลิกสิทธิ์สมาชิก VIP รายการนี้เรียบร้อยแล้วครับ\n"
+                    "👉 หากมีข้อสงสัยกรุณาติดต่อแอดมิน หรือพิมพ์ /start เพื่อทำรายการใหม่อีกครั้งครับ 🙏"
+                )
+                await bot.send_message(
+                    chat_id=target_user_id,
+                    text=rejection_message,
+                    parse_mode="HTML",
+                )
+                logger.info(f"Sent auto-rejection DM to User ID={target_user_id}")
+            except Exception as e:
+                logger.warning(f"Could not send auto-rejection DM to User ID={target_user_id}: {e}")
+
+        # 2. แก้ไขข้อความในกลุ่ม Admin
+        admin_name = f"@{admin_user.username}" if admin_user.username else html.escape(admin_user.full_name)
+        timestamp_thai = format_thai_datetime(datetime.now(timezone.utc))
+
+        base_text = callback.message.caption or callback.message.text or ""
+        kick_note = " (และเตะออกจาก Channel แล้ว 🚪)" if kicked else ""
+        updated_text = (
+            f"{base_text}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"❌ <b>ปฏิเสธและยกเลิกสิทธิ์ย้อนหลังแล้ว</b> โดย {admin_name} (<code>{admin_user.id}</code>){kick_note}\n"
+            f"📅 <code>{timestamp_thai} น.</code>"
+        )
+
+        try:
+            if callback.message:
+                if callback.message.caption is not None:
+                    await callback.message.edit_caption(
+                        caption=updated_text,
+                        reply_markup=None,
+                        parse_mode="HTML",
+                    )
+                else:
+                    await callback.message.edit_text(
+                        text=updated_text,
+                        reply_markup=None,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+        except Exception as e:
+            logger.error(f"Failed to update admin message caption/text: {e}")
+
+        if target_user_id:
+            try:
+                await log_chat_message(
+                    user_id=target_user_id,
+                    sender_role="ADMIN",
+                    message_text=f"[แอดมิน {admin_name} ปฏิเสธและยกเลิกสิทธิ์สลิป Auto #{slip_id}]"
+                )
+            except Exception:
+                pass
+
+        await callback.answer("❌ ปฏิเสธและยกเลิกสิทธิ์ย้อนหลังเรียบร้อยแล้ว")
+    except Exception as e:
+        logger.error(f"Failed to auto-reject slip #{slip_id}: {e}", exc_info=True)
+        await callback.answer(f"❌ เกิดข้อผิดพลาด: {e}", show_alert=True)
+
+
+
 def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
     """สร้างข้อความเมนูหลักและคีย์บอร์ดสำหรับ Admin Panel"""
     admin_menu_text = (
@@ -656,9 +814,10 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "• <code>/trial</code> (หรือ <code>/trial_on</code> / <code>/trial_off</code>) — เปิด/ปิด/ดูสถานะ\n\n"
         "🔔 <b>12. ระบบแจ้งเตือนข้อความค้างตอบ (DM Reminder):</b>\n"
         "• <code>/dm_reminder</code> (หรือ <code>/dm_reminder_on</code> / <code>/dm_reminder_off</code>) — เปิด/ปิด/ดูสถานะแจ้งเตือนค้างตอบ\n\n"
-        "💳 <b>13. ระบบช่องทางชำระเงิน:</b>\n"
+        "💳 <b>13. ระบบช่องทางชำระเงิน & อนุมัติอัตโนมัติ:</b>\n"
+        "• <code>/auto_approve</code> (หรือ <code>/auto_approve_on</code> / <code>/auto_approve_off</code>) — ⚡ เปิด/ปิด/ดูสถานะระบบอนุมัติอัตโนมัติเมื่อส่งซอง TrueMoney\n"
         "• <code>/promptpay</code> (หรือ <code>/promptpay_on</code> / <code>/promptpay_off</code>) — เปิด/ปิด/ดูสถานะชำระผ่าน QR Code\n"
-        "• <code>/payment_methods</code> — ดูสถานะช่องทางชำระเงินทั้งหมด\n\n"
+        "• <code>/payment_methods</code> — ดูสถานะช่องทางชำระเงินและระบบอนุมัติอัตโนมัติทั้งหมด\n\n"
         "🚫 <b>14. ระบบบล็อก & ปลดบล็อกผู้ใช้ (Block / Unblock):</b>\n"
         "• <code>/block_user [User ID/@user] [เหตุผล]</code> — 🚫 สั่งบล็อกผู้ใช้ (ห้ามพิมพ์/กดปุ่มในบอท/เตะออกจากห้อง/ไม่เตือนฝั่ง User)\n"
         "• <code>/unblock_user [User ID/@user]</code> — 🟢 ปลดบล็อกผู้ใช้ (กลับมาใช้งานบอทได้ตามปกติ)\n"
@@ -6475,22 +6634,32 @@ async def handle_admin_check_chat_command(message: Message, bot: Bot):
 
 
 def get_payment_methods_status_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
-    """สร้างข้อความและปุ่มจัดการช่องทางการชำระเงิน"""
+    """สร้างข้อความและปุ่มจัดการช่องทางการชำระเงินและระบบอนุมัติอัตโนมัติ"""
     pp_active = is_promptpay_active()
     tmn_active = is_truemoney_active()
+    auto_active = is_auto_approve_active()
 
     text = (
-        "💳 <b>ตั้งค่าช่องทางการชำระเงิน (Payment Methods)</b>\n"
+        "💳 <b>ตั้งค่าช่องทางการชำระเงิน & ระบบอนุมัติอัตโนมัติ (Payment Settings)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"📲 <b>สแกน QR Code (PromptPay):</b> {'🟢 เปิดใช้งาน (Active)' if pp_active else '🔴 ปิดใช้งาน (Disabled)'}\n"
         f"🧧 <b>ซองของขวัญ TrueMoney:</b> {'🟢 เปิดใช้งาน (Active)' if tmn_active else '🔴 ปิดใช้งาน (Disabled)'}\n"
+        f"⚡ <b>อนุมัติซอง TrueMoney อัตโนมัติ (Auto-Approve):</b> {'🟢 เปิดใช้งาน (Active)' if auto_active else '🔴 ปิดใช้งาน (Disabled)'}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 <i>เมื่อปิด QR Code บอทจะไม่แสดงตัวเลือกสแกน QR Code ให้ผู้ใช้ และจะรับชำระเฉพาะซองของขวัญ TrueMoney เท่านั้น</i>\n"
-        "👉 <i>แตะปุ่มด้านล่างเพื่อเปิดหรือปิดช่องทางที่ต้องการได้ทันทีครับ</i>"
+        "💡 <b>คำแนะนำ:</b>\n"
+        "• <i>เมื่อเปิด Auto-Approve TrueMoney: เมื่อผู้ใช้ส่งลิงก์ซองแดง บอทจะอนุมัติและส่งลิงก์เข้าห้อง VIP ให้ผู้ใช้ทันทีโดยไม่ต้องรอแอดมินกดอนุมัติ (แอดมินกดรับซองในกลุ่มเพื่อเช็คย้อนหลังได้)</i>\n"
+        "• <i>เมื่อปิด QR Code: บอทจะไม่แสดงตัวเลือกสแกน QR Code และจะรับชำระเฉพาะซองของขวัญ TrueMoney เท่านั้น</i>\n\n"
+        "👉 <i>แตะปุ่มด้านล่างเพื่อเปิดหรือปิดการตั้งค่าที่ต้องการได้ทันทีครับ</i>"
     )
 
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚡ ปิด Auto-Approve TrueMoney" if auto_active else "⚡ เปิด Auto-Approve TrueMoney",
+                    callback_data="pay_method_action:auto_approve_off" if auto_active else "pay_method_action:auto_approve_on"
+                ),
+            ],
             [
                 InlineKeyboardButton(
                     text="🔴 ปิดชำระผ่าน QR Code" if pp_active else "🟢 เปิดชำระผ่าน QR Code",
@@ -6555,6 +6724,50 @@ async def handle_promptpay_off_command(message: Message):
     await message.answer(f"❌ <b>ปิดใช้งานการชำระเงินผ่าน QR Code เรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
 
 
+@router.message(Command("auto_approve", "auto_truemoney", "autoapprove", "auto_approve_truemoney"))
+async def handle_auto_approve_command(message: Message):
+    """คำสั่งเปิด/ปิด/ดูสถานะระบบอนุมัติอัตโนมัติ TrueMoney: /auto_approve [on/off]"""
+    if not is_admin_chat(message.chat.id):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) >= 2:
+        subcmd = parts[1].strip().lower()
+        if subcmd in ("on", "enable", "start", "open"):
+            update_auto_approve_setting(is_active=True)
+            text, kb = get_payment_methods_status_text_and_kb()
+            await message.answer(f"⚡ <b>เปิดใช้งานระบบอนุมัติอัตโนมัติ (Auto-Approve ซอง TrueMoney) เรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+            return
+        elif subcmd in ("off", "disable", "stop", "close"):
+            update_auto_approve_setting(is_active=False)
+            text, kb = get_payment_methods_status_text_and_kb()
+            await message.answer(f"❌ <b>ปิดใช้งานระบบอนุมัติอัตโนมัติ (Auto-Approve ซอง TrueMoney) เรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+            return
+
+    text, kb = get_payment_methods_status_text_and_kb()
+    await message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("auto_approve_on", "auto_truemoney_on", "autoapprove_on"))
+async def handle_auto_approve_on_command(message: Message):
+    """คำสั่งเปิดใช้งานระบบอนุมัติอัตโนมัติ TrueMoney: /auto_approve_on"""
+    if not is_admin_chat(message.chat.id):
+        return
+    update_auto_approve_setting(is_active=True)
+    text, kb = get_payment_methods_status_text_and_kb()
+    await message.answer(f"⚡ <b>เปิดใช้งานระบบอนุมัติอัตโนมัติ (Auto-Approve ซอง TrueMoney) เรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+
+
+@router.message(Command("auto_approve_off", "auto_truemoney_off", "autoapprove_off"))
+async def handle_auto_approve_off_command(message: Message):
+    """คำสั่งปิดใช้งานระบบอนุมัติอัตโนมัติ TrueMoney: /auto_approve_off"""
+    if not is_admin_chat(message.chat.id):
+        return
+    update_auto_approve_setting(is_active=False)
+    text, kb = get_payment_methods_status_text_and_kb()
+    await message.answer(f"❌ <b>ปิดใช้งานระบบอนุมัติอัตโนมัติ (Auto-Approve ซอง TrueMoney) เรียบร้อยแล้ว!</b>\n\n{text}", reply_markup=kb, parse_mode="HTML")
+
+
 @router.message(Command("payment_methods", "payment_settings", "pay_setting"))
 async def handle_payment_methods_command(message: Message):
     """คำสั่งดูและจัดการช่องทางการชำระเงินทั้งหมด: /payment_methods"""
@@ -6577,7 +6790,7 @@ async def handle_admin_menu_payment_methods_callback(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("pay_method_action:"))
 async def handle_pay_method_action_callback(callback: CallbackQuery):
-    """จัดการ Quick Actions ปุ่มลัดเปิด/ปิด ช่องทางชำระเงิน"""
+    """จัดการ Quick Actions ปุ่มลัดเปิด/ปิด ช่องทางชำระเงิน & ระบบ Auto-Approve"""
     if not is_admin_chat(callback.message.chat.id):
         await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
         return
@@ -6595,12 +6808,19 @@ async def handle_pay_method_action_callback(callback: CallbackQuery):
     elif action == "truemoney_off":
         update_truemoney_setting(is_active=False)
         await callback.answer("❌ ปิดใช้งานชำระเงินผ่าน TrueMoney แล้ว")
+    elif action == "auto_approve_on":
+        update_auto_approve_setting(is_active=True)
+        await callback.answer("⚡ เปิดใช้งานระบบอนุมัติอัตโนมัติแล้ว")
+    elif action == "auto_approve_off":
+        update_auto_approve_setting(is_active=False)
+        await callback.answer("❌ ปิดใช้งานระบบอนุมัติอัตโนมัติแล้ว")
 
     text, kb = get_payment_methods_status_text_and_kb()
     try:
         await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
     except Exception:
         pass
+
 
 
 

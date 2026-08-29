@@ -10,10 +10,15 @@ from bot.services.payment_settings import (
     update_promptpay_setting,
     is_truemoney_active,
     update_truemoney_setting,
+    is_auto_approve_active,
+    update_auto_approve_setting,
+    is_auto_approve_truemoney_active,
+    update_auto_approve_truemoney_setting,
     get_payment_settings,
     PAYMENT_SETTINGS_FILE
 )
-from bot.handlers.payment import get_payment_method_keyboard
+from bot.handlers.payment import get_payment_method_keyboard, get_admin_auto_approved_slip_keyboard
+from bot.handlers.admin import get_payment_methods_status_text_and_kb
 
 def test_payment_settings():
     # Save backup if exists
@@ -48,7 +53,33 @@ def test_payment_settings():
         update_truemoney_setting(True)
         assert is_truemoney_active() is True
 
-        print("Payment settings test passed successfully!")
+        # 3. Test Auto-Approve toggle
+        update_auto_approve_setting(True)
+        assert is_auto_approve_active() is True, "Auto-Approve should be True after turning on"
+        assert is_auto_approve_truemoney_active() is True, "Alias should also return True"
+
+        text_on, kb_on = get_payment_methods_status_text_and_kb()
+        assert "🟢 เปิดใช้งาน (Active)" in text_on
+        all_admin_cbs = [btn.callback_data for row in kb_on.inline_keyboard for btn in row]
+        assert "pay_method_action:auto_approve_off" in all_admin_cbs
+
+        update_auto_approve_setting(False)
+        assert is_auto_approve_active() is False, "Auto-Approve should be False after turning off"
+        assert is_auto_approve_truemoney_active() is False, "Alias should also return False"
+
+        text_off, kb_off = get_payment_methods_status_text_and_kb()
+        assert "🔴 ปิดใช้งาน (Disabled)" in text_off
+        all_admin_cbs_off = [btn.callback_data for row in kb_off.inline_keyboard for btn in row]
+        assert "pay_method_action:auto_approve_on" in all_admin_cbs_off
+
+        # 4. Test Auto-Approved Slip Keyboard
+        auto_kb = get_admin_auto_approved_slip_keyboard(123, 456)
+        auto_cbs = [btn.callback_data for row in auto_kb.inline_keyboard for btn in row]
+        assert "admin:reject_auto:123" in auto_cbs
+        assert "admin:view_user:456" in auto_cbs
+        assert "admin:view_chat:456" in auto_cbs
+
+        print("Payment settings and auto-approve tests passed successfully!")
 
     finally:
         # Restore backup
@@ -61,3 +92,4 @@ def test_payment_settings():
 
 if __name__ == "__main__":
     test_payment_settings()
+

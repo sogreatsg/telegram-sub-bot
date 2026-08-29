@@ -20,12 +20,14 @@ import asyncio
 from collections import defaultdict
 from sqlalchemy import select
 from bot.config import get_settings
-from bot.models.schema import PaymentSlip, SlipStatus, PlanType, PLAN_DETAILS, get_dynamic_plan_info, format_plan_duration, User
+from bot.models.schema import PaymentSlip, SlipStatus, PlanType, GrantType, PLAN_DETAILS, get_dynamic_plan_info, format_plan_duration, User
 from bot.services.database import get_session, get_or_create_user
 from bot.services.chat_logger import log_chat_message
-from bot.services.channel_service import is_user_v2_member
-from bot.services.payment_settings import is_promptpay_active, is_truemoney_active
-from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime
+from bot.services.channel_service import is_user_v2_member, get_user_target_channel_id, get_channel_label, unban_user_in_channel
+from bot.services.payment_settings import is_promptpay_active, is_truemoney_active, is_auto_approve_active
+from bot.services.subscription import grant_subscription, parse_plan_days
+from bot.utils.time_utils import BANGKOK_TZ, format_thai_datetime, format_remaining_time
+from aiogram.enums import ChatMemberStatus
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -128,6 +130,31 @@ def get_admin_slip_keyboard(slip_id: int, user_id: int) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+def get_admin_auto_approved_slip_keyboard(slip_id: int, user_id: int) -> InlineKeyboardMarkup:
+    """สร้างปุ่มสำหรับรายการที่ระบบอนุมัติอัตโนมัติ (Auto-Approved) ในกลุ่ม Admin"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👤 ดูข้อมูลสมาชิก",
+                    callback_data=f"admin:view_user:{user_id}",
+                ),
+                InlineKeyboardButton(
+                    text="📜 ดูประวัติการคุย",
+                    callback_data=f"admin:view_chat:{user_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ ปฏิเสธ/ยกเลิกรายการนี้",
+                    callback_data=f"admin:reject_auto:{slip_id}",
+                ),
+            ]
+        ]
+    )
+
 
 
 @router.callback_query(F.data.startswith("menu:subscribe"))
@@ -444,7 +471,7 @@ async def process_truemoney_submission(
     bot: Bot,
     angpao_url: str,
 ):
-    """ฟังก์ชันประมวลผลการส่งลิงก์ซองของขวัญ TrueMoney และส่งต่อไปยังกลุ่ม Admin (เฉพาะเมื่อเลือกแพ็กเกจแล้ว)"""
+    """ฟังก์ชันประมวลผลการส่งลิงก์ซองของขวัญ TrueMoney และส่งต่อไปยังกลุ่ม Admin (รองรับระบบอนุมัติอัตโนมัติ Auto-Approve)"""
     telegram_user = message.from_user
     if not telegram_user:
         return
@@ -453,21 +480,29 @@ async def process_truemoney_submission(
         fsm_data = await state.get_data()
         plan_key = fsm_data.get("plan_type", PlanType.VIP_30D.value)
         plan_info = get_dynamic_plan_info(plan_key)
+        auto_approved = is_auto_approve_active()
+        now = datetime.now(timezone.utc)
+
+        is_stack_extension = False
+        is_in_channel = False
+        new_expires_at = None
+        target_channel_id = None
+        target_channel_label = ""
+        invite_url = None
 
         # 1. บันทึกลงฐานข้อมูล (ตรวจสอบรายการซ้ำก่อน)
         async with get_session() as session:
-            # ป้องกันส่งซ้ำ: ตรวจสอบว่ามีสลิป/ลิงก์เดียวกันที่เพิ่งส่งเข้ามาและยัง PENDING อยู่หรือไม่
             dup_stmt = select(PaymentSlip).where(
                 PaymentSlip.user_id == telegram_user.id,
                 PaymentSlip.file_id == angpao_url,
-                PaymentSlip.status == SlipStatus.PENDING.value,
             )
             existing_dup = (await session.execute(dup_stmt)).scalars().first()
             if existing_dup:
                 await state.clear()
+                dup_status_msg = "ได้รับการอนุมัติเรียบร้อยแล้ว" if existing_dup.status == SlipStatus.APPROVED.value else "กำลังรอการตรวจสอบ"
                 await message.answer(
                     f"ℹ️ <b>คุณได้ส่งลิงก์ซองของขวัญนี้เข้าระบบไว้แล้วครับ (รายการ #{existing_dup.id})</b>\n\n"
-                    "ทีมงานแอดมินกำลังดำเนินการตรวจสอบและจะอนุมัติให้โดยเร็วครับ ขอบคุณครับ 🙏",
+                    f"สถานะปัจจุบัน: <b>{dup_status_msg}</b> ขอบคุณครับ 🙏",
                     parse_mode="HTML",
                 )
                 return
@@ -479,70 +514,221 @@ async def process_truemoney_submission(
                 full_name=telegram_user.full_name or telegram_user.first_name,
             )
 
+            slip_status = SlipStatus.APPROVED.value if auto_approved else SlipStatus.PENDING.value
             slip = PaymentSlip(
                 user_id=user.telegram_id,
                 file_id=angpao_url,
                 plan_type=plan_key,
                 payment_method="TRUEMONEY_ANGPAO",
-                status=SlipStatus.PENDING.value,
+                status=slip_status,
+                admin_id=None,
             )
             session.add(slip)
             await session.flush()
             slip_id = slip.id
 
+            if auto_approved:
+                # ระบบ Auto-Approve: ทำการ Grant Subscription ทันที
+                additional_days, additional_minutes = parse_plan_days(plan_key)
+                grant_type_value = GrantType.PROMOTION.value if plan_key == PlanType.PROMOTION.value else GrantType.PURCHASE.value
+
+                target_channel_id = get_user_target_channel_id(user)
+                target_channel_label = get_channel_label(target_channel_id)
+
+                # ตรวจสอบสถานะจริงใน Channel เป้าหมาย
+                try:
+                    chat_member = await bot.get_chat_member(chat_id=target_channel_id, user_id=telegram_user.id)
+                    is_in_channel = chat_member.status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+                except Exception:
+                    is_in_channel = False
+
+                grant = await grant_subscription(
+                    session,
+                    user_id=telegram_user.id,
+                    days=additional_days,
+                    minutes=additional_minutes,
+                    source_label=f"สมาชิก {plan_info['badge']}",
+                    grant_type=grant_type_value,
+                    has_value=True,
+                    is_in_channel=is_in_channel,
+                )
+                is_stack_extension = grant.is_stack_extension
+                new_expires_at = grant.new_expires_at
+
         # 2. ล้างสถานะ FSM
         await state.clear()
 
-    # 3. แจ้งผู้ใช้ (เฉพาะสมาชิก V.2)
-    if is_user_v2_member(user):
-        await message.answer(
-            f"✅ <b>ได้รับลิงก์ซองของขวัญ TrueMoney สำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"
-            f"🔗 <b>ลิงก์ที่ส่ง:</b> <code>{html.escape(angpao_url)}</code>\n\n"
-            "ระบบได้ส่งลิงก์ให้ทีมงานแอดมินเพื่อกดรับและตรวจสอบยอดเงินเรียบร้อยแล้วครับ\n"
-            "เมื่อได้รับการอนุมัติ คุณจะได้รับลิงก์เชิญเข้า Channel VIP ในแชทนี้ทันที\n\n"
-            "ขอบคุณที่ร่วมเป็นสมาชิก VIP ครับ!",
-            parse_mode="HTML",
-            disable_web_page_preview=True,
+    # 3. แจ้งผู้ใช้
+    is_v2 = is_user_v2_member(user)
+    plan_desc = format_plan_duration(plan_info)
+
+    if auto_approved:
+        # กรณีอนุมัติอัตโนมัติ (Auto-Approve) -> ส่งข้อความอนุมัติและลิงก์เข้าแชแนลให้ผู้ใช้ทันที
+        if is_v2:
+            if is_stack_extension and new_expires_at:
+                exp_thai = format_thai_datetime(new_expires_at)
+                time_rem = format_remaining_time(new_expires_at)
+                user_message = (
+                    "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว (อนุมัติอัตโนมัติ ⚡)!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📦 <b>แพ็กเกจที่ซื้อเพิ่ม:</b> {plan_info['badge']} (+{plan_desc})\n"
+                    "⏳ <b>ระบบได้ต่อเวลาสะสมให้คุณเรียบร้อยแล้ว!</b>\n"
+                    f"📅 <b>วันหมดอายุใหม่ของคุณ:</b> <code>{exp_thai} น.</code>\n"
+                    f"⏰ <b>เวลาคงเหลือรวม:</b> {time_rem}\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💡 <i>คุณสามารถรับชมเนื้อหาใน {target_channel_label} ได้ต่อเนื่องทันทีโดยไม่ต้องกดเข้าห้องใหม่ครับ! 🚀</i>"
+                )
+                try:
+                    await message.answer(user_message, parse_mode="HTML")
+                except Exception as e:
+                    logger.warning(f"Could not send auto-approve stacked DM to User {telegram_user.id}: {e}")
+
+            elif is_in_channel:
+                exp_thai = format_thai_datetime(new_expires_at) if new_expires_at else "-"
+                user_message = (
+                    "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว (อนุมัติอัตโนมัติ ⚡)!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📦 <b>แพ็กเกจ:</b> <b>{plan_info['badge']} ({plan_desc})</b> เปิดใช้งานให้ทันทีแล้วครับ\n"
+                    f"📅 <b>วันหมดอายุ:</b> <code>{exp_thai} น.</code>\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    f"💡 <i>คุณอยู่ใน {target_channel_label} อยู่แล้ว สามารถใช้งานต่อได้ทันทีโดยไม่ต้องกดลิงก์ใหม่ครับ! 🚀</i>"
+                )
+                try:
+                    await message.answer(user_message, parse_mode="HTML")
+                except Exception as e:
+                    logger.warning(f"Could not send auto-approve in-channel DM to User {telegram_user.id}: {e}")
+
+            else:
+                # ปลดแบนผู้ใช้ใน Channel ก่อนสร้างลิงก์เสมอ
+                await unban_user_in_channel(bot, target_channel_id, telegram_user.id)
+
+                # สร้างลิงก์เชิญแบบ 1 ครั้งให้ผู้ใช้
+                try:
+                    invite_link_obj = await bot.create_chat_invite_link(
+                        chat_id=target_channel_id,
+                        member_limit=1,
+                        expire_date=now + timedelta(days=7),
+                        name=f"VIP-{telegram_user.id}",
+                    )
+                    invite_url = invite_link_obj.invite_link
+                except Exception as e:
+                    logger.error(f"Failed to generate auto-approve invite link for user {telegram_user.id} in {target_channel_id}: {e}", exc_info=True)
+                    invite_url = None
+
+                if invite_url:
+                    user_message = (
+                        "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว (อนุมัติอัตโนมัติ ⚡)!</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📦 <b>แพ็กเกจ:</b> <b>{plan_info['badge']} ({plan_desc})</b> พร้อมใช้งานแล้วครับ\n\n"
+                        f"🔗 <b>ลิงก์เชิญเข้า {target_channel_label} (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
+                        "📌 <b>ข้อควรทราบ:</b>\n"
+                        "• ลิงก์นี้สามารถใช้งานได้เพียง 1 ครั้งเท่านั้น\n"
+                        f"• <b>ระยะเวลาสมาชิก {plan_desc} จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        "กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ! 🚀"
+                    )
+                    join_keyboard = InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_label} ตอนนี้", url=invite_url)]
+                        ]
+                    )
+                    try:
+                        await message.answer(
+                            user_message,
+                            reply_markup=join_keyboard,
+                            parse_mode="HTML",
+                            disable_web_page_preview=True,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Could not send auto-approve invite DM to User {telegram_user.id}: {e}")
+                else:
+                    await message.answer(
+                        f"✅ <b>ได้รับลิงก์ซองของขวัญ TrueMoney สำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"
+                        "ระบบกำลังดำเนินการออกลิงก์เชิญ หากยังไม่ได้รับลิงก์กรุณาติดต่อแอดมินครับ 🙏",
+                        parse_mode="HTML",
+                    )
+
+        await log_chat_message(
+            user_id=telegram_user.id,
+            sender_role="USER",
+            message_text=f"[ส่งลิงก์ซองของขวัญ TrueMoney #{slip_id} ({plan_info['badge']}) (อนุมัติอัตโนมัติ ⚡): {angpao_url}]"
         )
-    await log_chat_message(
-        user_id=telegram_user.id,
-        sender_role="USER",
-        message_text=f"[ส่งลิงก์ซองของขวัญ TrueMoney #{slip_id} ({plan_info['badge']}): {angpao_url}]"
-    )
+    else:
+        # กรณีไม่ได้เปิด Auto-Approve (รอแอดมินอนุมัติ)
+        if is_v2:
+            await message.answer(
+                f"✅ <b>ได้รับลิงก์ซองของขวัญ TrueMoney สำหรับ {plan_info['badge']} เรียบร้อยแล้ว!</b>\n\n"
+                f"🔗 <b>ลิงก์ที่ส่ง:</b> <code>{html.escape(angpao_url)}</code>\n\n"
+                "ระบบได้ส่งลิงก์ให้ทีมงานแอดมินเพื่อกดรับและตรวจสอบยอดเงินเรียบร้อยแล้วครับ\n"
+                "เมื่อได้รับการอนุมัติ คุณจะได้รับลิงก์เชิญเข้า Channel VIP ในแชทนี้ทันที\n\n"
+                "ขอบคุณที่ร่วมเป็นสมาชิก VIP ครับ!",
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        await log_chat_message(
+            user_id=telegram_user.id,
+            sender_role="USER",
+            message_text=f"[ส่งลิงก์ซองของขวัญ TrueMoney #{slip_id} ({plan_info['badge']}): {angpao_url}]"
+        )
 
     # 4. ส่งต่อไปยังกลุ่ม Admin
     user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
     full_name_safe = html.escape(telegram_user.full_name or telegram_user.first_name)
     submitted_time_thai = format_thai_datetime(slip.created_at)
 
-    admin_text = (
-        "🧧 <b>มีการชำระเงินใหม่ผ่าน ซองของขวัญ TrueMoney!</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n\n"
-        f"🆔 <b>รหัสรายการ:</b> <code>#{slip_id}</code>\n"
-        f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
-        f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
-        f"📦 <b>แพ็กเกจที่ขอ:</b> <b>{plan_info['badge']} ({plan_info['price']:,} บาท)</b>\n"
-        f"⏳ <b>ระยะเวลา:</b> {format_plan_duration(plan_info)}\n"
-        f"📅 <b>เวลาที่ส่ง:</b> <code>{submitted_time_thai} น.</code>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔗 <b>ลิงก์ซองของขวัญ (TrueMoney Angpao):</b>\n"
-        f"👉 <a href=\"{angpao_url}\">{html.escape(angpao_url)}</a>\n\n"
-        f"📋 <b>แตะเพื่อคัดลอกลิงก์:</b>\n"
-        f"<code>{angpao_url}</code>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"👉 <b>กรุณากดรับซองเพื่อตรวจสอบยอดเงิน ({plan_info['price']:,} บาท) แล้วกดอนุมัติด้านล่าง:</b>"
-    )
+    if auto_approved:
+        admin_text = (
+            "🧧 <b>มีการชำระเงินใหม่ผ่าน ซองของขวัญ TrueMoney!</b>\n"
+            "⚡ <b>[อนุมัติอัตโนมัติ / AUTO-APPROVED]</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n\n"
+            f"🆔 <b>รหัสรายการ:</b> <code>#{slip_id}</code>\n"
+            f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
+            f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
+            f"📦 <b>แพ็กเกจที่ขอ:</b> <b>{plan_info['badge']} ({plan_info['price']:,} บาท)</b>\n"
+            f"⏳ <b>ระยะเวลา:</b> {plan_desc}\n"
+            f"📅 <b>เวลาที่ส่ง:</b> <code>{submitted_time_thai} น.</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 <b>ลิงก์ซองของขวัญ (TrueMoney Angpao):</b>\n"
+            f"👉 <a href=\"{angpao_url}\">{html.escape(angpao_url)}</a>\n\n"
+            f"📋 <b>แตะเพื่อคัดลอกลิงก์:</b>\n"
+            f"<code>{angpao_url}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "⚡ <b>สถานะ:</b> บอทอนุมัติและส่งลิงก์เข้าแชแนลให้ผู้ใช้แล้ว ✅\n"
+            f"👉 <b>แอดมินกรุณากดรับซองเพื่อตรวจสอบยอดเงินย้อนหลัง ({plan_info['price']:,} บาท)</b>\n"
+            "<i>(หากตรวจสอบแล้วซองไม่ถูกต้อง สามารถกดปุ่มปฏิเสธด้านล่างเพื่อตัดสิทธิ์ได้ทันที)</i>"
+        )
+        admin_markup = get_admin_auto_approved_slip_keyboard(slip_id, telegram_user.id)
+    else:
+        admin_text = (
+            "🧧 <b>มีการชำระเงินใหม่ผ่าน ซองของขวัญ TrueMoney!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n\n"
+            f"🆔 <b>รหัสรายการ:</b> <code>#{slip_id}</code>\n"
+            f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
+            f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
+            f"📦 <b>แพ็กเกจที่ขอ:</b> <b>{plan_info['badge']} ({plan_info['price']:,} บาท)</b>\n"
+            f"⏳ <b>ระยะเวลา:</b> {plan_desc}\n"
+            f"📅 <b>เวลาที่ส่ง:</b> <code>{submitted_time_thai} น.</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔗 <b>ลิงก์ซองของขวัญ (TrueMoney Angpao):</b>\n"
+            f"👉 <a href=\"{angpao_url}\">{html.escape(angpao_url)}</a>\n\n"
+            f"📋 <b>แตะเพื่อคัดลอกลิงก์:</b>\n"
+            f"<code>{angpao_url}</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"👉 <b>กรุณากดรับซองเพื่อตรวจสอบยอดเงิน ({plan_info['price']:,} บาท) แล้วกดอนุมัติด้านล่าง:</b>"
+        )
+        admin_markup = get_admin_slip_keyboard(slip_id, telegram_user.id)
 
     try:
         await bot.send_message(
             chat_id=config.ADMIN_GROUP_ID,
             text=admin_text,
-            reply_markup=get_admin_slip_keyboard(slip_id, telegram_user.id),
+            reply_markup=admin_markup,
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
-        logger.info(f"TrueMoney Angpao #{slip_id} from user {telegram_user.id} forwarded to Admin Group {config.ADMIN_GROUP_ID}")
+        logger.info(f"TrueMoney Angpao #{slip_id} (auto_approved={auto_approved}) from user {telegram_user.id} forwarded to Admin Group {config.ADMIN_GROUP_ID}")
     except Exception as e:
         logger.error(
             f"Failed to forward TrueMoney Angpao #{slip_id} to Admin Group {config.ADMIN_GROUP_ID}: {e}",
