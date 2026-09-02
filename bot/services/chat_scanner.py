@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 config = get_settings()
 
 
-async def scan_and_sync_user_messages(bot: Bot, user_id: int, max_scan: int = 30) -> int:
+async def scan_and_sync_user_messages(bot: Bot, user_id: int, max_scan: int = 200) -> int:
     """
     สแกนดึงข้อความสดจาก Telegram Cloud ย้อนหลังแบบ Stealth 100%
     (ไม่มีการส่งข้อความหา User ใดๆ ทั้งสิ้น User จะไม่รู้ตัว ไม่มีการแจ้งเตือน)
@@ -40,7 +40,7 @@ async def scan_and_sync_user_messages(bot: Bot, user_id: int, max_scan: int = 30
     # 2. ดึงข้อความเดิมที่มีใน Database เพื่อใช้ตรวจสอบความซ้ำซ้อน
     existing_texts = set()
     async with get_session() as session:
-        stmt = select(ChatMessage.message_text).where(ChatMessage.user_id == user_id).order_by(ChatMessage.id.desc()).limit(50)
+        stmt = select(ChatMessage.message_text).where(ChatMessage.user_id == user_id).order_by(ChatMessage.id.desc()).limit(500)
         existing_texts = set((await session.execute(stmt)).scalars().all())
 
     # 3. กำหนดช่วง Message ID ที่จะสแกนย้อนหลัง
@@ -50,8 +50,8 @@ async def scan_and_sync_user_messages(bot: Bot, user_id: int, max_scan: int = 30
 
     discovered_messages: List[Dict[str, Any]] = []
 
-    # 4. สแกนทีละ Batch (Batch ละ 5 ข้อความ เพื่อความเร็วและป้องกัน Rate Limit)
-    batch_size = 5
+    # 4. สแกนทีละ Batch (Batch ละ 10 ข้อความ เพื่อความเร็วและป้องกัน Rate Limit)
+    batch_size = 10
     for i in range(0, len(ids_to_scan), batch_size):
         chunk = ids_to_scan[i : i + batch_size]
         tasks = [_probe_single_message(bot, user_id, mid, bot_id) for mid in chunk]

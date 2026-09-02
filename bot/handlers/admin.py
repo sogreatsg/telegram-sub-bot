@@ -2938,9 +2938,192 @@ async def handle_admin_swipe_reply(message: Message, bot: Bot):
         await message.reply(f"❌ <b>ส่งข้อความไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>\n(ผู้ใช้อาจบล็อกบอทหรือยังไม่เคยกด /start)", parse_mode="HTML")
 
 
+CHAT_PAGE_SIZE = 15
+
+
+async def build_chat_history_view(user_id: int, page: Optional[int] = None) -> tuple[str, Optional[InlineKeyboardMarkup]]:
+    """
+    สร้างข้อความและปุ่มแบ่งหน้า (Pagination) สำหรับดูประวัติการสนทนาของ User
+    - ถ้า page is None: จะเลือกหน้าสุดท้าย (หน้าที่มีข้อความล่าสุด) โดยอัตโนมัติ
+    - รองรับปุ่มเลื่อนหน้า: [⏮️ แรกสุด], [◀️ เก่ากว่า], [📄 หน้า X/Y], [ใหม่กว่า ▶️], [⏭️ ล่าสุด]
+    """
+    async with get_session() as session:
+        user = (await session.execute(select(User).where(User.telegram_id == user_id))).scalar_one_or_none()
+        if not user:
+            return f"❌ ไม่พบข้อมูลผู้ใช้ <code>{user_id}</code> ในระบบ", None
+
+        is_v2 = is_user_v2_member(user)
+        room_label = "🟢 BareLive V.2 (ห้องใหม่)" if is_v2 else "🔵 BareLive V.1 (ห้องเดิม)"
+
+        # ดึงข้อความทั้งหมดของ user เรียงตามเวลาจากเก่าไปใหม่
+        chat_stmt = (
+            select(ChatMessage)
+            .where(ChatMessage.user_id == user_id)
+            .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        )
+        all_messages = (await session.execute(chat_stmt)).scalars().all()
+
+    user_name = html.escape(user.full_name or f"User {user_id}")
+    user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
+    total_messages = len(all_messages)
+
+    if total_messages == 0:
+        empty_lines = [
+            f"💬 <b>ประวัติการสนทนาของ:</b> {user_name} ({user_handle})",
+            f"🔢 <b>User ID:</b> <code>{user_id}</code>",
+            f"📌 <b>ห้องสมาชิก:</b> <code>{room_label}</code>",
+            "━━━━━━━━━━━━━━━━━━━━\n",
+            "📭 <i>ยังไม่มีประวัติการส่งข้อความบันทึกไว้ในระบบ</i>\n",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"📋 <b>แตะเพื่อคัดลอกคำสั่งตอบกลับ:</b>\n<code>/reply {user_id} </code>",
+        ]
+        empty_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🔄 สแกนสดจาก Cloud อีกครั้ง", callback_data=f"admin:rescan_chat:{user_id}"),
+                    InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{user_id}"),
+                ]
+            ]
+        )
+        return "\n".join(empty_lines), empty_kb
+
+    total_pages = max(1, (total_messages + CHAT_PAGE_SIZE - 1) // CHAT_PAGE_SIZE)
+    if page is None or page > total_pages:
+        current_page = total_pages  # หน้าล่าสุด
+    elif page < 1:
+        current_page = 1
+    else:
+        current_page = page
+
+    # เลือกช่วงข้อความสำหรับหน้านี้
+    start_idx = (current_page - 1) * CHAT_PAGE_SIZE
+    page_messages = all_messages[start_idx : start_idx + CHAT_PAGE_SIZE]
+
+    lines = [
+        f"💬 <b>ประวัติการสนทนาของ:</b> {user_name} ({user_handle})",
+        f"🔢 <b>User ID:</b> <code>{user_id}</code>",
+        f"📌 <b>ห้องสมาชิก:</b> <code>{room_label}</code>",
+        f"📊 <b>ข้อความทั้งหมด:</b> {total_messages} ข้อความ (📄 <b>หน้า {current_page}/{total_pages}</b>)",
+        "━━━━━━━━━━━━━━━━━━━━\n",
+    ]
+
+    for msg in page_messages:
+        t_str = format_thai_datetime(msg.created_at)
+        role_icon = "👤" if msg.sender_role == "USER" else ("🤖" if msg.sender_role == "BOT" else "👑")
+        role_label = "ผู้ใช้" if msg.sender_role == "USER" else ("บอท" if msg.sender_role == "BOT" else "แอดมิน")
+        time_display = t_str[:16] if len(t_str) >= 16 else t_str
+        safe_content = html.escape(msg.message_text)
+        lines.append(f"[{time_display} น.] {role_icon} <b>{role_label}:</b> {safe_content}")
+
+    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"📋 <b>แตะเพื่อคัดลอกคำสั่งตอบกลับ:</b>\n<code>/reply {user_id} </code>")
+
+    # สร้างปุ่ม Pagination
+    nav_buttons = []
+    if total_pages > 1:
+        # ปุ่มย้อนไปหน้าเก่ากว่า
+        if current_page > 1:
+            if current_page > 2:
+                nav_buttons.append(InlineKeyboardButton(text="⏮️ แรกสุด", callback_data=f"admin:chat_page:{user_id}:1"))
+            nav_buttons.append(InlineKeyboardButton(text=f"◀️ เก่ากว่า ({current_page - 1})", callback_data=f"admin:chat_page:{user_id}:{current_page - 1}"))
+
+        # แสดงหน้าปัจจุบัน
+        nav_buttons.append(InlineKeyboardButton(text=f"📄 {current_page}/{total_pages}", callback_data="admin:noop"))
+
+        # ปุ่มไปหน้าใหม่กว่า
+        if current_page < total_pages:
+            nav_buttons.append(InlineKeyboardButton(text=f"ใหม่กว่า ({current_page + 1}) ▶️", callback_data=f"admin:chat_page:{user_id}:{current_page + 1}"))
+            if current_page < total_pages - 1:
+                nav_buttons.append(InlineKeyboardButton(text="⏭️ ล่าสุด", callback_data=f"admin:chat_page:{user_id}:{total_pages}"))
+
+    keyboard_rows = []
+    if nav_buttons:
+        keyboard_rows.append(nav_buttons)
+
+    keyboard_rows.append([
+        InlineKeyboardButton(text="🔄 สแกนสดจาก Cloud อีกครั้ง", callback_data=f"admin:rescan_chat:{user_id}"),
+        InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{user_id}"),
+    ])
+
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+
 @router.callback_query(F.data.startswith("admin:view_chat:"))
 async def handle_admin_view_chat_callback(callback: CallbackQuery, bot: Bot):
-    """Callback เมื่อแอดมินกดปุ่ม [📜 ดูประวัติการคุย] — สแกนสดจาก Telegram Cloud พร้อมแสดงประวัติ"""
+    """Callback เมื่อแอดมินกดปุ่ม [📜 ดูประวัติการคุย] — สแกนสดจาก Telegram Cloud พร้อมแสดงประวัติแบบแบ่งหน้า"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) < 3 or not parts[2].isdigit():
+        await callback.answer("❌ User ID ไม่ถูกต้อง")
+        return
+
+    user_id = int(parts[2])
+    page = int(parts[3]) if len(parts) >= 4 and parts[3].isdigit() else None
+
+    await callback.answer("🔍 กำลังสแกนดึงประวัติแชทสดจาก Cloud Telegram...")
+
+    # ส่งข้อความสถานะกำลังสแกนข้อมูล
+    status_msg = None
+    try:
+        status_msg = await callback.message.answer(
+            f"⏳ <b>กำลังสแกนดึงประวัติการสนทนาของ User <code>{user_id}</code> จาก Cloud Telegram...</b>\n"
+            "<i>(ระบบกำลังตรวจสอบข้อความย้อนหลังทั้งหมด กรุณารอสักครู่ 1-2 วินาที)</i>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    # 1. สแกนและซิงค์ข้อความสดจาก Telegram Cloud ย้อนหลังทั้งหมด
+    try:
+        await scan_and_sync_user_messages(bot=bot, user_id=user_id, max_scan=200)
+    except Exception as e:
+        logger.warning(f"Error during scan_and_sync_user_messages for {user_id}: {e}")
+
+    # 2. สร้างหน้าประวัติการสนทนาพร้อมปุ่มแบ่งหน้า
+    text, markup = await build_chat_history_view(user_id=user_id, page=page)
+
+    if status_msg:
+        try:
+            await status_msg.edit_text(text=text, reply_markup=markup, parse_mode="HTML")
+        except Exception:
+            await callback.message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+    else:
+        await callback.message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("admin:chat_page:"))
+async def handle_admin_chat_page_callback(callback: CallbackQuery):
+    """จัดการการเปลี่ยนหน้าประวัติการสนทนา (Pagination) แบบ Instant"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) < 4 or not parts[2].isdigit() or not parts[3].isdigit():
+        await callback.answer()
+        return
+
+    user_id = int(parts[2])
+    page = int(parts[3])
+
+    text, markup = await build_chat_history_view(user_id=user_id, page=page)
+    try:
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:rescan_chat:"))
+async def handle_admin_rescan_chat_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เมื่อแอดมินกดปุ่ม [🔄 สแกนสดจาก Cloud อีกครั้ง]"""
     if not callback.from_user or not callback.message:
         return
     if callback.message.chat.id != config.ADMIN_GROUP_ID:
@@ -2953,80 +3136,19 @@ async def handle_admin_view_chat_callback(callback: CallbackQuery, bot: Bot):
         return
 
     user_id = int(uid_str)
-    await callback.answer("🔍 กำลังสแกนดึงประวัติแชทสดจาก Cloud Telegram...")
+    await callback.answer("🔄 กำลังสแกน Cloud ใหม่อีกครั้ง...")
 
-    # ส่งข้อความสถานะกำลังสแกนข้อมูล
-    status_msg = None
     try:
-        status_msg = await callback.message.answer(
-            f"⏳ <b>กำลังสแกนดึงประวัติการสนทนาของ User <code>{user_id}</code> จาก Cloud Telegram...</b>\n"
-            "<i>(ระบบกำลังตรวจสอบข้อความย้อนหลังล่าสุด กรุณารอสักครู่ 1-2 วินาที)</i>",
-            parse_mode="HTML",
-        )
+        await scan_and_sync_user_messages(bot=bot, user_id=user_id, max_scan=200)
+    except Exception as e:
+        logger.warning(f"Error during rescan for {user_id}: {e}")
+
+    text, markup = await build_chat_history_view(user_id=user_id, page=None)
+    try:
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode="HTML")
     except Exception:
         pass
-
-    # 1. สแกนและซิงค์ข้อความสดจาก Telegram Cloud ย้อนหลัง
-    try:
-        await scan_and_sync_user_messages(bot=bot, user_id=user_id, max_scan=35)
-    except Exception as e:
-        logger.warning(f"Error during scan_and_sync_user_messages for {user_id}: {e}")
-
-    # 2. ดึงข้อมูลผู้ใช้และประวัติข้อความล่าสุดจากฐานข้อมูล
-    async with get_session() as session:
-        user = (await session.execute(select(User).where(User.telegram_id == user_id))).scalar_one_or_none()
-        if not user:
-            err_text = f"❌ ไม่พบข้อมูลผู้ใช้ <code>{user_id}</code> ในระบบ"
-            if status_msg:
-                await status_msg.edit_text(err_text, parse_mode="HTML")
-            else:
-                await callback.message.answer(err_text, parse_mode="HTML")
-            return
-
-        is_v2 = is_user_v2_member(user)
-        room_label = "🟢 BareLive V.2 (ห้องใหม่)" if is_v2 else "🔵 BareLive V.1 (ห้องเดิม)"
-
-        chat_stmt = (
-            select(ChatMessage)
-            .where(ChatMessage.user_id == user_id)
-            .order_by(ChatMessage.id.desc())
-            .limit(20)
-        )
-        messages = (await session.execute(chat_stmt)).scalars().all()
-
-    user_name = html.escape(user.full_name or f"User {user_id}")
-    user_handle = f"@{user.username}" if user.username else "ไม่มี Username"
-
-    lines = [
-        f"💬 <b>ประวัติการสนทนาของ:</b> {user_name} ({user_handle})",
-        f"🔢 <b>User ID:</b> <code>{user_id}</code>",
-        f"📌 <b>ห้องสมาชิก:</b> <code>{room_label}</code>",
-        f"📊 <b>แสดง:</b> {len(messages)} ข้อความล่าสุด <i>(⚡ ซิงค์สดจาก Cloud Telegram เรียบร้อย)</i>",
-        "━━━━━━━━━━━━━━━━━━━━\n",
-    ]
-
-    if not messages:
-        lines.append("📭 <i>ยังไม่มีประวัติการส่งข้อความบันทึกไว้ในระบบ</i>")
-    else:
-        for msg in reversed(messages):
-            t_str = format_thai_datetime(msg.created_at)
-            role_icon = "👤" if msg.sender_role == "USER" else ("🤖" if msg.sender_role == "BOT" else "👑")
-            role_label = "ผู้ใช้" if msg.sender_role == "USER" else ("บอท" if msg.sender_role == "BOT" else "แอดมิน")
-            time_display = t_str[:16] if len(t_str) >= 16 else t_str
-            safe_content = html.escape(msg.message_text)
-            lines.append(f"[{time_display} น.] {role_icon} <b>{role_label}:</b> {safe_content}")
-
-    lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"📋 <b>แตะเพื่อคัดลอกคำสั่งตอบกลับ:</b>\n<code>/reply {user_id} </code>")
-
-    final_text = "\n".join(lines)
-    if status_msg:
-        try:
-            await status_msg.edit_text(text=final_text, parse_mode="HTML")
-        except Exception:
-            await callback.message.answer(text=final_text, parse_mode="HTML")
-    else:
-        await callback.message.answer(text=final_text, parse_mode="HTML")
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("admin:resolve_chat:"))
