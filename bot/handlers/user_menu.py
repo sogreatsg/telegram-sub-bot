@@ -747,7 +747,15 @@ async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
     # 1. บันทึกข้อความของผู้ใช้ลงในฐานข้อมูล
     await log_chat_message(user_id=user_id, sender_role="USER", message_text=msg_text)
 
-    # 2. ส่งต่อข้อความไปยังกลุ่ม Admin Group แบบ Real-time
+    # 2. ตรวจสอบสถานะห้องของผู้ใช้
+    is_v2 = False
+    async with get_session() as session:
+        db_user = await session.get(User, user_id)
+        is_v2 = is_user_v2_member(db_user)
+
+    room_label = "🟢 BareLive V.2 (ห้องใหม่)" if is_v2 else "🔵 BareLive V.1 (ห้องเดิม)"
+
+    # 3. ส่งต่อข้อความไปยังกลุ่ม Admin Group แบบ Real-time
     user_name = html.escape(telegram_user.full_name or telegram_user.first_name)
     user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
     time_now = format_thai_datetime(datetime.now(timezone.utc))
@@ -767,6 +775,7 @@ async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
         f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n"
         f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+        f"📌 <b>ห้องสมาชิก:</b> <code>{room_label}</code>\n"
         f"📝 <b>ข้อความ:</b>\n<i>{html.escape(msg_text)}</i>\n"
         f"📅 <b>เวลา:</b> <code>{time_now} น.</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"

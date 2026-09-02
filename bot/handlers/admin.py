@@ -20,6 +20,7 @@ from bot.services.scheduler import build_active_members_report, sync_pending_mem
 from bot.services.subscription import grant_subscription, subscription_status_label, parse_plan_days
 from bot.services.reconciliation import reconcile_user, reconcile_all_users, format_reconcile_formula
 from bot.services.chat_logger import log_chat_message
+from bot.services.chat_scanner import scan_and_sync_user_messages
 from bot.services.referral import is_referral_active, update_referral_settings
 from bot.services.trial import is_trial_active, update_trial_settings
 from bot.services.notification_settings import (
@@ -2940,8 +2941,8 @@ async def handle_admin_swipe_reply(message: Message, bot: Bot):
 
 
 @router.callback_query(F.data.startswith("admin:view_chat:"))
-async def handle_admin_view_chat_callback(callback: CallbackQuery):
-    """Callback เมื่อแอดมินกดปุ่ม [📜 ดูประวัติการคุย]"""
+async def handle_admin_view_chat_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เมื่อแอดมินกดปุ่ม [📜 ดูประวัติการคุย] — สแกนสดจาก Telegram Cloud พร้อมแสดงประวัติ"""
     if not callback.from_user or not callback.message:
         return
     if callback.message.chat.id != config.ADMIN_GROUP_ID:
@@ -2954,17 +2955,44 @@ async def handle_admin_view_chat_callback(callback: CallbackQuery):
         return
 
     user_id = int(uid_str)
+    await callback.answer("🔍 กำลังสแกนดึงประวัติแชทสดจาก Cloud Telegram...")
+
+    # ส่งข้อความสถานะกำลังสแกนข้อมูล
+    status_msg = None
+    try:
+        status_msg = await callback.message.answer(
+            f"⏳ <b>กำลังสแกนดึงประวัติการสนทนาของ User <code>{user_id}</code> จาก Cloud Telegram...</b>\n"
+            "<i>(ระบบกำลังตรวจสอบข้อความย้อนหลังล่าสุด กรุณารอสักครู่ 1-2 วินาที)</i>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    # 1. สแกนและซิงค์ข้อความสดจาก Telegram Cloud ย้อนหลัง
+    try:
+        await scan_and_sync_user_messages(bot=bot, user_id=user_id, max_scan=35)
+    except Exception as e:
+        logger.warning(f"Error during scan_and_sync_user_messages for {user_id}: {e}")
+
+    # 2. ดึงข้อมูลผู้ใช้และประวัติข้อความล่าสุดจากฐานข้อมูล
     async with get_session() as session:
         user = (await session.execute(select(User).where(User.telegram_id == user_id))).scalar_one_or_none()
         if not user:
-            await callback.answer("❌ ไม่พบข้อมูลผู้ใช้นี้ในระบบ", show_alert=True)
+            err_text = f"❌ ไม่พบข้อมูลผู้ใช้ <code>{user_id}</code> ในระบบ"
+            if status_msg:
+                await status_msg.edit_text(err_text, parse_mode="HTML")
+            else:
+                await callback.message.answer(err_text, parse_mode="HTML")
             return
+
+        is_v2 = is_user_v2_member(user)
+        room_label = "🟢 BareLive V.2 (ห้องใหม่)" if is_v2 else "🔵 BareLive V.1 (ห้องเดิม)"
 
         chat_stmt = (
             select(ChatMessage)
             .where(ChatMessage.user_id == user_id)
             .order_by(ChatMessage.id.desc())
-            .limit(15)
+            .limit(20)
         )
         messages = (await session.execute(chat_stmt)).scalars().all()
 
@@ -2974,12 +3002,13 @@ async def handle_admin_view_chat_callback(callback: CallbackQuery):
     lines = [
         f"💬 <b>ประวัติการสนทนาของ:</b> {user_name} ({user_handle})",
         f"🔢 <b>User ID:</b> <code>{user_id}</code>",
-        f"📊 <b>แสดง:</b> {len(messages)} ข้อความล่าสุด",
+        f"📌 <b>ห้องสมาชิก:</b> <code>{room_label}</code>",
+        f"📊 <b>แสดง:</b> {len(messages)} ข้อความล่าสุด <i>(⚡ ซิงค์สดจาก Cloud Telegram เรียบร้อย)</i>",
         "━━━━━━━━━━━━━━━━━━━━\n",
     ]
 
     if not messages:
-        lines.append("📭 <i>ยังไม่มีประวัติการส่งข้อความใหม่ที่บันทึกไว้ในระบบ</i>")
+        lines.append("📭 <i>ยังไม่มีประวัติการส่งข้อความบันทึกไว้ในระบบ</i>")
     else:
         for msg in reversed(messages):
             t_str = format_thai_datetime(msg.created_at)
@@ -2992,8 +3021,14 @@ async def handle_admin_view_chat_callback(callback: CallbackQuery):
     lines.append("\n━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"📋 <b>แตะเพื่อคัดลอกคำสั่งตอบกลับ:</b>\n<code>/reply {user_id} </code>")
 
-    await callback.message.answer(text="\n".join(lines), parse_mode="HTML")
-    await callback.answer()
+    final_text = "\n".join(lines)
+    if status_msg:
+        try:
+            await status_msg.edit_text(text=final_text, parse_mode="HTML")
+        except Exception:
+            await callback.message.answer(text=final_text, parse_mode="HTML")
+    else:
+        await callback.message.answer(text=final_text, parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("admin:resolve_chat:"))

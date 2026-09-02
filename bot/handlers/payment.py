@@ -1081,12 +1081,15 @@ async def handle_general_user_media(message: Message, bot: Bot):
         ]
     )
 
+    room_label = "🟢 BareLive V.2 (ห้องใหม่)" if is_v2 else "🔵 BareLive V.1 (ห้องเดิม)"
+
     admin_alert = (
         f"📷 <b>มีผู้ใช้ส่ง{media_type} (Direct Message)!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n"
         f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
         f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+        f"📌 <b>ห้องสมาชิก:</b> <code>{room_label}</code>\n"
     )
     if caption:
         admin_alert += f"📝 <b>คำบรรยาย:</b> <i>{html.escape(caption)}</i>\n"

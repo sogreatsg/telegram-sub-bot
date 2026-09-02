@@ -75,9 +75,9 @@ class V2MemberOnlyCallbackMiddleware(BaseMiddleware):
 class V2MemberOnlyMessageMiddleware(BaseMiddleware):
     """
     Middleware สำหรับกรอง Message ทั้งหมดจากฝั่ง User ในแชทส่วนตัว (Private DM):
-    - สมาชิกที่ถูกบล็อก (is_blocked=True) -> ระงับการตอบกลับ 100% (เงียบสนิท ไม่แจ้งเตือนฝั่ง User)
-    - สมาชิกห้อง V.2 และ Admin -> สามารถส่งข้อความและพิมพ์คำสั่งได้ตามปกติ
-    - สมาชิกห้อง V.1 และผู้ใช้สมัครใหม่ -> ระงับการตอบกลับ 100% (บอทเงียบสนิท ไม่ตอบใดๆ)
+    - สมาชิกที่ถูกบล็อก (is_blocked=True) -> ระงับการตอบกลับ 100% (เงียบสนิท ไม่แจ้งเตือน ไม่ส่งต่อ)
+    - ผู้ใช้ทั่วไป (ทั้ง V.1, V.2 และผู้ใช้ใหม่) -> ส่งต่อไปยัง Handlers เพื่อบันทึกข้อความและแจ้งเตือนแอดมิน
+      (โดย Handler แต่ละส่วนจะคุมการตอบกลับตามเงื่อนไข V.2 เอง)
     """
 
     async def __call__(
@@ -111,10 +111,5 @@ class V2MemberOnlyMessageMiddleware(BaseMiddleware):
                 # ไม่ส่งต่อไปยัง handler ใดๆ ทั้งสิ้น (บอทเงียบสนิท ไม่ตอบกลับ ไม่ส่งต่อ)
                 return
 
-            if is_user_v2_member(db_user):
-                return await handler(event, data)
-
-        # หากไม่ใช่สมาชิก V.2 (อยู่ V.1 หรือสมัครใหม่)
-        logger.info(f"[V2_FILTER] Blocked message '{event.text or event.caption or 'media'}' from non-V2 user {user.id} (@{user.username})")
-        # ไม่ส่งต่อไปยัง handler ใดๆ ทั้งสิ้น (บอทเงียบสนิท)
-        return
+        # ปล่อยให้ข้อความเข้าสู่ Handler เพื่อบันทึกข้อความและส่งแจ้งเตือนเข้า Admin Group
+        return await handler(event, data)
