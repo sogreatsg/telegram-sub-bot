@@ -2811,11 +2811,9 @@ async def handle_admin_chat_history_command(message: Message):
             t_str = format_thai_datetime(msg.created_at)
             role_icon = "👤" if msg.sender_role == "USER" else ("🤖" if msg.sender_role == "BOT" else "👑")
             role_label = "ผู้ใช้" if msg.sender_role == "USER" else ("บอท" if msg.sender_role == "BOT" else "แอดมิน")
-            
-            # Short time for cleaner view
-            time_short = t_str[11:16] if len(t_str) >= 16 else t_str
+            time_display = t_str[:16] if len(t_str) >= 16 else t_str
             safe_content = html.escape(msg.message_text)
-            lines.append(f"[{time_short} น.] {role_icon} <b>{role_label}:</b> {safe_content}")
+            lines.append(f"[{time_display} น.] {role_icon} <b>{role_label}:</b> {safe_content}")
 
     lines.append("\n━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"💡 <i>พิมพ์ <code>/reply {user.telegram_id} [ข้อความ]</code> เพื่อตอบกลับผู้ใช้</i>")
@@ -3014,9 +3012,9 @@ async def handle_admin_view_chat_callback(callback: CallbackQuery, bot: Bot):
             t_str = format_thai_datetime(msg.created_at)
             role_icon = "👤" if msg.sender_role == "USER" else ("🤖" if msg.sender_role == "BOT" else "👑")
             role_label = "ผู้ใช้" if msg.sender_role == "USER" else ("บอท" if msg.sender_role == "BOT" else "แอดมิน")
-            time_short = t_str[11:16] if len(t_str) >= 16 else t_str
+            time_display = t_str[:16] if len(t_str) >= 16 else t_str
             safe_content = html.escape(msg.message_text)
-            lines.append(f"[{time_short} น.] {role_icon} <b>{role_label}:</b> {safe_content}")
+            lines.append(f"[{time_display} น.] {role_icon} <b>{role_label}:</b> {safe_content}")
 
     lines.append("\n━━━━━━━━━━━━━━━━━━━━")
     lines.append(f"📋 <b>แตะเพื่อคัดลอกคำสั่งตอบกลับ:</b>\n<code>/reply {user_id} </code>")
