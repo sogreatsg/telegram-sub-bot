@@ -169,6 +169,23 @@ async def main() -> None:
             except Exception as e:
                 logger.warning(f"Could not verify Bot status in Secondary Channel {config.SECONDARY_CHANNEL_ID}: {e}")
 
+        if config.TERTIARY_CHANNEL_ID:
+            logger.info(f"Tertiary/V3 Target Channel ID: {config.TERTIARY_CHANNEL_ID}")
+            try:
+                ter_chat = await bot.get_chat(chat_id=config.TERTIARY_CHANNEL_ID)
+                if ter_chat and ter_chat.title:
+                    set_channel_title(config.TERTIARY_CHANNEL_ID, ter_chat.title)
+                    logger.info(f"Tertiary/V3 Channel Title: '{ter_chat.title}' ({config.TERTIARY_CHANNEL_ID})")
+
+                ter_chat_member = await bot.get_chat_member(chat_id=config.TERTIARY_CHANNEL_ID, user_id=bot_user.id)
+                logger.info(f"Bot status in Tertiary Channel {config.TERTIARY_CHANNEL_ID}: {ter_chat_member.status}")
+                if ter_chat_member.status not in ("administrator", "creator"):
+                    logger.warning(
+                        f"⚠️ [WARNING] Bot @{bot_user.username} is NOT an Administrator in Tertiary Channel {config.TERTIARY_CHANNEL_ID}!"
+                    )
+            except Exception as e:
+                logger.warning(f"Could not verify Bot status in Tertiary Channel {config.TERTIARY_CHANNEL_ID}: {e}")
+
         # Delete any pending webhook if previously configured
         await bot.delete_webhook(drop_pending_updates=False)
 

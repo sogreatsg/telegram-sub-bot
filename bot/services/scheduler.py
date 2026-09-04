@@ -28,6 +28,7 @@ from bot.services.channel_service import (
     get_user_target_channel_id,
     get_channel_label,
     is_secondary_channel,
+    is_tertiary_channel,
 )
 
 logger = logging.getLogger(__name__)
@@ -123,7 +124,10 @@ async def sync_pending_members(bot: Bot) -> dict:
                 if is_mem:
                     in_channel = True
                     joined_channel_id = cid
-                    if is_secondary_channel(cid) and user_obj:
+                    if is_tertiary_channel(cid) and user_obj:
+                        user_obj.assigned_channel = "TERTIARY"
+                        session.add(user_obj)
+                    elif is_secondary_channel(cid) and user_obj:
                         user_obj.is_moved_to_secondary = True
                         user_obj.assigned_channel = "SECONDARY"
                         session.add(user_obj)
@@ -233,8 +237,14 @@ async def sync_pending_members(bot: Bot) -> dict:
             # ส่งแจ้งเตือนเข้ากลุ่ม Admin
             user_handle = f"@{user_obj.username}" if (user_obj and user_obj.username) else "ไม่มี Username"
             full_name_safe = html.escape((user_obj.full_name if user_obj else "") or f"User {user_id}")
+            is_ter = is_tertiary_channel(joined_channel_id or config.CHANNEL_ID)
             is_sec = is_secondary_channel(joined_channel_id or config.CHANNEL_ID)
-            header_title = "🌟 <b>[Target Channel] มีสมาชิกกดเข้าร่วม Channel ใหม่แล้ว!</b>" if is_sec else "🚪 <b>มีสมาชิกกดเข้าร่วม Channel แล้ว!</b>"
+            if is_ter:
+                header_title = "🌟 <b>[Target Channel V.3] มีสมาชิกกดเข้าร่วม Channel V.3 แล้ว!</b>"
+            elif is_sec:
+                header_title = "🌟 <b>[Target Channel V.2] มีสมาชิกกดเข้าร่วม Channel ใหม่แล้ว!</b>"
+            else:
+                header_title = "🚪 <b>มีสมาชิกกดเข้าร่วม Channel แล้ว!</b>"
 
             admin_log_msg = (
                 f"{header_title}\n\n"
@@ -547,6 +557,7 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
     # 1. ดึงจำนวนสมาชิกจริงจาก Telegram Channel (ไม่นับ Admin และ Bot)
     channel_member_count = None
     sec_channel_member_count = None
+    ter_channel_member_count = None
     if bot:
         try:
             total_count = await bot.get_chat_member_count(chat_id=config.CHANNEL_ID)
@@ -562,6 +573,14 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 sec_channel_member_count = sec_total - len(sec_admins)
             except Exception as e:
                 logger.warning(f"Could not fetch chat member count for secondary channel {config.SECONDARY_CHANNEL_ID}: {e}")
+
+        if config.TERTIARY_CHANNEL_ID:
+            try:
+                ter_total = await bot.get_chat_member_count(chat_id=config.TERTIARY_CHANNEL_ID)
+                ter_admins = await bot.get_chat_administrators(chat_id=config.TERTIARY_CHANNEL_ID)
+                ter_channel_member_count = ter_total - len(ter_admins)
+            except Exception as e:
+                logger.warning(f"Could not fetch chat member count for tertiary channel {config.TERTIARY_CHANNEL_ID}: {e}")
 
     async with get_session() as session:
         # 2. ดึง Subscription ที่ ACTIVE อยู่ทั้งหมด พร้อมข้อมูล User (1 แถวต่อ user อยู่แล้ว)
@@ -594,13 +613,14 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
         )
         pending_subs = (await session.execute(stmt_pending)).scalars().all()
 
-        # ตรวจสอบสถานะว่าอยู่ในห้อง Channel ใดจริงหรือไม่ (รองรับการอยู่ทั้ง 2 ห้องพร้อมกัน แบบ Concurrency)
+        # ตรวจสอบสถานะว่าอยู่ในห้อง Channel ใดจริงหรือไม่ (รองรับการอยู่หลายห้องพร้อมกัน แบบ Concurrency)
         in_channel_active_subs = []
         left_channel_active_subs = []
         user_channels_map = {}
-        both_channels_count = 0
+        multi_channels_count = 0
         primary_only_count = 0
         secondary_only_count = 0
+        tertiary_only_count = 0
 
         if bot and unique_active_subs:
             sem = asyncio.Semaphore(10)
@@ -623,7 +643,9 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
                 if len(in_cids) > 0:
                     in_channel_active_subs.append(sub)
                     if len(in_cids) >= 2:
-                        both_channels_count += 1
+                        multi_channels_count += 1
+                    elif is_tertiary_channel(in_cids[0]):
+                        tertiary_only_count += 1
                     elif is_secondary_channel(in_cids[0]):
                         secondary_only_count += 1
                     else:
@@ -649,14 +671,25 @@ async def build_active_members_report(bot: Optional[Bot] = None) -> str:
 
         channel_name = get_channel_label(config.CHANNEL_ID)
         sec_channel_name = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
+        ter_channel_name = get_channel_label(config.TERTIARY_CHANNEL_ID) if config.TERTIARY_CHANNEL_ID else "BareLive V.3"
 
         if channel_member_count is not None:
             report += f"📱 <b>จำนวนสมาชิกใน {channel_name} (<code>{config.CHANNEL_ID}</code>):</b> <b>{channel_member_count} คน</b>\n"
         if sec_channel_member_count is not None:
             report += f"🌟 <b>จำนวนสมาชิกใน {sec_channel_name} (<code>{config.SECONDARY_CHANNEL_ID}</code>):</b> <b>{sec_channel_member_count} คน</b>\n"
+        if ter_channel_member_count is not None:
+            report += f"🚀 <b>จำนวนสมาชิกใน {ter_channel_name} (<code>{config.TERTIARY_CHANNEL_ID}</code>):</b> <b>{ter_channel_member_count} คน</b>\n"
 
-        if config.SECONDARY_CHANNEL_ID and total_in_channel > 0 and bot:
-            report += f"👥 <b>สรุปการอยู่ในห้อง:</b> ทั้ง 2 ห้อง <b>{both_channels_count} คน</b> | เฉพาะ {channel_name} <b>{primary_only_count} คน</b> | เฉพาะ {sec_channel_name} <b>{secondary_only_count} คน</b>\n"
+        if (config.SECONDARY_CHANNEL_ID or config.TERTIARY_CHANNEL_ID) and total_in_channel > 0 and bot:
+            summary_parts = []
+            if multi_channels_count > 0:
+                summary_parts.append(f"หลายห้อง <b>{multi_channels_count} คน</b>")
+            summary_parts.append(f"เฉพาะ {channel_name} <b>{primary_only_count} คน</b>")
+            if config.SECONDARY_CHANNEL_ID:
+                summary_parts.append(f"เฉพาะ {sec_channel_name} <b>{secondary_only_count} คน</b>")
+            if config.TERTIARY_CHANNEL_ID:
+                summary_parts.append(f"เฉพาะ {ter_channel_name} <b>{tertiary_only_count} คน</b>")
+            report += f"👥 <b>สรุปการอยู่ในห้อง:</b> {' | '.join(summary_parts)}\n"
 
         if total_pending > 0:
             report += f"🟡 <b>สมาชิกรอกดเข้าร่วม (Pending):</b> <b>{total_pending} คน</b>\n"

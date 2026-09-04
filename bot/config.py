@@ -12,6 +12,10 @@ class Settings(BaseSettings):
         default=None,
         description="Secondary/New Target Telegram Channel ID (e.g. -1001234567890) for moved users",
     )
+    TERTIARY_CHANNEL_ID: int | None = Field(
+        default=None,
+        description="Tertiary/V3 Target Telegram Channel ID (e.g. -1003900142712) for moved V3 users",
+    )
     ADMIN_GROUP_ID: int = Field(..., description="Admin Telegram Group ID (e.g. -1009876543210)")
     ADMIN_MENTION: str = Field(
         default="@sgrtbl",

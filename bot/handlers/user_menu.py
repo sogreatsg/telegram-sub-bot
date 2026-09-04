@@ -753,7 +753,13 @@ async def handle_user_dm_message(message: Message, state: FSMContext, bot: Bot):
         db_user = await session.get(User, user_id)
         is_v2 = is_user_v2_member(db_user)
 
-    room_label = "🟢 BareLive V.2 (ห้องใหม่)" if is_v2 else "🔵 BareLive V.1 (ห้องเดิม)"
+    assigned = getattr(db_user, "assigned_channel", None) if db_user else None
+    if assigned == "TERTIARY" or getattr(db_user, "is_moved_to_tertiary", False):
+        room_label = "🟢 BareLive V.3 (ห้องใหม่)"
+    elif is_v2:
+        room_label = "🟢 BareLive V.2 (ห้องใหม่)"
+    else:
+        room_label = "🔵 BareLive V.1 (ห้องเดิม)"
 
     # 3. ส่งต่อข้อความไปยังกลุ่ม Admin Group แบบ Real-time
     user_name = html.escape(telegram_user.full_name or telegram_user.first_name)

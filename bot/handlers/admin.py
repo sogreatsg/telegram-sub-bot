@@ -35,6 +35,7 @@ from bot.services.channel_service import (
     get_all_target_channel_ids,
     is_target_channel,
     is_secondary_channel,
+    is_tertiary_channel,
     is_user_v2_member,
     get_channel_label,
     get_discussion_chat_id,
@@ -790,8 +791,9 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "• <code>/add_vip [User ID/@user] [เวลา เช่น 30, 12h, 1d 6h]</code> — ➕ เพิ่มเวลา VIP (ส่ง DM บอก User)\n"
         "• <code>/deduct_vip [User ID/@user] [เวลา เช่น 7, 12h, 1d]</code> — ➖ ลดเวลา VIP (ไม่ส่ง DM)\n"
         "• <code>/set_vip [User ID/@user] [เวลา เช่น 30, 12h, 0]</code> — 🎯 ตั้งค่าเวลาคงเหลือใหม่โดยตรง\n"
-        "• <code>/move_user [User ID/@user]</code> — 🚀 ย้ายสมาชิกไป Channel ใหม่ (ส่งลิงก์ 7 วัน)\n"
-        "• <code>/unmove_user [User ID/@user]</code> — 🔄 ย้ายสมาชิกกลับ Channel เดิม\n"
+        "• <code>/move_user [User ID/@user]</code> — 🚀 ย้ายสมาชิกไป Channel V.2 (ส่งลิงก์ 7 วัน)\n"
+        "• <code>/move_user_v3 [User ID/@user]</code> — 🚀 ย้ายสมาชิกไป Channel V.3 (ส่งลิงก์ 7 วัน)\n"
+        "• <code>/unmove_user [User ID/@user]</code> — 🔄 ย้ายสมาชิกกลับ Channel เดิม (V.1)\n"
         "• <code>/kick [User ID]</code> — สั่งเตะออกจาก Channel VIP ทันที\n"
         "• <code>/kick_all_v1</code> — 🚪 สั่งเตะสมาชิกทุกคนออกจาก Channel V.1\n"
         "• <code>/kick_all_chat</code> — 💬 สั่งเตะสมาชิกทุกคนออกจากห้องพูดคุย (Community Chat)\n"
@@ -1007,7 +1009,7 @@ async def handle_admin_menu_audit_callback(callback: CallbackQuery, bot: Bot):
             sec_member_count = await bot.get_chat_member_count(chat_id=config.SECONDARY_CHANNEL_ID)
             sec_bot_member = await bot.get_chat_member(chat_id=config.SECONDARY_CHANNEL_ID, user_id=bot_info.id)
 
-            status_lines.append(f"🌟 <b>Channel ใหม่ (Target):</b> {html.escape(sec_chat_info.title or '')} (<code>{config.SECONDARY_CHANNEL_ID}</code>)")
+            status_lines.append(f"🌟 <b>Channel V.2 (Target):</b> {html.escape(sec_chat_info.title or '')} (<code>{config.SECONDARY_CHANNEL_ID}</code>)")
             status_lines.append(f"👥 <b>จำนวนสมาชิก:</b> {sec_member_count} คน")
             
             sec_is_admin = sec_bot_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
@@ -1019,7 +1021,28 @@ async def handle_admin_menu_audit_callback(callback: CallbackQuery, bot: Bot):
                 status_lines.append(f"   • สิทธิ์เตะ/แบน (Ban Users): {'✅ มีสิทธิ์' if sec_can_ban else '❌ ขาดสิทธิ์'}")
                 status_lines.append(f"   • สิทธิ์สร้างลิงก์เชิญ: {'✅ มีสิทธิ์' if sec_can_invite else '❌ ขาดสิทธิ์'}")
         except Exception as e:
-            status_lines.append(f"⚠️ <b>ตรวจสอบ Channel ใหม่ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
+            status_lines.append(f"⚠️ <b>ตรวจสอบ Channel V.2 ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
+
+    if config.TERTIARY_CHANNEL_ID:
+        status_lines.append("")
+        try:
+            ter_chat_info = await bot.get_chat(chat_id=config.TERTIARY_CHANNEL_ID)
+            ter_member_count = await bot.get_chat_member_count(chat_id=config.TERTIARY_CHANNEL_ID)
+            ter_bot_member = await bot.get_chat_member(chat_id=config.TERTIARY_CHANNEL_ID, user_id=bot_info.id)
+
+            status_lines.append(f"🚀 <b>Channel V.3 (Target):</b> {html.escape(ter_chat_info.title or '')} (<code>{config.TERTIARY_CHANNEL_ID}</code>)")
+            status_lines.append(f"👥 <b>จำนวนสมาชิก:</b> {ter_member_count} คน")
+            
+            ter_is_admin = ter_bot_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+            status_lines.append(f"🤖 <b>สถานะบอท:</b> {'✅ Administrator' if ter_is_admin else '❌ ไม่ได้เป็น Admin'}")
+
+            if ter_is_admin and hasattr(ter_bot_member, "can_restrict_members"):
+                ter_can_ban = ter_bot_member.can_restrict_members
+                ter_can_invite = ter_bot_member.can_invite_users
+                status_lines.append(f"   • สิทธิ์เตะ/แบน (Ban Users): {'✅ มีสิทธิ์' if ter_can_ban else '❌ ขาดสิทธิ์'}")
+                status_lines.append(f"   • สิทธิ์สร้างลิงก์เชิญ: {'✅ มีสิทธิ์' if ter_can_invite else '❌ ขาดสิทธิ์'}")
+        except Exception as e:
+            status_lines.append(f"⚠️ <b>ตรวจสอบ Channel V.3 ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
 
     status_lines.append("\n━━━━━━━━━━━━━━━━━━━━")
     status_lines.append("💡 <i>พิมพ์ <code>/summary</code> เพื่อดูรายชื่อสมาชิก Active\nหรือ <code>/kick [User ID]</code> เพื่อสั่งเตะสมาชิกออกจากห้อง</i>")
@@ -1656,7 +1679,7 @@ async def handle_admin_audit_command(message: Message, bot: Bot):
             sec_member_count = await bot.get_chat_member_count(chat_id=config.SECONDARY_CHANNEL_ID)
             sec_bot_member = await bot.get_chat_member(chat_id=config.SECONDARY_CHANNEL_ID, user_id=bot_info.id)
 
-            status_lines.append(f"🌟 <b>Channel ใหม่ (Target):</b> {html.escape(sec_chat_info.title or '')} (<code>{config.SECONDARY_CHANNEL_ID}</code>)")
+            status_lines.append(f"🌟 <b>Channel V.2 (Target):</b> {html.escape(sec_chat_info.title or '')} (<code>{config.SECONDARY_CHANNEL_ID}</code>)")
             status_lines.append(f"👥 <b>จำนวนสมาชิก:</b> {sec_member_count} คน")
             
             sec_is_admin = sec_bot_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
@@ -1668,7 +1691,28 @@ async def handle_admin_audit_command(message: Message, bot: Bot):
                 status_lines.append(f"   • สิทธิ์เตะ/แบน (Ban Users): {'✅ มีสิทธิ์' if sec_can_ban else '❌ ขาดสิทธิ์'}")
                 status_lines.append(f"   • สิทธิ์สร้างลิงก์เชิญ: {'✅ มีสิทธิ์' if sec_can_invite else '❌ ขาดสิทธิ์'}")
         except Exception as e:
-            status_lines.append(f"⚠️ <b>ตรวจสอบ Channel ใหม่ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
+            status_lines.append(f"⚠️ <b>ตรวจสอบ Channel V.2 ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
+
+    if config.TERTIARY_CHANNEL_ID:
+        status_lines.append("")
+        try:
+            ter_chat_info = await bot.get_chat(chat_id=config.TERTIARY_CHANNEL_ID)
+            ter_member_count = await bot.get_chat_member_count(chat_id=config.TERTIARY_CHANNEL_ID)
+            ter_bot_member = await bot.get_chat_member(chat_id=config.TERTIARY_CHANNEL_ID, user_id=bot_info.id)
+
+            status_lines.append(f"🚀 <b>Channel V.3 (Target):</b> {html.escape(ter_chat_info.title or '')} (<code>{config.TERTIARY_CHANNEL_ID}</code>)")
+            status_lines.append(f"👥 <b>จำนวนสมาชิก:</b> {ter_member_count} คน")
+            
+            ter_is_admin = ter_bot_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
+            status_lines.append(f"🤖 <b>สถานะบอท:</b> {'✅ Administrator' if ter_is_admin else '❌ ไม่ได้เป็น Admin'}")
+
+            if ter_is_admin and hasattr(ter_bot_member, "can_restrict_members"):
+                ter_can_ban = ter_bot_member.can_restrict_members
+                ter_can_invite = ter_bot_member.can_invite_users
+                status_lines.append(f"   • สิทธิ์เตะ/แบน (Ban Users): {'✅ มีสิทธิ์' if ter_can_ban else '❌ ขาดสิทธิ์'}")
+                status_lines.append(f"   • สิทธิ์สร้างลิงก์เชิญ: {'✅ มีสิทธิ์' if ter_can_invite else '❌ ขาดสิทธิ์'}")
+        except Exception as e:
+            status_lines.append(f"⚠️ <b>ตรวจสอบ Channel V.3 ล้มเหลว:</b> <code>{html.escape(str(e))}</code>")
 
     status_lines.append("\n━━━━━━━━━━━━━━━━━━━━")
     status_lines.append("💡 <i>พิมพ์ <code>/audit_user [User ID]</code> เพื่อตรวจสอบยอดและประวัติสมาชิกรายบุคคล\nหรือ <code>/summary</code> เพื่อดูรายชื่อสมาชิก Active</i>")
@@ -2335,6 +2379,147 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
     await message.answer(admin_reply, parse_mode="HTML", disable_web_page_preview=True)
 
 
+@router.message(Command("move_user_v3", "move_v3", "move3", "migrate_user_v3"))
+async def handle_admin_move_user_v3_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินสำหรับย้ายสมาชิกไปยัง Channel V.3 (Target Channel V.3) พร้อมส่ง Invite Link 7 วัน: /move_user_v3 <User ID หรือ @username>"""
+    if message.chat.id != config.ADMIN_GROUP_ID:
+        return
+
+    if not config.TERTIARY_CHANNEL_ID:
+        await message.answer(
+            "⚠️ <b>ยังไม่ได้ตั้งค่า TERTIARY_CHANNEL_ID ใน .env</b>\n\n"
+            "กรุณาระบุ Channel ID ของห้อง V.3 ในไฟล์ .env (เช่น <code>TERTIARY_CHANNEL_ID=-1003900142712</code>) "
+            "และรีสตาร์ทบอทก่อนใช้งานคำสั่งนี้ครับ 🙏",
+            parse_mode="HTML",
+        )
+        return
+
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer(
+            "❌ <b>วิธีใช้งาน:</b> <code>/move_user_v3 [User ID หรือ @username]</code>\n"
+            "ตัวอย่าง:\n"
+            "• <code>/move_user_v3 5125375696</code>\n"
+            "• <code>/move_user_v3 @some_user</code>\n\n"
+            "ℹ️ <i>คำสั่งนี้จะเปลี่ยน Channel ประจำตัวของผู้ใช้เป็น Channel V.3 และส่งลิงก์เชิญ (อายุ 7 วัน) ให้ทาง DM</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    query = args[1].strip().lstrip("@")
+    now = datetime.now(timezone.utc)
+
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+
+        if not user:
+            if query.isdigit():
+                target_uid = int(query)
+                user, _ = await get_or_create_user(
+                    session=session,
+                    telegram_id=target_uid,
+                    full_name=f"User {target_uid}",
+                )
+            else:
+                await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+                return
+        else:
+            target_uid = user.telegram_id
+
+        # บันทึกสถานะว่าย้ายไปยังห้อง V.3 แล้ว
+        user.is_moved_to_secondary = False
+        user.assigned_channel = "TERTIARY"
+        session.add(user)
+        await session.commit()
+
+    # ปลดแบนใน Channel V.3 ก่อนสร้างลิงก์
+    await unban_user_in_channel(bot, config.TERTIARY_CHANNEL_ID, target_uid)
+
+    # สร้างลิงก์เชิญสำหรับ Channel V.3 (อายุ 7 วัน, ใช้งานได้ 1 ครั้ง)
+    invite_expire = now + timedelta(days=7)
+    invite_url = None
+    try:
+        invite_link_obj = await bot.create_chat_invite_link(
+            chat_id=config.TERTIARY_CHANNEL_ID,
+            member_limit=1,
+            expire_date=invite_expire,
+            name=f"Move3-{target_uid}",
+        )
+        invite_url = invite_link_obj.invite_link
+    except Exception as e:
+        logger.error(f"Failed to generate move invite link for User {target_uid} in {config.TERTIARY_CHANNEL_ID}: {e}", exc_info=True)
+        await message.answer(
+            f"❌ <b>ไม่สามารถสร้างลิงก์เชิญสำหรับ Channel V.3 ({config.TERTIARY_CHANNEL_ID}) ได้!</b>\n\n"
+            f"สาเหตุ: <code>{html.escape(str(e))}</code>\n"
+            "กรุณาตรวจสอบว่าบอทเป็น Administrator ใน Channel V.3 และมีสิทธิ์สร้างลิงก์เชิญ (Invite Users)",
+            parse_mode="HTML",
+        )
+        return
+
+    # ส่ง DM ให้ผู้ใช้
+    user_header = format_user_title(user.full_name, user.username, target_uid)
+    expire_thai = format_thai_datetime(invite_expire)
+    target_channel_title = get_channel_label(config.TERTIARY_CHANNEL_ID)
+    user_dm_sent = False
+
+    user_move_text = (
+        f"🎉 <b>คุณได้รับคำเชิญให้ย้ายเข้าสู่ {target_channel_title}!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"แอดมินได้ส่งลิงก์เชิญพิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่ (<b>{target_channel_title}</b>) เรียบร้อยแล้วครับ 🚀\n\n"
+        f"🔗 <b>ลิงก์เชิญส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
+        f"⏳ <b>ลิงก์หมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📌 <i>ข้อควรทราบ: สิทธิ์และเวลาสมาชิกของคุณจะทำงานอย่างต่อเนื่องเหมือนเดิม กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ!</i>"
+    )
+
+    join_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_title} ตอนนี้", url=invite_url)]
+        ]
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=target_uid,
+            text=user_move_text,
+            reply_markup=join_kb,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        user_dm_sent = True
+    except Exception as e:
+        logger.warning(f"Could not send move DM to User {target_uid}: {e}")
+
+    try:
+        await log_chat_message(
+            user_id=target_uid,
+            sender_role="BOT",
+            message_text=f"[ระบบส่งลิงก์ย้าย {target_channel_title} (อายุ 7 วัน): {invite_url}]"
+        )
+    except Exception:
+        pass
+
+    admin_reply = (
+        f"🌟 <b>ย้ายสมาชิกไปยัง {target_channel_title} สำเร็จ!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
+        f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
+        f"📢 <b>Channel เป้าหมาย:</b> <b>{target_channel_title}</b> (<code>{config.TERTIARY_CHANNEL_ID}</code>)\n"
+        f"⏳ <b>อายุลิงก์เชิญ:</b> 7 วัน (หมดอายุ: <code>{expire_thai} น.</code>)\n"
+        f"🔗 <b>Invite Link:</b>\n<code>{invite_url}</code>\n"
+        f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"ℹ️ <i>บันทึกสถานะผู้ใช้เป็น {target_channel_title} เรียบร้อย การซื้อ/ต่ออายุในอนาคตจะส่งลิงก์ห้องนี้ให้อัตโนมัติ</i>\n"
+        "<i>เมื่อผู้ใช้กดเข้าร่วมห้อง ระบบจะส่งแจ้งเตือนเข้ากลุ่มแอดมินทันที</i>"
+    )
+
+    await message.answer(admin_reply, parse_mode="HTML", disable_web_page_preview=True)
+
+
 @router.message(Command("unmove_user", "move_user_back"))
 async def handle_admin_unmove_user_command(message: Message):
     """คำสั่งแอดมินสำหรับย้ายผู้ใช้กลับสู่ Channel เดิม (Primary Channel): /unmove_user <User ID หรือ @username>"""
@@ -2479,11 +2664,12 @@ get_subscription_quota_and_label = subscription_status_label
 
 def build_admin_user_action_keyboard(user: Optional[User], user_id: int) -> InlineKeyboardMarkup:
     """สร้าง Inline Keyboard ปุ่มลัดสำหรับจัดการสมาชิกในเมนู /user"""
-    is_moved = False
-    if user and config.SECONDARY_CHANNEL_ID:
-        is_moved = getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", None) == "SECONDARY"
+    assigned = getattr(user, "assigned_channel", None) if user else None
+    if getattr(user, "is_moved_to_secondary", False) and not assigned:
+        assigned = "SECONDARY"
 
     is_blocked = getattr(user, "is_blocked", False) if user else False
+    ter_title = get_channel_label(config.TERTIARY_CHANNEL_ID) if config.TERTIARY_CHANNEL_ID else "BareLive V.3"
     sec_title = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
     pri_title = get_channel_label(config.CHANNEL_ID)
 
@@ -2494,16 +2680,32 @@ def build_admin_user_action_keyboard(user: Optional[User], user_id: int) -> Inli
         ],
     ]
 
-    if config.SECONDARY_CHANNEL_ID:
-        if not is_moved:
+    # ปุ่มย้ายไป Channel V.3
+    if config.TERTIARY_CHANNEL_ID:
+        if assigned == "TERTIARY":
             buttons.append([
-                InlineKeyboardButton(text=f"🚀 ย้ายไป {sec_title} (ส่งลิงก์ 7 วัน)", callback_data=f"admin:quick_move:{user_id}"),
+                InlineKeyboardButton(text=f"🔗 ส่งลิงก์ {ter_title} ใหม่ (7 วัน)", callback_data=f"admin:quick_move_v3:{user_id}"),
             ])
         else:
             buttons.append([
-                InlineKeyboardButton(text=f"🔗 ส่งลิงก์ {sec_title} ใหม่ (7 วัน)", callback_data=f"admin:quick_move:{user_id}"),
-                InlineKeyboardButton(text=f"🔄 ย้ายกลับ {pri_title}", callback_data=f"admin:quick_unmove:{user_id}"),
+                InlineKeyboardButton(text=f"🚀 ย้ายไป {ter_title} (ส่งลิงก์ 7 วัน)", callback_data=f"admin:quick_move_v3:{user_id}"),
             ])
+
+    # ปุ่มย้ายไป Channel V.2
+    if config.SECONDARY_CHANNEL_ID:
+        if assigned == "SECONDARY":
+            buttons.append([
+                InlineKeyboardButton(text=f"🔗 ส่งลิงก์ {sec_title} ใหม่ (7 วัน)", callback_data=f"admin:quick_move:{user_id}"),
+            ])
+        else:
+            buttons.append([
+                InlineKeyboardButton(text=f"🚀 ย้ายไป {sec_title} (ส่งลิงก์ 7 วัน)", callback_data=f"admin:quick_move:{user_id}"),
+            ])
+
+    if assigned in ("SECONDARY", "TERTIARY"):
+        buttons.append([
+            InlineKeyboardButton(text=f"🔄 ย้ายกลับ {pri_title}", callback_data=f"admin:quick_unmove:{user_id}"),
+        ])
 
     if is_blocked:
         block_btn = InlineKeyboardButton(text="🟢 ปลดบล็อกผู้ใช้", callback_data=f"admin:unblock_user:{user_id}")
@@ -2730,17 +2932,17 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     else:
         resp.append(f"🚫 บล็อกผู้ใช้: <code>/block_user {user.telegram_id}</code>")
 
-    is_moved = False
-    if user and config.SECONDARY_CHANNEL_ID:
-        is_moved = getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", None) == "SECONDARY"
+    assigned = getattr(user, "assigned_channel", None) if user else None
+    ter_title = get_channel_label(config.TERTIARY_CHANNEL_ID) if config.TERTIARY_CHANNEL_ID else "BareLive V.3"
     sec_title = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
     pri_title = get_channel_label(config.CHANNEL_ID)
 
+    if config.TERTIARY_CHANNEL_ID:
+        resp.append(f"🚀 ย้ายไป {ter_title}: <code>/move_user_v3 {user.telegram_id}</code>")
     if config.SECONDARY_CHANNEL_ID:
-        if not is_moved:
-            resp.append(f"🚀 ย้ายไป {sec_title}: <code>/move_user {user.telegram_id}</code>")
-        else:
-            resp.append(f"🔄 ย้ายกลับ {pri_title}: <code>/unmove_user {user.telegram_id}</code>")
+        resp.append(f"🚀 ย้ายไป {sec_title}: <code>/move_user {user.telegram_id}</code>")
+    if assigned in ("SECONDARY", "TERTIARY") or getattr(user, "is_moved_to_secondary", False):
+        resp.append(f"🔄 ย้ายกลับ {pri_title}: <code>/unmove_user {user.telegram_id}</code>")
 
     resp.append(f"👢 เตะออกจากห้อง: <code>/kick {user.telegram_id}</code>")
 
@@ -3366,15 +3568,17 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
     else:
         resp.append(f"🚫 บล็อกผู้ใช้: <code>/block_user {user_id}</code>")
 
-    is_moved = getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", "PRIMARY") == "SECONDARY"
+    assigned = getattr(user, "assigned_channel", None) if user else None
+    ter_title = get_channel_label(config.TERTIARY_CHANNEL_ID) if config.TERTIARY_CHANNEL_ID else "BareLive V.3"
     sec_title = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
     pri_title = get_channel_label(config.CHANNEL_ID)
 
+    if config.TERTIARY_CHANNEL_ID:
+        resp.append(f"🚀 ย้ายไป {ter_title}: <code>/move_user_v3 {user_id}</code>")
     if config.SECONDARY_CHANNEL_ID:
-        if not is_moved:
-            resp.append(f"🚀 ย้ายไป {sec_title}: <code>/move_user {user_id}</code>")
-        else:
-            resp.append(f"🔄 ย้ายกลับ {pri_title}: <code>/unmove_user {user_id}</code>")
+        resp.append(f"🚀 ย้ายไป {sec_title}: <code>/move_user {user_id}</code>")
+    if assigned in ("SECONDARY", "TERTIARY") or getattr(user, "is_moved_to_secondary", False):
+        resp.append(f"🔄 ย้ายกลับ {pri_title}: <code>/unmove_user {user_id}</code>")
 
     resp.append(f"👢 เตะออกจากห้อง: <code>/kick {user_id}</code>")
 
@@ -3382,6 +3586,117 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
 
     await callback.message.answer("\n".join(resp), reply_markup=user_action_keyboard, parse_mode="HTML")
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:quick_move_v3:"))
+async def handle_admin_quick_move_v3_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เมื่อแอดมินกดปุ่มลัด [🚀 ย้ายไป BareLive V.3] หรือ [🔗 ส่งลิงก์ V.3 ใหม่] ในเมนู /user"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    if not config.TERTIARY_CHANNEL_ID:
+        await callback.answer("⚠️ ยังไม่ได้ตั้งค่า TERTIARY_CHANNEL_ID ใน .env", show_alert=True)
+        return
+
+    uid_str = callback.data.split(":")[-1]
+    if not uid_str.isdigit():
+        await callback.answer("❌ User ID ไม่ถูกต้อง")
+        return
+
+    target_uid = int(uid_str)
+    now = datetime.now(timezone.utc)
+
+    async with get_session() as session:
+        user = (await session.execute(select(User).where(User.telegram_id == target_uid))).scalar_one_or_none()
+        if not user:
+            user, _ = await get_or_create_user(session=session, telegram_id=target_uid, full_name=f"User {target_uid}")
+
+        user.is_moved_to_secondary = False
+        user.assigned_channel = "TERTIARY"
+        session.add(user)
+        await session.commit()
+
+    # ปลดแบนใน Channel V.3 ก่อนสร้างลิงก์
+    await unban_user_in_channel(bot, config.TERTIARY_CHANNEL_ID, target_uid)
+
+    # สร้างลิงก์เชิญสำหรับ Channel V.3 (อายุ 7 วัน, 1 ครั้ง)
+    invite_expire = now + timedelta(days=7)
+    invite_url = None
+    target_channel_title = get_channel_label(config.TERTIARY_CHANNEL_ID)
+
+    try:
+        invite_link_obj = await bot.create_chat_invite_link(
+            chat_id=config.TERTIARY_CHANNEL_ID,
+            member_limit=1,
+            expire_date=invite_expire,
+            name=f"Move3-{target_uid}",
+        )
+        invite_url = invite_link_obj.invite_link
+    except Exception as e:
+        logger.error(f"Failed to generate quick move invite link for User {target_uid} in {config.TERTIARY_CHANNEL_ID}: {e}", exc_info=True)
+        await callback.answer(f"❌ ไม่สามารถสร้างลิงก์เชิญสำหรับ {target_channel_title} ได้", show_alert=True)
+        return
+
+    # ส่ง DM หาผู้ใช้
+    user_header = format_user_title(user.full_name, user.username, target_uid)
+    expire_thai = format_thai_datetime(invite_expire)
+    user_dm_sent = False
+
+    user_move_text = (
+        f"🎉 <b>คุณได้รับคำเชิญให้ย้ายเข้าสู่ {target_channel_title}!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"แอดมินได้ส่งลิงก์เชิญพิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่ (<b>{target_channel_title}</b>) เรียบร้อยแล้วครับ 🚀\n\n"
+        f"🔗 <b>ลิงก์เชิญส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
+        f"⏳ <b>ลิงก์หมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📌 <i>ข้อควรทราบ: สิทธิ์และเวลาสมาชิกของคุณจะทำงานอย่างต่อเนื่องเหมือนเดิม กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ!</i>"
+    )
+
+    join_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_title} ตอนนี้", url=invite_url)]
+        ]
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=target_uid,
+            text=user_move_text,
+            reply_markup=join_kb,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        user_dm_sent = True
+    except Exception as e:
+        logger.warning(f"Could not send move DM to User {target_uid}: {e}")
+
+    try:
+        await log_chat_message(
+            user_id=target_uid,
+            sender_role="BOT",
+            message_text=f"[ระบบส่งลิงก์ย้าย {target_channel_title} (อายุ 7 วัน): {invite_url}]"
+        )
+    except Exception:
+        pass
+
+    admin_reply = (
+        f"🌟 <b>ย้ายสมาชิกไปยัง {target_channel_title} สำเร็จ!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
+        f"🔢 <b>User ID:</b> <code>{target_uid}</code>\n"
+        f"📢 <b>Channel เป้าหมาย:</b> <b>{target_channel_title}</b> (<code>{config.TERTIARY_CHANNEL_ID}</code>)\n"
+        f"⏳ <b>อายุลิงก์เชิญ:</b> 7 วัน (หมดอายุ: <code>{expire_thai} น.</code>)\n"
+        f"🔗 <b>Invite Link:</b>\n<code>{invite_url}</code>\n"
+        f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"ℹ️ <i>บันทึกสถานะผู้ใช้เป็น {target_channel_title} เรียบร้อย การซื้อ/ต่ออายุในอนาคตจะส่งลิงก์ห้องนี้ให้อัตโนมัติ</i>"
+    )
+
+    await callback.message.answer(admin_reply, parse_mode="HTML", disable_web_page_preview=True)
+    await callback.answer(f"✅ ย้ายไปยัง {target_channel_title} และส่งลิงก์ 7 วันแล้ว!", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("admin:quick_move:"))
@@ -5236,11 +5551,18 @@ async def handle_revoke_specific_link(message: Message, bot: Bot):
         return
 
     link_to_revoke = args[1].strip()
-    try:
-        res = await bot.revoke_chat_invite_link(chat_id=config.CHANNEL_ID, invite_link=link_to_revoke)
-        await message.answer(f"✅ <b>เพิกถอนลิงก์สำเร็จแล้ว:</b> <code>{res.invite_link}</code>\n(ลิงก์นี้ใช้งานไม่ได้แล้ว)", parse_mode="HTML")
-    except Exception as e:
-        await message.answer(f"❌ <b>เพิกถอนไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+    revoked = False
+    last_err = None
+    for cid in get_all_target_channel_ids():
+        try:
+            res = await bot.revoke_chat_invite_link(chat_id=cid, invite_link=link_to_revoke)
+            await message.answer(f"✅ <b>เพิกถอนลิงก์สำเร็จแล้ว ({get_channel_label(cid)}):</b> <code>{res.invite_link}</code>\n(ลิงก์นี้ใช้งานไม่ได้แล้ว)", parse_mode="HTML")
+            revoked = True
+            break
+        except Exception as e:
+            last_err = e
+    if not revoked:
+        await message.answer(f"❌ <b>เพิกถอนไม่สำเร็จ:</b> <code>{html.escape(str(last_err))}</code>", parse_mode="HTML")
 
 
 def get_start_menu_content(trial_available: bool = True) -> tuple[str, InlineKeyboardMarkup]:

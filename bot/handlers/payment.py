@@ -1081,7 +1081,13 @@ async def handle_general_user_media(message: Message, bot: Bot):
         ]
     )
 
-    room_label = "🟢 BareLive V.2 (ห้องใหม่)" if is_v2 else "🔵 BareLive V.1 (ห้องเดิม)"
+    assigned = getattr(user, "assigned_channel", None) if user else None
+    if assigned == "TERTIARY" or getattr(user, "is_moved_to_tertiary", False):
+        room_label = "🟢 BareLive V.3 (ห้องใหม่)"
+    elif is_v2:
+        room_label = "🟢 BareLive V.2 (ห้องใหม่)"
+    else:
+        room_label = "🔵 BareLive V.1 (ห้องเดิม)"
 
     admin_alert = (
         f"📷 <b>มีผู้ใช้ส่ง{media_type} (Direct Message)!</b>\n"

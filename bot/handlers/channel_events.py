@@ -11,7 +11,7 @@ from bot.models.schema import User, Subscription, SubStatus
 from bot.services.database import get_session, get_or_create_user
 from bot.services.referral import award_referral_bonus
 from bot.services.subscription import activate_pending_subscription
-from bot.services.channel_service import is_target_channel, is_secondary_channel, get_channel_label, fetch_channel_title
+from bot.services.channel_service import is_target_channel, is_secondary_channel, is_tertiary_channel, get_channel_label, fetch_channel_title
 
 logger = logging.getLogger(__name__)
 config = get_settings()
@@ -168,8 +168,12 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
         trial_already_used_before = bool(user_obj.trial_used) if user_obj else True
 
         # หากผู้ใช้เข้า Channel ใหม่ ให้บันทึกสถานะผู้ใช้ว่าถูกย้ายเข้าห้องใหม่เรียบร้อย
+        is_ter = is_tertiary_channel(event.chat.id)
         is_sec = is_secondary_channel(event.chat.id)
-        if is_sec and user_obj:
+        if is_ter and user_obj:
+            user_obj.assigned_channel = "TERTIARY"
+            session.add(user_obj)
+        elif is_sec and user_obj:
             user_obj.is_moved_to_secondary = True
             user_obj.assigned_channel = "SECONDARY"
             session.add(user_obj)
@@ -221,6 +225,7 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
         channel_label = await fetch_channel_title(bot, event.chat.id)
     except Exception:
         channel_label = get_channel_label(event.chat.id)
+    is_ter_join = is_tertiary_channel(event.chat.id)
     is_sec_join = is_secondary_channel(event.chat.id)
 
     if sub_to_activate:
@@ -243,10 +248,14 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
             logger.warning(f"Could not send welcome DM to User {user_id}: {e}")
 
         # 2. ส่งข้อความแจ้งเตือนเข้ากลุ่ม Admin
-        if is_sec_join:
-            header_title = "🌟 <b>[Target Channel] มีสมาชิกกดเข้าร่วม Channel ใหม่แล้ว!</b>"
+        if is_ter_join:
+            header_title = "🌟 <b>[Target Channel V.3] มีสมาชิกกดเข้าร่วม Channel V.3 แล้ว!</b>"
             if is_stack_extension:
-                header_title = "🌟 <b>[Target Channel] มีสมาชิกกดเข้าร่วม Channel ใหม่ พร้อมต่อเวลาสะสม!</b>"
+                header_title = "🌟 <b>[Target Channel V.3] มีสมาชิกกดเข้าร่วม Channel V.3 พร้อมต่อเวลาสะสม!</b>"
+        elif is_sec_join:
+            header_title = "🌟 <b>[Target Channel V.2] มีสมาชิกกดเข้าร่วม Channel ใหม่แล้ว!</b>"
+            if is_stack_extension:
+                header_title = "🌟 <b>[Target Channel V.2] มีสมาชิกกดเข้าร่วม Channel ใหม่ พร้อมต่อเวลาสะสม!</b>"
         else:
             header_title = "🚪 <b>มีสมาชิกกดเข้าร่วม Channel แล้ว!</b>"
             if is_stack_extension:

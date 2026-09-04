@@ -16,64 +16,85 @@ def _normalize_chat_id(chat_id: int | str) -> str:
     return str(chat_id).replace("-100", "").replace("-", "").strip()
 
 
-def is_target_channel(chat_id: int) -> bool:
-    """ตรวจสอบว่าเป็น Channel VIP เป้าหมายหรือไม่ (รองรับทั้ง Primary Channel และ Secondary Channel)"""
+def is_target_channel(chat_id: int | str) -> bool:
+    """ตรวจสอบว่าเป็น Channel VIP เป้าหมายหรือไม่ (รองรับทั้ง Primary V.1, Secondary V.2 และ Tertiary V.3)"""
     norm_chat = _normalize_chat_id(chat_id)
     if norm_chat == _normalize_chat_id(config.CHANNEL_ID):
         return True
     if config.SECONDARY_CHANNEL_ID and norm_chat == _normalize_chat_id(config.SECONDARY_CHANNEL_ID):
         return True
+    if config.TERTIARY_CHANNEL_ID and norm_chat == _normalize_chat_id(config.TERTIARY_CHANNEL_ID):
+        return True
     return False
 
 
 def is_secondary_channel(chat_id: int | str) -> bool:
-    """ตรวจสอบว่าเป็น Channel ใหม่ (Secondary / Target Channel) หรือไม่"""
+    """ตรวจสอบว่าเป็น Channel V.2 (Secondary / Target Channel) หรือไม่"""
     if not config.SECONDARY_CHANNEL_ID:
         return False
     return _normalize_chat_id(chat_id) == _normalize_chat_id(config.SECONDARY_CHANNEL_ID)
 
 
+def is_tertiary_channel(chat_id: int | str) -> bool:
+    """ตรวจสอบว่าเป็น Channel V.3 (Tertiary / Target Channel) หรือไม่"""
+    if not config.TERTIARY_CHANNEL_ID:
+        return False
+    return _normalize_chat_id(chat_id) == _normalize_chat_id(config.TERTIARY_CHANNEL_ID)
+
+
 def get_all_target_channel_ids() -> List[int]:
-    """คืนค่ารายการ Channel ID ทั้งหมดที่บอทดูแล (Primary Channel + Secondary Channel ถ้ามีการตั้งค่า)"""
+    """คืนค่ารายการ Channel ID ทั้งหมดที่บอทดูแล (Primary Channel V.1 + Secondary V.2 + Tertiary V.3)"""
     channels = [config.CHANNEL_ID]
-    if config.SECONDARY_CHANNEL_ID and config.SECONDARY_CHANNEL_ID != config.CHANNEL_ID:
+    if config.SECONDARY_CHANNEL_ID and config.SECONDARY_CHANNEL_ID not in channels:
         channels.append(config.SECONDARY_CHANNEL_ID)
+    if config.TERTIARY_CHANNEL_ID and config.TERTIARY_CHANNEL_ID not in channels:
+        channels.append(config.TERTIARY_CHANNEL_ID)
     return channels
 
 
 def get_user_target_channel_id(user: Optional[User]) -> int:
     """
     คืนค่า Channel ID เป้าหมายของผู้ใช้:
-    - จะเป็น Channel ใหม่ (V.2 / SECONDARY_CHANNEL_ID) ก็ต่อเมื่อผู้ใช้ได้รับการเชิญ/ย้ายจากแอดมินแล้วเท่านั้น
-      (is_moved_to_secondary=True หรือ assigned_channel='SECONDARY')
+    - จะเป็น Channel V.3 (TERTIARY_CHANNEL_ID) ก็ต่อเมื่อผู้ใช้เป็นสมาชิก V.3 (assigned_channel='TERTIARY' หรือ is_moved_to_tertiary=True)
+    - จะเป็น Channel V.2 (SECONDARY_CHANNEL_ID) ก็ต่อเมื่อผู้ใช้เป็นสมาชิก V.2 (assigned_channel='SECONDARY' หรือ is_moved_to_secondary=True)
     - นอกเหนือจากนั้นทั้งหมด (ผู้ใช้ทั่วไป, ผู้ใช้ใหม่, ขอทดลองใช้) -> คืนค่า Channel หลัก V.1 (CHANNEL_ID) ตามปกติ
     """
-    if config.SECONDARY_CHANNEL_ID and user:
-        if getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", None) == "SECONDARY":
+    if user:
+        assigned = getattr(user, "assigned_channel", None)
+        if config.TERTIARY_CHANNEL_ID and (assigned == "TERTIARY" or getattr(user, "is_moved_to_tertiary", False)):
+            return config.TERTIARY_CHANNEL_ID
+        if config.SECONDARY_CHANNEL_ID and (assigned == "SECONDARY" or getattr(user, "is_moved_to_secondary", False)):
             return config.SECONDARY_CHANNEL_ID
     return config.CHANNEL_ID
 
 
 def is_user_v2_member(user: Optional[User]) -> bool:
     """
-    ตรวจสอบว่าผู้ใช้เป็นสมาชิกของห้อง V.2 (BareLive V.2) หรือไม่
-    (is_moved_to_secondary=True หรือ assigned_channel='SECONDARY')
-    - คืนค่า True: ถ้าเป็นสมาชิก V.2 (บอทจะตอบกลับและให้บริการตามปกติ)
+    ตรวจสอบว่าผู้ใช้เป็นสมาชิกของห้องใหม่ที่ได้รับอนุญาตให้ใช้บอท (V.2 หรือ V.3) หรือไม่
+    (assigned_channel in ('SECONDARY', 'TERTIARY') หรือ is_moved_to_secondary=True หรือ is_moved_to_tertiary=True)
+    - คืนค่า True: ถ้าเป็นสมาชิก V.2 หรือ V.3 (บอทจะตอบกลับและให้บริการตามปกติ)
     - คืนค่า False: ถ้าเป็นสมาชิก V.1 หรือเพิ่งสมัครใหม่ (บอทจะไม่ตอบกลับข้อความ)
     """
     if not user:
         return False
-    return bool(getattr(user, "is_moved_to_secondary", False) or getattr(user, "assigned_channel", None) == "SECONDARY")
+    assigned = getattr(user, "assigned_channel", None)
+    if assigned in ("SECONDARY", "TERTIARY"):
+        return True
+    if getattr(user, "is_moved_to_secondary", False) or getattr(user, "is_moved_to_tertiary", False):
+        return True
+    return False
 
 
 _channel_title_cache: Dict[str, str] = {}
 
 
 def get_channel_label(chat_id: int | str) -> str:
-    """คืนค่าชื่อ Channel จริงสำหรับแสดงผลในข้อความแจ้งเตือนและเมนู (เช่น 'BareLive' หรือ 'BareLive V.2')"""
+    """คืนค่าชื่อ Channel จริงสำหรับแสดงผลในข้อความแจ้งเตือนและเมนู (เช่น 'BareLive', 'BareLive V.2' หรือ 'BareLive V.3')"""
     norm_id = _normalize_chat_id(chat_id)
     if norm_id in _channel_title_cache:
         return _channel_title_cache[norm_id]
+    if is_tertiary_channel(chat_id):
+        return "BareLive V.3"
     if is_secondary_channel(chat_id):
         return "BareLive V.2"
     return "BareLive"
@@ -314,7 +335,17 @@ async def get_discussion_chat_id(bot: Bot, explicit_target: Optional[Union[str, 
         except Exception:
             pass
 
-    # 5. Resolve username from FREE_CHAT_GROUP_URL
+    # 5. Check linked_chat_id of Tertiary Channel
+    if config.TERTIARY_CHANNEL_ID:
+        try:
+            ter_ch = await bot.get_chat(config.TERTIARY_CHANNEL_ID)
+            if getattr(ter_ch, "linked_chat_id", None):
+                save_chat_group_id(ter_ch.linked_chat_id)
+                return ter_ch.linked_chat_id
+        except Exception:
+            pass
+
+    # 6. Resolve username from FREE_CHAT_GROUP_URL
     if config.FREE_CHAT_GROUP_URL:
         uname = config.FREE_CHAT_GROUP_URL.rstrip("/").split("/")[-1]
         if uname and not uname.startswith("+"):
