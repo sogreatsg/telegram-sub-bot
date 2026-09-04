@@ -58,7 +58,7 @@ class Settings(BaseSettings):
         description="Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL",
     )
     FREE_CHAT_GROUP_URL: str = Field(
-        default="https://t.me/barelivechat",
+        default="https://t.me/barelive_chat",
         description="Free community chat group URL",
     )
     CHAT_GROUP_ID: int | None = Field(

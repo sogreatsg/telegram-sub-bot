@@ -629,8 +629,7 @@ async def process_truemoney_submission(
                     )
                     join_keyboard = InlineKeyboardMarkup(
                         inline_keyboard=[
-                            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_label} ตอนนี้", url=invite_url)],
-                            [InlineKeyboardButton(text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)", url=config.FREE_CHAT_GROUP_URL)],
+                            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_label} ตอนนี้", url=invite_url)]
                         ]
                     )
                     try:
