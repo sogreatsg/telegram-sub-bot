@@ -217,7 +217,7 @@ async def handle_subscribe_plan_button(callback: CallbackQuery, state: FSMContex
     if has_qr and has_tmn:
         method_text += (
             "1️⃣ <b>📲 สแกน QR Code</b>\n"
-            "   • สแกน QR Code และส่งรูปสลิปโอนเงินเข้ามาในแชท\n\n"
+            "   • ขอรับ QR Code รายครั้งและส่งรูปสลิปโอนเงินเข้ามาในแชท\n\n"
             "2️⃣ <b>🧧 ซองของขวัญ TrueMoney (ซองแดง)</b>\n"
             "   • สร้างซองของขวัญ TrueMoney ตามยอดที่ระบุ และส่งลิงก์เข้ามาในแชท"
         )
@@ -230,7 +230,7 @@ async def handle_subscribe_plan_button(callback: CallbackQuery, state: FSMContex
     else:
         method_text += (
             "📲 <b>สแกน QR Code</b>\n"
-            "   • สแกน QR Code และส่งรูปสลิปโอนเงินเข้ามาในแชท"
+            "   • ขอรับ QR Code รายครั้งและส่งรูปสลิปโอนเงินเข้ามาในแชท"
         )
 
     # ส่งหรือแก้ไขข้อความตามความเหมาะสม
@@ -262,8 +262,8 @@ async def handle_subscribe_plan_button(callback: CallbackQuery, state: FSMContex
 
 
 @router.callback_query(F.data.startswith("payment:method:promptpay:"))
-async def handle_payment_method_promptpay(callback: CallbackQuery, state: FSMContext):
-    """เริ่มขั้นตอนการชำระเงินด้วย QR Code (เฉพาะสมาชิก V.2)"""
+async def handle_payment_method_promptpay(callback: CallbackQuery, state: FSMContext, bot: Bot):
+    """เริ่มขั้นตอนการชำระเงินด้วย QR Code (เฉพาะสมาชิก V.2) — แจ้งเตือนแอดมินสร้าง QR Code รายครั้ง"""
     if not callback.from_user or not callback.message:
         return
 
@@ -293,61 +293,100 @@ async def handle_payment_method_promptpay(callback: CallbackQuery, state: FSMCon
             await callback.answer()
             return
 
-    plan_key = callback.data.split(":")[-1]
     plan_info = get_dynamic_plan_info(plan_key)
     duration_str = format_plan_duration(plan_info)
 
     await state.set_state(PaymentStates.waiting_for_slip)
     await state.update_data(plan_type=plan_key, payment_method="PROMPTPAY")
 
-    caption_text = (
+    # 1. ข้อความแจ้งเตือนฝั่งผู้ใช้ใน DM
+    user_waiting_text = (
         f"💳 <b>สมัครสมาชิก {plan_info['badge']} (ราคา {plan_info['price']:,} บาท)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"⏳ <b>ระยะเวลา:</b> {plan_info['days']} วันเต็ม\n"
-        "📲 <b>สแกน QR Code ด้านบนเพื่อชำระเงิน</b>\n"
-        f"• ยอดชำระ: <b>{plan_info['price']:,} บาท</b>\n"
-        "• สแกนจ่ายผ่านแอปธนาคารได้ทุกธนาคารทันที\n\n"
-        "📸 <b>ขั้นตอนถัดไป:</b>\n"
-        "เมื่อโอนเงินเรียบร้อยแล้ว กรุณาส่งรูปสลิปเข้ามาในแชทนี้ได้เลยครับ\n\n"
+        "⏳ <b>กรุณารอระบบสร้าง QR Code สำหรับชำระเงินสักครู่...</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>ยอดชำระ:</b> <b>{plan_info['price']:,} บาท</b>\n"
+        f"⏳ <b>ระยะเวลา:</b> <b>{duration_str}</b>\n\n"
+        "🔔 <i>ระบบได้ส่งคำขอไปยังแอดมินเพื่อสร้าง QR Code สำหรับการชำระเงินของคุณแล้วครับ (QR Code แบบใช้ครั้งเดียวต่อรอบ)</i>\n"
+        "📸 <i>เมื่อแอดมินส่งรูป QR Code มาในแชทนี้แล้ว คุณสามารถสแกนชำระเงินและส่งรูปสลิปเข้ามาได้ทันทีครับ 🙏</i>\n\n"
         "💡 <i>คำแนะนำ: คุณสามารถกด 'เปลี่ยนวิธีชำระ' หรือพิมพ์ /cancel เพื่อยกเลิกได้ครับ</i>"
     )
 
-    # ค้นหารูป QR Code สำหรับแพ็กเกจนี้ หรือรูปเริ่มต้น
-    qr_candidates = [
-        Path(f"bot/assets/{plan_info.get('qr_filename', '')}"),
-        Path("bot/assets/qr_payment.png"),
-        Path(config.PAYMENT_QR_PATH),
-    ]
-    qr_path = next((p for p in qr_candidates if p.exists()), None)
-
-    if qr_path:
+    if callback.message.photo or callback.message.document:
         try:
-            qr_photo = FSInputFile(str(qr_path))
-            await callback.message.answer_photo(
-                photo=qr_photo,
-                caption=caption_text,
-                reply_markup=get_payment_cancel_keyboard(plan_key),
-                parse_mode="HTML",
-            )
-            try:
-                await callback.message.delete()
-            except Exception:
-                pass
-        except Exception as e:
-            logger.error(f"Failed to send QR image: {e}", exc_info=True)
-            await callback.message.answer(
-                text=caption_text,
-                reply_markup=get_payment_cancel_keyboard(plan_key),
-                parse_mode="HTML",
-            )
-    else:
+            await callback.message.delete()
+        except Exception:
+            pass
         await callback.message.answer(
-            text=caption_text,
+            text=user_waiting_text,
             reply_markup=get_payment_cancel_keyboard(plan_key),
             parse_mode="HTML",
         )
+    else:
+        try:
+            await callback.message.edit_text(
+                text=user_waiting_text,
+                reply_markup=get_payment_cancel_keyboard(plan_key),
+                parse_mode="HTML",
+            )
+        except Exception:
+            await callback.message.answer(
+                text=user_waiting_text,
+                reply_markup=get_payment_cancel_keyboard(plan_key),
+                parse_mode="HTML",
+            )
 
-    await callback.answer()
+    await callback.answer("แจ้งแอดมินสร้าง QR Code เรียบร้อยแล้ว")
+
+    # 2. บันทึกข้อความลง Log
+    await log_chat_message(
+        user_id=callback.from_user.id,
+        sender_role="USER",
+        message_text=f"[กดขอ QR Code ชำระเงิน: {plan_info['badge']} ({plan_info['price']:,} บาท)]"
+    )
+
+    # 3. ส่งการแจ้งเตือนไปยังกลุ่ม Admin พร้อมแท็กแอดมินให้สร้าง QR Code รายครั้ง
+    user_handle = f"@{callback.from_user.username}" if callback.from_user.username else "ไม่มี Username"
+    full_name_safe = html.escape(callback.from_user.full_name or callback.from_user.first_name)
+    req_time_thai = format_thai_datetime(datetime.now(timezone.utc))
+
+    admin_alert_text = (
+        "📲 <b>มีคำขอสร้าง QR Code ชำระเงินใหม่!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n\n"
+        f"👤 <b>ผู้ใช้งาน:</b> {full_name_safe} ({user_handle})\n"
+        f"🔢 <b>User ID:</b> <code>{callback.from_user.id}</code>\n"
+        f"📦 <b>แพ็กเกจที่เลือก:</b> <b>{plan_info['badge']}</b>\n"
+        f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
+        f"💰 <b>ยอดเงินที่ต้องสร้าง QR:</b> <b>{plan_info['price']:,} บาท</b>\n"
+        f"📅 <b>เวลาที่ขอ:</b> <code>{req_time_thai} น.</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👉 <b>กรุณาสร้าง QR Code แบบครั้งเดียว (ยอด {plan_info['price']:,} บาท) แล้วส่งให้ผู้ใช้:</b>\n\n"
+        "📝 <b>วิธีส่ง QR Code ให้ผู้ใช้:</b>\n"
+        "1️⃣ <b>ปัดขวาตอบกลับ (Reply) ข้อความนี้ พร้อมแนบรูป QR Code</b>\n"
+        f"2️⃣ หรือส่งรูปภาพพร้อมแคปชั่น <code>/reply {callback.from_user.id}</code>\n"
+        f"3️⃣ หรือพิมพ์ <code>/reply {callback.from_user.id} [ข้อความ]</code>"
+    )
+
+    admin_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{callback.from_user.id}"),
+                InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{callback.from_user.id}"),
+            ]
+        ]
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=config.ADMIN_GROUP_ID,
+            text=admin_alert_text,
+            reply_markup=admin_keyboard,
+            parse_mode="HTML",
+        )
+        logger.info(f"QR generation request for User {callback.from_user.id} ({plan_info['badge']}) forwarded to Admin Group {config.ADMIN_GROUP_ID}")
+    except Exception as e:
+        logger.error(f"Failed to forward QR generation request to Admin Group: {e}", exc_info=True)
 
 
 @router.callback_query(F.data.startswith("payment:method:truemoney:"))

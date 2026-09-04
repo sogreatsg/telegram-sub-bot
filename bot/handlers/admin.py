@@ -3190,10 +3190,93 @@ async def handle_admin_reply_command(message: Message, bot: Bot):
         await message.answer(f"❌ <b>ส่งข้อความไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>\n(ผู้ใช้อาจบล็อกบอทหรือยังไม่เคยกด /start)", parse_mode="HTML")
 
 
+@router.message(
+    F.chat.id == config.ADMIN_GROUP_ID,
+    (F.photo | F.document),
+    F.caption.regexp(r"^/(reply|send|send_qr|qr_send)\b")
+)
+async def handle_admin_reply_media_command(message: Message, bot: Bot):
+    """คำสั่งแอดมินส่งรูปภาพ/เอกสาร (เช่น QR Code) ตอบกลับผู้ใช้: /reply <User ID/@user> [คำอธิบาย/แคปชั่น]"""
+    caption_text = (message.caption or "").strip()
+    parts = caption_text.split(maxsplit=2)
+    if len(parts) < 2:
+        await message.reply(
+            "❌ <b>วิธีใช้งาน:</b> แนบรูปภาพพร้อมแคปชั่น <code>/reply [User ID หรือ @username] [ข้อความคำอธิบาย]</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    query = parts[1].strip().lstrip("@")
+    custom_caption = parts[2].strip() if len(parts) >= 3 else ""
+
+    async with get_session() as session:
+        if query.isdigit():
+            user_stmt = select(User).where(User.telegram_id == int(query))
+        else:
+            user_stmt = select(User).where(User.username.ilike(query))
+
+        user = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not user:
+            if query.isdigit():
+                target_uid = int(query)
+                user_name = f"User {target_uid}"
+            else:
+                await message.reply(f"❌ ไม่พบผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
+                return
+        else:
+            target_uid = user.telegram_id
+            user_name = html.escape(user.full_name or f"User {target_uid}")
+            if getattr(user, "is_blocked", False):
+                await message.reply(
+                    f"⚠️ <b>ผู้ใช้ {user_name} (<code>{target_uid}</code>) ถูกบล็อกการใช้งานบอทอยู่ครับ</b>\n\n"
+                    f"💡 หากต้องการส่งข้อความถึงผู้ใช้นี้ กรุณาปลดบล็อกก่อนด้วยคำสั่ง:\n<code>/unblock_user {target_uid}</code>",
+                    parse_mode="HTML"
+                )
+                return
+
+    default_caption = (
+        "📲 <b>QR Code สำหรับชำระเงิน</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "• สแกนจ่ายผ่านแอปธนาคารได้ทุกธนาคารทันที (QR ใช้งานได้ครั้งเดียว)\n"
+        "• เมื่อโอนเงินเรียบร้อยแล้ว กรุณาส่งรูปสลิปเข้ามาในแชทนี้ได้เลยครับ 🙏"
+    )
+    send_caption = custom_caption if custom_caption else default_caption
+
+    try:
+        if message.photo:
+            await bot.send_photo(
+                chat_id=target_uid,
+                photo=message.photo[-1].file_id,
+                caption=send_caption,
+                parse_mode="HTML",
+            )
+            media_label = "รูปภาพ QR Code / Media"
+        else:
+            await bot.send_document(
+                chat_id=target_uid,
+                document=message.document.file_id,
+                caption=send_caption,
+                parse_mode="HTML",
+            )
+            media_label = "ไฟล์เอกสาร / Media"
+
+        await log_chat_message(user_id=target_uid, sender_role="ADMIN", message_text=f"[{media_label}: {send_caption}]")
+        await message.reply(
+            f"✅ <b>ส่ง{media_label} ไปยัง {user_name} (<code>{target_uid}</code>) สำเร็จ!</b>\n\n"
+            f"📝 <b>คำบรรยาย:</b>\n<i>{html.escape(send_caption)}</i>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await message.reply(
+            f"❌ <b>ส่งไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>\n(ผู้ใช้อาจบล็อกบอทหรือยังไม่เคยกด /start)",
+            parse_mode="HTML"
+        )
+
+
 @router.message(F.chat.id == config.ADMIN_GROUP_ID, F.reply_to_message)
 async def handle_admin_swipe_reply(message: Message, bot: Bot):
-    """จัดการเมื่อแอดมินปัดขวาตอบกลับ (Reply) ข้อความที่บอทส่งมาเพื่อตอบผู้ใช้อัตโนมัติ โดยไม่ต้องพิมพ์ /reply"""
-    if not message.text:
+    """จัดการเมื่อแอดมินปัดขวาตอบกลับ (Reply) ข้อความที่บอทส่งมาเพื่อตอบผู้ใช้อัตโนมัติ (รองรับทั้งข้อความ, รูปภาพ QR Code, ไฟล์เอกสาร)"""
+    if not message.text and not message.photo and not message.document:
         return
 
     # Check if the replied message is from the bot
@@ -3210,7 +3293,6 @@ async def handle_admin_swipe_reply(message: Message, bot: Bot):
         return
         
     target_uid = int(match.group(1))
-    reply_text = message.text
 
     async with get_session() as session:
         user = await session.get(User, target_uid)
@@ -3222,16 +3304,41 @@ async def handle_admin_swipe_reply(message: Message, bot: Bot):
             )
             return
 
+    default_qr_caption = (
+        "📲 <b>QR Code สำหรับชำระเงิน</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "• สแกนจ่ายผ่านแอปธนาคารได้ทุกธนาคารทันที (QR ใช้งานได้ครั้งเดียว)\n"
+        "• เมื่อโอนเงินเรียบร้อยแล้ว กรุณาส่งรูปสลิปเข้ามาในแชทนี้ได้เลยครับ 🙏"
+    )
+
     try:
-        try:
-            await bot.send_message(chat_id=target_uid, text=reply_text, parse_mode="HTML")
-        except Exception:
-            await bot.send_message(chat_id=target_uid, text=reply_text, parse_mode=None)
-        await log_chat_message(user_id=target_uid, sender_role="ADMIN", message_text=reply_text)
-        await message.reply(
-            f"✅ <b>ตอบกลับข้อความไปยังผู้ใช้ (<code>{target_uid}</code>) สำเร็จ!</b>",
-            parse_mode="HTML",
-        )
+        if message.photo:
+            caption = message.caption or default_qr_caption
+            await bot.send_photo(chat_id=target_uid, photo=message.photo[-1].file_id, caption=caption, parse_mode="HTML")
+            await log_chat_message(user_id=target_uid, sender_role="ADMIN", message_text=f"[รูปภาพ QR Code / Media: {caption}]")
+            await message.reply(
+                f"✅ <b>ส่งรูปภาพ QR Code ไปยังผู้ใช้ (<code>{target_uid}</code>) สำเร็จ!</b>",
+                parse_mode="HTML",
+            )
+        elif message.document:
+            caption = message.caption or default_qr_caption
+            await bot.send_document(chat_id=target_uid, document=message.document.file_id, caption=caption, parse_mode="HTML")
+            await log_chat_message(user_id=target_uid, sender_role="ADMIN", message_text=f"[ไฟล์เอกสาร / Media: {caption}]")
+            await message.reply(
+                f"✅ <b>ส่งไฟล์เอกสารไปยังผู้ใช้ (<code>{target_uid}</code>) สำเร็จ!</b>",
+                parse_mode="HTML",
+            )
+        elif message.text:
+            reply_text = message.text
+            try:
+                await bot.send_message(chat_id=target_uid, text=reply_text, parse_mode="HTML")
+            except Exception:
+                await bot.send_message(chat_id=target_uid, text=reply_text, parse_mode=None)
+            await log_chat_message(user_id=target_uid, sender_role="ADMIN", message_text=reply_text)
+            await message.reply(
+                f"✅ <b>ตอบกลับข้อความไปยังผู้ใช้ (<code>{target_uid}</code>) สำเร็จ!</b>",
+                parse_mode="HTML",
+            )
     except Exception as e:
         await message.reply(f"❌ <b>ส่งข้อความไม่สำเร็จ:</b> <code>{html.escape(str(e))}</code>\n(ผู้ใช้อาจบล็อกบอทหรือยังไม่เคยกด /start)", parse_mode="HTML")
 

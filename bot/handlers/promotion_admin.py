@@ -45,7 +45,7 @@ def get_promotion_status_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         f"📊 <b>สถานะปัจจุบัน:</b> {status_str}\n"
         f"⏳ <b>ระยะเวลา:</b> <b>{days} วัน</b>\n"
         f"💰 <b>ราคาแพ็กเกจ:</b> <b>{price:,} บาท</b>\n"
-        f"🖼️ <b>QR Code:</b> <code>{qr}</code>\n"
+        "🖼️ <b>QR Code:</b> <code>สร้างรายครั้ง (One-Time Dynamic QR)</code>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "📋 <b>แตะคำสั่งด้านล่างเพื่อสั่งการได้ทันที:</b>\n"
         "• /promotion_on — 🟢 เปิดใช้งานโปรโมชั่นให้ผู้ใช้เห็นในเมนู\n"
@@ -176,7 +176,7 @@ async def process_promo_days(message: Message, state: FSMContext):
 
     await state.update_data(promo_days=days)
 
-    # 4 options matching existing QR codes (100, 300, 500, 1000)
+    # Preset price buttons or custom input
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="100 บาท", callback_data="promoset:100"),
@@ -187,26 +187,28 @@ async def process_promo_days(message: Message, state: FSMContext):
             InlineKeyboardButton(text="1,000 บาท", callback_data="promoset:1000"),
         ],
     ])
-    await message.answer(f"⏳ <b>กำหนด {days} วัน เรียบร้อย</b>\nกรุณาเลือกราคาสำหรับโปรโมชั่น (จำกัด 4 ราคาตาม QR Code ที่มี):", reply_markup=kb, parse_mode="HTML")
+    await message.answer(
+        f"⏳ <b>กำหนด {days} วัน เรียบร้อย</b>\n"
+        "กรุณาเลือกราคาสำหรับโปรโมชั่น หรือพิมพ์ราคาที่ต้องการ (เช่น 199, 299 หรือพิมพ์ /cancel):",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
     await state.set_state(PromoSettingStates.waiting_for_price)
 
 
 @router.callback_query(F.data.startswith("promoset:"), PromoSettingStates.waiting_for_price)
-async def process_promo_price(callback: CallbackQuery, state: FSMContext):
+async def process_promo_price_callback(callback: CallbackQuery, state: FSMContext):
     price_str = callback.data.split(":")[1]
-    price = int(price_str)
-
-    qr_map = {
-        100: "qr_100.png",
-        300: "qr_300.png",
-        500: "qr_500.png",
-        1000: "qr_1000.png"
-    }
+    try:
+        price = int(price_str)
+    except ValueError:
+        await callback.answer("ราคาไม่ถูกต้อง", show_alert=True)
+        return
 
     data = await state.get_data()
     days = data.get("promo_days", 0)
 
-    update_promotion(days=days, price=price, qr_filename=qr_map.get(price, ""))
+    update_promotion(days=days, price=price, qr_filename="")
     # Defaults to False on setting change to be safe
     update_promotion(is_active=False)
 
@@ -220,6 +222,49 @@ async def process_promo_price(callback: CallbackQuery, state: FSMContext):
     ])
 
     await callback.message.edit_text(
+        f"✅ <b>ตั้งค่าโปรโมชั่นสำเร็จ!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏳ <b>จำนวนวัน:</b> {days} วัน\n"
+        f"💰 <b>ราคา:</b> {price:,} บาท\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"⚠️ <i>สถานะโปรโมชั่นถูกรีเซ็ตเป็น 'ปิด' กรุณาแตะ /promotion_on หรือกดปุ่มด้านล่างเพื่อเปิดใช้งาน</i>",
+        reply_markup=finish_kb,
+        parse_mode="HTML"
+    )
+    await state.clear()
+
+
+@router.message(F.chat.id == config.ADMIN_GROUP_ID, PromoSettingStates.waiting_for_price)
+async def process_promo_price_text(message: Message, state: FSMContext):
+    if message.text == "/cancel":
+        await state.clear()
+        await message.answer("❌ ยกเลิกการตั้งค่าโปรโมชั่นแล้ว")
+        return
+
+    try:
+        price = int(message.text.strip())
+        if price <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ ราคาไม่ถูกต้อง กรุณาพิมพ์ตัวเลขราคาใหม่ (เช่น 199, 299 หรือพิมพ์ /cancel):")
+        return
+
+    data = await state.get_data()
+    days = data.get("promo_days", 0)
+
+    update_promotion(days=days, price=price, qr_filename="")
+    update_promotion(is_active=False)
+
+    finish_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🟢 เปิดใช้งานโปรโมชั่นทันที", callback_data="promo_action:on"),
+        ],
+        [
+            InlineKeyboardButton(text="📋 ดูสถานะโปรโมชั่น", callback_data="admin_menu:promotion"),
+        ]
+    ])
+
+    await message.answer(
         f"✅ <b>ตั้งค่าโปรโมชั่นสำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"⏳ <b>จำนวนวัน:</b> {days} วัน\n"
