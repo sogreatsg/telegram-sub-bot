@@ -145,8 +145,8 @@ def format_time_remaining(expires_at: datetime) -> str:
 
 
 @router.message(CommandStart())
-async def handle_start(message: Message, state: FSMContext):
-    """จัดการคำสั่ง /start ตรวจสอบผู้ใช้ ล้างสถานะ FSM รองรับ Deep link แนะนำเพื่อน และแสดงเมนูหลัก (เฉพาะสมาชิก V.2)"""
+async def handle_start(message: Message, state: FSMContext, bot: Optional[Bot] = None):
+    """จัดการคำสั่ง /start ตรวจสอบผู้ใช้ ล้างสถานะ FSM รองรับ Deep link แจ้งเตือนแอดมิน และแสดงเมนูหลัก (เฉพาะสมาชิก V.2/V.3)"""
     try:
         await state.clear()
     except Exception:
@@ -168,26 +168,90 @@ async def handle_start(message: Message, state: FSMContext):
     telegram_user = message.from_user
     trial_available = True
     is_v2 = False
+    db_user = None
     try:
         async with get_session() as session:
-            user, _ = await get_or_create_user(
+            db_user, _ = await get_or_create_user(
                 session=session,
                 telegram_id=telegram_user.id,
                 username=telegram_user.username,
                 full_name=telegram_user.full_name or telegram_user.first_name,
                 referred_by_id=referrer_id,
             )
-            trial_available = not user.trial_used
-            is_v2 = is_user_v2_member(user)
+            trial_available = not db_user.trial_used
+            is_v2 = is_user_v2_member(db_user)
     except Exception as e:
         logger.error(f"Error checking user in handle_start: {e}", exc_info=True)
 
     try:
-        await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text="/start")
+        await log_chat_message(user_id=telegram_user.id, sender_role="USER", message_text=message.text or "/start")
     except Exception:
         pass
 
-    # กฎ: ถ้าใครอยู่ V.1 หรือสมัครใหม่ ให้แชทบอทไม่ต้องตอบ (ตอบเฉพาะสมาชิก V.2)
+    # ระบุชื่อห้องของสมาชิก
+    assigned = getattr(db_user, "assigned_channel", None) if db_user else None
+    if assigned == "TERTIARY" or getattr(db_user, "is_moved_to_tertiary", False):
+        room_label = "🟢 BareLive V.3 (ห้องใหม่)"
+    elif is_v2:
+        room_label = "🟢 BareLive V.2 (ห้องใหม่)"
+    else:
+        room_label = "🔵 BareLive V.1 (ห้องเดิม)"
+
+    # ส่งข้อความแจ้งเตือนเข้ากลุ่ม Admin เสมอเมื่อมีใครกด /start (รองรับทุกคนทั้ง V.1, V.2, V.3 และผู้ใช้ใหม่)
+    if config.ADMIN_GROUP_ID:
+        user_name = html.escape(telegram_user.full_name or telegram_user.first_name)
+        user_handle = f"@{telegram_user.username}" if telegram_user.username else "ไม่มี Username"
+        time_now = format_thai_datetime(datetime.now(timezone.utc))
+
+        payload_info = ""
+        if referrer_id:
+            payload_info = f"\n🔗 <b>ลิงก์แนะนำ (Referral):</b> <code>ref_{referrer_id}</code> (ผู้ชวน: <code>{referrer_id}</code>)"
+        elif message.text and len(message.text.strip().split()) > 1:
+            raw_payload = html.escape(message.text.strip().split(maxsplit=1)[1])
+            payload_info = f"\n🔗 <b>Payload:</b> <code>{raw_payload}</code>"
+
+        status_note = "✅ ตอบกลับเมนูหลักใน DM ให้ผู้ใช้" if is_v2 else "🔒 บอทไม่ตอบกลับใน DM (สมาชิก V.1 / ผู้ใช้ใหม่)"
+
+        admin_start_alert = (
+            "🚀 <b>มีผู้ใช้กดคำสั่ง /start!</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n"
+            f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
+            f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
+            f"📌 <b>ห้องสมาชิก:</b> <code>{room_label}</code>\n"
+            f"ℹ️ <b>สถานะการทำงาน:</b> {status_note}"
+            f"{payload_info}\n"
+            f"📅 <b>เวลา:</b> <code>{time_now} น.</code>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "📋 <b>แตะข้อความด้านล่างเพื่อคัดลอกคำสั่ง:</b>\n"
+            f"<code>/user {telegram_user.id}</code>\n"
+            f"<code>/reply {telegram_user.id} </code>\n"
+            f"<code>/move_user_v3 {telegram_user.id}</code>"
+        )
+
+        admin_keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{telegram_user.id}"),
+                    InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{telegram_user.id}"),
+                ],
+            ]
+        )
+
+        try:
+            bot_obj = bot or message.bot
+            if bot_obj:
+                await bot_obj.send_message(
+                    chat_id=config.ADMIN_GROUP_ID,
+                    text=admin_start_alert,
+                    reply_markup=admin_keyboard,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                )
+        except Exception as e:
+            logger.error(f"Failed to forward /start notification to Admin Group {config.ADMIN_GROUP_ID}: {e}")
+
+    # กฎ: ถ้าใครอยู่ V.1 หรือสมัครใหม่ ให้แชทบอทไม่ต้องตอบ (ตอบเฉพาะสมาชิก V.2 / V.3)
     if not is_v2:
         logger.info(f"Bot ignored /start from non-V2 user {telegram_user.id} (@{telegram_user.username})")
         return
