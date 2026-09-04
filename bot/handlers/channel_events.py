@@ -362,11 +362,11 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
     try:
         welcome_dm = (
             f"🎉 <b>ยินดีต้อนรับเข้าสู่ {channel_label}!</b>\n\n"
-            f"แพ็กเกจ <b>{plan_title}</b> ของคุณเปิดใช้งานเรียบร้อยแล้ว 🚀\n\n"
+            "สิทธิ์การเข้าใช้งานของคุณเปิดใช้งานเรียบร้อยแล้ว 🚀\n\n"
             f"⏳ <b>ระยะเวลา:</b> {duration_str}\n"
             f"⏰ <b>เวลาเริ่มต้น:</b> <code>{start_time_thai} น.</code>\n"
             f"📅 <b>หมดอายุวันที่:</b> <code>{expires_at_thai} น.</code>\n\n"
-            f"ขอให้เพลิดเพลินกับเนื้อหาพิเศษของเราครับ!"
+            "ขอให้เพลิดเพลินกับเนื้อหาพิเศษของเราครับ!"
         )
         await bot.send_message(
             chat_id=user_id,

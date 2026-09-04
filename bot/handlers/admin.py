@@ -3175,16 +3175,11 @@ async def handle_admin_reply_command(message: Message, bot: Bot):
                 )
                 return
 
-    dm_msg = (
-        "💬 <b>ข้อความจากทีมงานผู้ดูแลระบบ:</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"{html.escape(reply_text)}\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 <i>คุณสามารถพิมพ์ข้อความตอบกลับในแชทนี้ได้ตลอดเวลาครับ</i>"
-    )
-
     try:
-        await bot.send_message(chat_id=target_uid, text=dm_msg, parse_mode="HTML")
+        try:
+            await bot.send_message(chat_id=target_uid, text=reply_text, parse_mode="HTML")
+        except Exception:
+            await bot.send_message(chat_id=target_uid, text=reply_text, parse_mode=None)
         await log_chat_message(user_id=target_uid, sender_role="ADMIN", message_text=reply_text)
         await message.answer(
             f"✅ <b>ส่งข้อความไปยัง {user_name} (<code>{target_uid}</code>) สำเร็จ!</b>\n\n"
@@ -3227,16 +3222,11 @@ async def handle_admin_swipe_reply(message: Message, bot: Bot):
             )
             return
 
-    dm_msg = (
-        "💬 <b>ข้อความจากทีมงานผู้ดูแลระบบ:</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        f"{html.escape(reply_text)}\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "💡 <i>คุณสามารถพิมพ์ข้อความตอบกลับในแชทนี้ได้ตลอดเวลาครับ</i>"
-    )
-
     try:
-        await bot.send_message(chat_id=target_uid, text=dm_msg, parse_mode="HTML")
+        try:
+            await bot.send_message(chat_id=target_uid, text=reply_text, parse_mode="HTML")
+        except Exception:
+            await bot.send_message(chat_id=target_uid, text=reply_text, parse_mode=None)
         await log_chat_message(user_id=target_uid, sender_role="ADMIN", message_text=reply_text)
         await message.reply(
             f"✅ <b>ตอบกลับข้อความไปยังผู้ใช้ (<code>{target_uid}</code>) สำเร็จ!</b>",
