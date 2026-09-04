@@ -65,6 +65,11 @@ from bot.services.payment_settings import (
     update_auto_approve_setting,
 )
 from bot.handlers.user_menu import get_main_menu_keyboard
+from bot.services.spending import (
+    get_plan_price,
+    get_user_spending_summary,
+    build_top_spenders_view,
+)
 from bot.utils.time_utils import (
     BANGKOK_TZ,
     format_thai_datetime,
@@ -762,10 +767,11 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
         "👑 <b>เมนูคำสั่งผู้ดูแลระบบ (Admin Panel & Commands)</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 <b>1. ตรวจสอบสมาชิก & รายงาน:</b>\n"
+        "• <code>/top_spender</code> — 💎 ดูอันดับผู้ใช้งานที่จ่ายเงินมากที่สุด (Top Spender)\n"
+        "• <code>/top_refs</code> — 🏆 ดูอันดับผู้ใช้งานที่ชวนเพื่อนได้มากที่สุด\n"
         "• <code>/reconcile</code> — 🔍 พรีวิวสรุปยอด & กระทบยอดวันหมดอายุจริง\n"
         "• <code>/reconcile_all</code> — ⚡ ปรับวันหมดอายุของสมาชิกทุกคนทั้งระบบทันที\n"
         "• <code>/audit_user [User ID/@user]</code> — 🔍 ตรวจสอบยอดเวลาสมาชิกรายคน\n"
-        "• <code>/top_refs</code> — 🏆 ดูอันดับผู้ใช้งานที่ชวนเพื่อนได้มากที่สุด\n"
         "• <code>/summary</code> — ดูสรุปสมาชิก Active ปัจจุบันใน Channel\n"
         "• <code>/users_latest</code> — ดูรายชื่อผู้ใช้สมัครใหม่ 10 คนล่าสุด\n"
         "• <code>/users [หน้า]</code> — ดูประวัติผู้ใช้งานทั้งหมดในระบบ\n"
@@ -832,12 +838,12 @@ def get_admin_menu_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🔍 พรีวิว Reconcile ยอด", callback_data="admin:refresh_reconcile_preview"),
-                InlineKeyboardButton(text="📊 สรุปสมาชิก Active", callback_data="admin_menu:summary"),
+                InlineKeyboardButton(text="💎 อันดับ Top Spender (/top_spender)", callback_data="admin_menu:top_spenders"),
+                InlineKeyboardButton(text="🏆 อันดับชวนเพื่อน (/top_refs)", callback_data="admin_menu:top_referrals"),
             ],
             [
-                InlineKeyboardButton(text="🏆 อันดับชวนเพื่อน (/top_refs)", callback_data="admin_menu:top_referrals"),
-                InlineKeyboardButton(text="🔄 ซิงค์สมาชิกค้าง (/sync)", callback_data="admin_menu:sync"),
+                InlineKeyboardButton(text="🔍 พรีวิว Reconcile ยอด", callback_data="admin:refresh_reconcile_preview"),
+                InlineKeyboardButton(text="📊 สรุปสมาชิก Active", callback_data="admin_menu:summary"),
             ],
             [
                 InlineKeyboardButton(text="⚡ 10 ผู้ใช้ล่าสุด (/users_lasted)", callback_data="admin_menu:users_latest"),
@@ -1266,7 +1272,7 @@ async def build_user_audit_report(query: str, bot: Bot) -> tuple[str, Optional[I
 
     # --- คำนวณหมวดที่ 2: แพ็กเกจที่ชำระเงิน & Admin มอบให้ (จาก ledger การเติมวันทั้งหมด) ---
     approved_slips = [s for s in slips if s.status == SlipStatus.APPROVED.value or s.status == "APPROVED"]
-    total_paid_thb = sum(s.amount or 0 for s in approved_slips)
+    total_paid_thb = sum(get_plan_price(s.plan_type) for s in approved_slips)
 
     admin_grant_days = sum(g.days for g in grants if g.grant_type == GrantType.ADMIN_GRANT.value)
     package_bought_days = sum(g.days for g in grants if g.grant_type in (GrantType.PURCHASE.value, GrantType.PROMOTION.value))
@@ -2795,6 +2801,7 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
             .order_by(PaymentSlip.id.desc())
         )
         slips = (await session.execute(slips_stmt)).scalars().all()
+        spending_summary = await get_user_spending_summary(user.telegram_id, session)
 
     target_channel_id = get_user_target_channel_id(user)
     target_channel_label = get_channel_label(target_channel_id)
@@ -2848,6 +2855,15 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
     else:
         block_status_str = "🟢 <b>ปกติ (ไม่ถูกบล็อก)</b>"
 
+    # สถิติ Top Spender
+    medals_map = {1: "🥇", 2: "🥈", 3: "🥉"}
+    if spending_summary.get("approved_count", 0) > 0:
+        r = spending_summary.get("rank")
+        r_badge = f" (อันดับ #{r} {medals_map.get(r, '')})" if r else ""
+        spending_stat_str = f"💎 <b>สถิติการชำระเงิน (Top Spender):</b> <b>{spending_summary['total_spent']:,} บาท</b> ({spending_summary['approved_count']} รายการ){r_badge}"
+    else:
+        spending_stat_str = "💎 <b>สถิติการชำระเงิน:</b> <i>ยังไม่มีประวัติการชำระเงินสำเร็จ</i>"
+
     # คำนวณสรุปยอดสิทธิ์และเวลาคงเหลือปัจจุบัน (ตรงกับ /summary ทุกประการ)
     now = datetime.now(timezone.utc)
     latest_active_sub = sub if (sub and sub.status == SubStatus.ACTIVE.value and sub.expires_at and ensure_utc(sub.expires_at) > now) else None
@@ -2858,6 +2874,7 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
         f"📢 <b>สถานะใน Channel ปัจจุบัน:</b> <b>{channel_status_str}</b>",
         f"🚫 <b>สถานะการบล็อก:</b> {block_status_str}",
         f"⏱️ <b>เคยใช้สิทธิ์ทดลองฟรี (Trial Used):</b> {'✅ เคยใช้แล้ว' if user.trial_used else '❌ ยังไม่เคยใช้'}",
+        spending_stat_str,
         f"🎁 <b>สถิติ Referral:</b> ชวนสำเร็จ {user.referral_count or 0} คน | โบนัสสะสม {user.referral_bonus_days or 0} วัน",
         f"🔗 <b>สมัครผ่านผู้แนะนำ (Referred By):</b> {ref_by_str}",
         f"📅 <b>เข้าระบบบอทครั้งแรก:</b> <code>{format_thai_datetime(user.created_at)} น.</code>",
@@ -2922,8 +2939,11 @@ async def handle_admin_user_info_command(message: Message, bot: Bot):
         resp.append(f"💳 <b>ประวัติการชำระเงิน ({len(slips)} รายการ):</b>")
         for sl in slips:
             sl_created = format_thai_datetime(sl.created_at)
+            price = get_plan_price(sl.plan_type)
+            price_str = f" (฿{price:,})" if price > 0 else ""
+            plan_str = f" - {sl.plan_type}" if sl.plan_type else ""
             method_badge = "🧧 ซอง TrueMoney" if getattr(sl, "payment_method", None) == "TRUEMONEY_ANGPAO" or (sl.file_id and str(sl.file_id).startswith("http")) else "💳 สแกน QR Code"
-            resp.append(f"• #{sl.id} [{method_badge}] | สถานะ: <b>{sl.status}</b> | เวลาส่ง: <code>{sl_created} น.</code>")
+            resp.append(f"• #{sl.id} [{method_badge}]{plan_str}{price_str} | สถานะ: <b>{sl.status}</b> | เวลาส่ง: <code>{sl_created} น.</code>")
 
     resp.append("\n━━━━━━━━━━━━━━━━━━━━")
     resp.append(f"📋 <b>คำสั่งด่วน (แตะเพื่อคัดลอก):</b>")
@@ -5222,6 +5242,85 @@ async def handle_admin_menu_top_referrals_callback(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"Error handling admin_menu:top_referrals: {e}", exc_info=True)
         await callback.message.answer(f"❌ <b>เกิดข้อผิดพลาดในการโหลดอันดับชวนเพื่อน:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
+
+@router.message(Command("top_spender", "top_spenders", "topspender", "topspenders", "spenders", "spending", "spender_ranking", "top_spending"))
+async def handle_admin_top_spenders_command(message: Message):
+    """คำสั่งดูอันดับผู้ใช้งานที่จ่ายเงินมากที่สุด (Top Spender Leaderboard): /top_spender [month|year|all] [หน้า]"""
+    if not is_admin_chat(message.chat.id):
+        return
+
+    args = (message.text or "").split()[1:]
+    period = "all"
+    page = 1
+
+    for arg in args:
+        arg_lower = arg.lower()
+        if arg_lower in ("month", "m", "monthly", "เดือนนี้"):
+            period = "month"
+        elif arg_lower in ("year", "y", "yearly", "ปีนี้"):
+            period = "year"
+        elif arg_lower in ("all", "alltime", "ตลอดกาล"):
+            period = "all"
+        elif arg.isdigit():
+            page = int(arg)
+
+    try:
+        text, markup = await build_top_spenders_view(period=period, page=page)
+        await message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error in top_spenders command: {e}", exc_info=True)
+        await message.answer(f"❌ <b>เกิดข้อผิดพลาด:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("admin:top_spenders_page:"))
+async def handle_admin_top_spenders_page_callback(callback: CallbackQuery):
+    """จัดการการเปลี่ยนหน้า/ช่วงเวลาในรายงาน /top_spender ผ่าน Inline Keyboard"""
+    if not callback.from_user or not callback.message:
+        return
+    if not is_admin_chat(callback.message.chat.id):
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    await callback.answer()
+    parts = callback.data.split(":")
+    period = "all"
+    page = 1
+    if len(parts) >= 4:
+        period = parts[2]
+        try:
+            page = int(parts[3])
+        except ValueError:
+            page = 1
+    elif len(parts) == 3:
+        if parts[2].isdigit():
+            page = int(parts[2])
+        else:
+            period = parts[2]
+
+    try:
+        text, markup = await build_top_spenders_view(period=period, page=page)
+        await callback.message.edit_text(text=text, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error editing top_spenders page: {e}", exc_info=True)
+
+
+@router.callback_query(F.data == "admin_menu:top_spenders")
+async def handle_admin_menu_top_spenders_callback(callback: CallbackQuery):
+    """จัดการปุ่มลัด [💎 อันดับ Top Spender] ในเมนู Admin"""
+    if not callback.from_user or not callback.message:
+        return
+    if not is_admin_chat(callback.message.chat.id):
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    await callback.answer()
+    try:
+        text, markup = await build_top_spenders_view(period="all", page=1)
+        await callback.message.answer(text=text, reply_markup=markup, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Error handling admin_menu:top_spenders: {e}", exc_info=True)
+        await callback.message.answer(f"❌ <b>เกิดข้อผิดพลาดในการโหลดอันดับ Top Spender:</b> <code>{html.escape(str(e))}</code>", parse_mode="HTML")
 
 
 async def get_referral_status_text_and_kb() -> tuple[str, InlineKeyboardMarkup]:
