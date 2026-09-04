@@ -149,6 +149,20 @@ async def test_v3_features():
     assert mock_callback.message.answer.called
     assert mock_callback.answer.called
 
+    print("--- 9. Testing Move Menu Callback ---")
+    from bot.handlers.admin import handle_admin_move_menu_callback
+    mock_menu_cb = AsyncMock()
+    mock_menu_cb.message.chat.id = config.ADMIN_GROUP_ID
+    mock_menu_cb.from_user.id = 9999
+    mock_menu_cb.data = "admin:move_menu:2003"
+    mock_menu_cb.answer = AsyncMock()
+    mock_menu_cb.message.edit_text = AsyncMock()
+
+    await handle_admin_move_menu_callback(mock_menu_cb, mock_bot)
+    assert mock_menu_cb.message.edit_text.called
+    menu_text = mock_menu_cb.message.edit_text.call_args[1]["text"]
+    assert "เมนูจัดการย้าย Channel สำหรับสมาชิก" in menu_text
+
     await close_db()
     print("\n=========================================")
     print(" ALL V.3 TESTS PASSED SUCCESSFULLY! (100%)")

@@ -2678,6 +2678,9 @@ def build_admin_user_action_keyboard(user: Optional[User], user_id: int) -> Inli
             InlineKeyboardButton(text="🔍 ตรวจสอบยอด (Audit)", callback_data=f"admin:audit_user:{user_id}"),
             InlineKeyboardButton(text="📜 ดูประวัติการคุย", callback_data=f"admin:view_chat:{user_id}"),
         ],
+        [
+            InlineKeyboardButton(text="🚀 เมนูย้าย Channel / ส่งลิงก์ห้องใหม่", callback_data=f"admin:move_menu:{user_id}"),
+        ],
     ]
 
     # ปุ่มย้ายไป Channel V.3
@@ -3588,6 +3591,76 @@ async def handle_admin_view_user_callback(callback: CallbackQuery, bot: Bot):
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("admin:move_menu:"))
+async def handle_admin_move_menu_callback(callback: CallbackQuery, bot: Bot):
+    """Callback เปิดเมนูย้าย Channel สำหรับสมาชิก"""
+    if not callback.from_user or not callback.message:
+        return
+    if callback.message.chat.id != config.ADMIN_GROUP_ID:
+        await callback.answer("❌ คำสั่งนี้สำหรับกลุ่ม Admin เท่านั้น", show_alert=True)
+        return
+
+    uid_str = callback.data.split(":")[-1]
+    if not uid_str.isdigit():
+        await callback.answer("❌ User ID ไม่ถูกต้อง")
+        return
+
+    user_id = int(uid_str)
+    async with get_session() as session:
+        user = (await session.execute(select(User).where(User.telegram_id == user_id))).scalar_one_or_none()
+        if not user:
+            await callback.answer("❌ ไม่พบข้อมูลผู้ใช้ในระบบ", show_alert=True)
+            return
+
+    in_channels, _, _ = await check_user_presence_all_channels(bot, user_id)
+    presence_str = format_user_channel_presence(in_channels)
+    target_cid = get_user_target_channel_id(user)
+    target_name = get_channel_label(target_cid)
+    assigned = getattr(user, "assigned_channel", "PRIMARY")
+    user_header = format_user_title(user.full_name, user.username, user_id)
+
+    ter_title = get_channel_label(config.TERTIARY_CHANNEL_ID) if config.TERTIARY_CHANNEL_ID else "BareLive V.3"
+    sec_title = get_channel_label(config.SECONDARY_CHANNEL_ID) if config.SECONDARY_CHANNEL_ID else "BareLive V.2"
+    pri_title = get_channel_label(config.CHANNEL_ID)
+
+    text = (
+        "🚀 <b>เมนูจัดการย้าย Channel สำหรับสมาชิก</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
+        f"🔢 <b>User ID:</b> <code>{user_id}</code>\n"
+        f"🎯 <b>Channel ประจำตัวปัจจุบัน:</b> <b>{target_name}</b> (<code>{target_cid}</code>)\n"
+        f"📢 <b>สถานะในห้องจริง:</b> <b>{presence_str}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "👉 <b>เลือก Channel ที่ต้องการย้ายสมาชิกไป:</b>\n"
+        "<i>(ระบบจะบันทึกห้องประจำตัวใหม่ ปลดแบน และสร้าง Invite Link 7 วัน 1 ครั้ง ส่งให้ผู้ใช้ทาง DM อัตโนมัติ)</i>"
+    )
+
+    kb_buttons = []
+    if config.TERTIARY_CHANNEL_ID:
+        if assigned == "TERTIARY":
+            kb_buttons.append([InlineKeyboardButton(text=f"🔗 ส่งลิงก์ {ter_title} ใหม่ (7 วัน)", callback_data=f"admin:quick_move_v3:{user_id}")])
+        else:
+            kb_buttons.append([InlineKeyboardButton(text=f"🚀 ย้ายไป {ter_title} (ส่งลิงก์ 7 วัน)", callback_data=f"admin:quick_move_v3:{user_id}")])
+
+    if config.SECONDARY_CHANNEL_ID:
+        if assigned == "SECONDARY":
+            kb_buttons.append([InlineKeyboardButton(text=f"🔗 ส่งลิงก์ {sec_title} ใหม่ (7 วัน)", callback_data=f"admin:quick_move:{user_id}")])
+        else:
+            kb_buttons.append([InlineKeyboardButton(text=f"🚀 ย้ายไป {sec_title} (ส่งลิงก์ 7 วัน)", callback_data=f"admin:quick_move:{user_id}")])
+
+    if assigned in ("SECONDARY", "TERTIARY") or getattr(user, "is_moved_to_secondary", False):
+        kb_buttons.append([InlineKeyboardButton(text=f"🔄 ย้ายกลับ {pri_title} (ห้องหลัก)", callback_data=f"admin:quick_unmove:{user_id}")])
+
+    kb_buttons.append([InlineKeyboardButton(text="🔙 ย้อนกลับ (ข้อมูลสมาชิก)", callback_data=f"admin:view_user:{user_id}")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+    try:
+        await callback.message.edit_text(text=text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await callback.message.answer(text=text, reply_markup=kb, parse_mode="HTML")
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("admin:quick_move_v3:"))
 async def handle_admin_quick_move_v3_callback(callback: CallbackQuery, bot: Bot):
     """Callback เมื่อแอดมินกดปุ่มลัด [🚀 ย้ายไป BareLive V.3] หรือ [🔗 ส่งลิงก์ V.3 ใหม่] ในเมนู /user"""
@@ -3695,7 +3768,16 @@ async def handle_admin_quick_move_v3_callback(callback: CallbackQuery, bot: Bot)
         f"ℹ️ <i>บันทึกสถานะผู้ใช้เป็น {target_channel_title} เรียบร้อย การซื้อ/ต่ออายุในอนาคตจะส่งลิงก์ห้องนี้ให้อัตโนมัติ</i>"
     )
 
-    await callback.message.answer(admin_reply, parse_mode="HTML", disable_web_page_preview=True)
+    action_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{target_uid}"),
+                InlineKeyboardButton(text="🚀 เมนูย้าย Channel", callback_data=f"admin:move_menu:{target_uid}"),
+            ]
+        ]
+    )
+
+    await callback.message.answer(admin_reply, reply_markup=action_kb, parse_mode="HTML", disable_web_page_preview=True)
     await callback.answer(f"✅ ย้ายไปยัง {target_channel_title} และส่งลิงก์ 7 วันแล้ว!", show_alert=True)
 
 
@@ -3806,7 +3888,16 @@ async def handle_admin_quick_move_callback(callback: CallbackQuery, bot: Bot):
         f"ℹ️ <i>บันทึกสถานะผู้ใช้เป็น {target_channel_title} เรียบร้อย การซื้อ/ต่ออายุในอนาคตจะส่งลิงก์ห้องนี้ให้อัตโนมัติ</i>"
     )
 
-    await callback.message.answer(admin_reply, parse_mode="HTML", disable_web_page_preview=True)
+    action_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{target_uid}"),
+                InlineKeyboardButton(text="🚀 เมนูย้าย Channel", callback_data=f"admin:move_menu:{target_uid}"),
+            ]
+        ]
+    )
+
+    await callback.message.answer(admin_reply, reply_markup=action_kb, parse_mode="HTML", disable_web_page_preview=True)
     await callback.answer(f"✅ ย้ายไปยัง {target_channel_title} และส่งลิงก์ 7 วันแล้ว!", show_alert=True)
 
 
@@ -3838,10 +3929,21 @@ async def handle_admin_quick_unmove_callback(callback: CallbackQuery, bot: Bot):
 
     primary_title = get_channel_label(config.CHANNEL_ID)
     user_header = format_user_title(user.full_name, user.username, user.telegram_id)
+    
+    action_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👤 ดูข้อมูลสมาชิก", callback_data=f"admin:view_user:{target_uid}"),
+                InlineKeyboardButton(text="🚀 เมนูย้าย Channel", callback_data=f"admin:move_menu:{target_uid}"),
+            ]
+        ]
+    )
+
     await callback.message.answer(
         f"🔄 <b>ย้ายผู้ใช้กลับสู่ {primary_title} เรียบร้อย!</b>\n\n"
         f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
         f"📢 <b>Channel ประจำตัว:</b> <b>{primary_title}</b> (<code>{config.CHANNEL_ID}</code>)",
+        reply_markup=action_kb,
         parse_mode="HTML"
     )
     await callback.answer(f"✅ ย้ายกลับสู่ {primary_title} เรียบร้อยแล้ว", show_alert=True)
