@@ -150,7 +150,12 @@ async def test_v3_features():
     assert mock_callback.answer.called
 
     print("--- 9. Testing Move Menu Callback ---")
-    from bot.handlers.admin import handle_admin_move_menu_callback
+    from bot.handlers.admin import (
+        handle_admin_move_menu_callback,
+        handle_admin_move_user_command,
+        handle_admin_quick_move_callback,
+        handle_admin_quick_unmove_callback,
+    )
     mock_menu_cb = AsyncMock()
     mock_menu_cb.message.chat.id = config.ADMIN_GROUP_ID
     mock_menu_cb.from_user.id = 9999
@@ -163,10 +168,74 @@ async def test_v3_features():
     menu_text = mock_menu_cb.message.edit_text.call_args[1]["text"]
     assert "เมนูจัดการย้าย Channel สำหรับสมาชิก" in menu_text
 
+    print("--- 10. Testing Unmove User Command & Kick from V.2 and V.3 ---")
+    mock_unmove_msg = AsyncMock()
+    mock_unmove_msg.chat.id = config.ADMIN_GROUP_ID
+    mock_unmove_msg.text = "/unmove_user 2003"
+    mock_unmove_msg.answer = AsyncMock()
+    mock_bot.ban_chat_member.reset_mock()
+    mock_bot.unban_chat_member.reset_mock()
+
+    await handle_admin_unmove_user_command(mock_unmove_msg, mock_bot)
+    assert mock_unmove_msg.answer.called
+    unmove_answer = mock_unmove_msg.answer.call_args[0][0]
+    assert "ย้ายผู้ใช้กลับสู่" in unmove_answer
+    assert "เตะออกจาก:" in unmove_answer
+
+    # Verify soft-kicked from V.2 and V.3
+    banned_cids = [call.kwargs["chat_id"] for call in mock_bot.ban_chat_member.call_args_list]
+    assert config.SECONDARY_CHANNEL_ID in banned_cids
+    assert config.TERTIARY_CHANNEL_ID in banned_cids
+
+    async with get_session() as session:
+        u_unmove = await session.get(User, 2003)
+        assert u_unmove.assigned_channel == "PRIMARY"
+        assert u_unmove.is_moved_to_secondary is False
+
+    print("--- 11. Testing Move to V.2 & Kick from V.3 ---")
+    mock_move_v2_msg = AsyncMock()
+    mock_move_v2_msg.chat.id = config.ADMIN_GROUP_ID
+    mock_move_v2_msg.text = "/move_user 2003"
+    mock_move_v2_msg.answer = AsyncMock()
+    mock_bot.ban_chat_member.reset_mock()
+    mock_bot.unban_chat_member.reset_mock()
+
+    await handle_admin_move_user_command(mock_move_v2_msg, mock_bot)
+    assert mock_move_v2_msg.answer.called
+    move_v2_answer = mock_move_v2_msg.answer.call_args[0][0]
+    assert "BareLive V.2" in move_v2_answer
+    assert "เตะออกจาก:" in move_v2_answer
+
+    # Verify soft-kicked from V.3
+    banned_cids_v2 = [call.kwargs["chat_id"] for call in mock_bot.ban_chat_member.call_args_list]
+    assert config.TERTIARY_CHANNEL_ID in banned_cids_v2
+
+    async with get_session() as session:
+        u_v2 = await session.get(User, 2003)
+        assert u_v2.assigned_channel == "SECONDARY"
+        assert u_v2.is_moved_to_secondary is True
+
+    print("--- 12. Testing Quick Unmove Callback & Kick from V.2 and V.3 ---")
+    mock_quick_unmove_cb = AsyncMock()
+    mock_quick_unmove_cb.message.chat.id = config.ADMIN_GROUP_ID
+    mock_quick_unmove_cb.from_user.id = 9999
+    mock_quick_unmove_cb.data = "admin:quick_unmove:2003"
+    mock_quick_unmove_cb.answer = AsyncMock()
+    mock_quick_unmove_cb.message.answer = AsyncMock()
+    mock_bot.ban_chat_member.reset_mock()
+
+    await handle_admin_quick_unmove_callback(mock_quick_unmove_cb, mock_bot)
+    assert mock_quick_unmove_cb.message.answer.called
+    assert mock_quick_unmove_cb.answer.called
+    banned_cids_quick_unmove = [call.kwargs["chat_id"] for call in mock_bot.ban_chat_member.call_args_list]
+    assert config.SECONDARY_CHANNEL_ID in banned_cids_quick_unmove
+    assert config.TERTIARY_CHANNEL_ID in banned_cids_quick_unmove
+
     await close_db()
     print("\n=========================================")
     print(" ALL V.3 TESTS PASSED SUCCESSFULLY! (100%)")
     print("=========================================\n")
+
 
 if __name__ == "__main__":
     asyncio.run(test_v3_features())

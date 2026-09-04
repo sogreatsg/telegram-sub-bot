@@ -40,6 +40,7 @@ from bot.services.channel_service import (
     get_channel_label,
     get_discussion_chat_id,
     resolve_chat_group,
+    kick_user_from_channel,
     kick_user_from_all_target_channels,
     unban_user_in_channel,
     unban_user_in_all_target_channels,
@@ -2309,6 +2310,15 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
         session.add(user)
         await session.commit()
 
+    # เตะออกจาก Channel V.3 (หากมีอยู่ใน V.3)
+    kicked_rooms = []
+    if config.TERTIARY_CHANNEL_ID:
+        try:
+            await kick_user_from_channel(bot, config.TERTIARY_CHANNEL_ID, target_uid)
+            kicked_rooms.append(get_channel_label(config.TERTIARY_CHANNEL_ID))
+        except Exception as e:
+            logger.warning(f"Could not kick User {target_uid} from V.3 during move to V.2: {e}")
+
     # ปลดแบนใน Channel ใหม่ก่อนสร้างลิงก์
     await unban_user_in_channel(bot, config.SECONDARY_CHANNEL_ID, target_uid)
 
@@ -2376,6 +2386,7 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
     except Exception:
         pass
 
+    kick_note = f"\n🚪 <b>เตะออกจาก:</b> {', '.join(kicked_rooms)} (Soft-kick เรียบร้อย)" if kicked_rooms else ""
     admin_reply = (
         "🌟 <b>ย้ายสมาชิกไปยัง Channel ใหม่สำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -2384,7 +2395,8 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
         f"📢 <b>Channel เป้าหมาย:</b> <b>{target_channel_title}</b> (<code>{config.SECONDARY_CHANNEL_ID}</code>)\n"
         f"⏳ <b>อายุลิงก์เชิญ:</b> 7 วัน (หมดอายุ: <code>{expire_thai} น.</code>)\n"
         f"🔗 <b>Invite Link:</b>\n<code>{invite_url}</code>\n"
-        f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}\n"
+        f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}"
+        f"{kick_note}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"ℹ️ <i>บันทึกสถานะผู้ใช้เป็น {target_channel_title} เรียบร้อย การซื้อ/ต่ออายุในอนาคตจะส่งลิงก์ห้องนี้ให้อัตโนมัติ</i>\n"
         "<i>เมื่อผู้ใช้กดเข้าร่วมห้อง ระบบจะส่งแจ้งเตือนเข้ากลุ่มแอดมินทันที</i>"
@@ -2449,6 +2461,15 @@ async def handle_admin_move_user_v3_command(message: Message, bot: Bot):
         user.assigned_channel = "TERTIARY"
         session.add(user)
         await session.commit()
+
+    # เตะออกจาก Channel V.2 (หากมีอยู่ใน V.2)
+    kicked_rooms = []
+    if config.SECONDARY_CHANNEL_ID:
+        try:
+            await kick_user_from_channel(bot, config.SECONDARY_CHANNEL_ID, target_uid)
+            kicked_rooms.append(get_channel_label(config.SECONDARY_CHANNEL_ID))
+        except Exception as e:
+            logger.warning(f"Could not kick User {target_uid} from V.2 during move to V.3: {e}")
 
     # ปลดแบนใน Channel V.3 ก่อนสร้างลิงก์
     await unban_user_in_channel(bot, config.TERTIARY_CHANNEL_ID, target_uid)
@@ -2517,6 +2538,7 @@ async def handle_admin_move_user_v3_command(message: Message, bot: Bot):
     except Exception:
         pass
 
+    kick_note = f"\n🚪 <b>เตะออกจาก:</b> {', '.join(kicked_rooms)} (Soft-kick เรียบร้อย)" if kicked_rooms else ""
     admin_reply = (
         f"🌟 <b>ย้ายสมาชิกไปยัง {target_channel_title} สำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -2525,7 +2547,8 @@ async def handle_admin_move_user_v3_command(message: Message, bot: Bot):
         f"📢 <b>Channel เป้าหมาย:</b> <b>{target_channel_title}</b> (<code>{config.TERTIARY_CHANNEL_ID}</code>)\n"
         f"⏳ <b>อายุลิงก์เชิญ:</b> 7 วัน (หมดอายุ: <code>{expire_thai} น.</code>)\n"
         f"🔗 <b>Invite Link:</b>\n<code>{invite_url}</code>\n"
-        f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}\n"
+        f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}"
+        f"{kick_note}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"ℹ️ <i>บันทึกสถานะผู้ใช้เป็น {target_channel_title} เรียบร้อย การซื้อ/ต่ออายุในอนาคตจะส่งลิงก์ห้องนี้ให้อัตโนมัติ</i>\n"
         "<i>เมื่อผู้ใช้กดเข้าร่วมห้อง ระบบจะส่งแจ้งเตือนเข้ากลุ่มแอดมินทันที</i>"
@@ -2535,7 +2558,7 @@ async def handle_admin_move_user_v3_command(message: Message, bot: Bot):
 
 
 @router.message(Command("unmove_user", "move_user_back"))
-async def handle_admin_unmove_user_command(message: Message):
+async def handle_admin_unmove_user_command(message: Message, bot: Bot):
     """คำสั่งแอดมินสำหรับย้ายผู้ใช้กลับสู่ Channel เดิม (Primary Channel): /unmove_user <User ID หรือ @username>"""
     if message.chat.id != config.ADMIN_GROUP_ID:
         return
@@ -2557,17 +2580,39 @@ async def handle_admin_unmove_user_command(message: Message):
             await message.answer(f"❌ ไม่พบข้อมูลผู้ใช้ <code>{html.escape(query)}</code> ในระบบ", parse_mode="HTML")
             return
 
+        target_uid = user.telegram_id
         user.is_moved_to_secondary = False
         user.assigned_channel = "PRIMARY"
         session.add(user)
         await session.commit()
 
+    # เตะผู้ใช้ออกจาก Channel V.2 และ V.3
+    kicked_rooms = []
+    if config.SECONDARY_CHANNEL_ID:
+        try:
+            await kick_user_from_channel(bot, config.SECONDARY_CHANNEL_ID, target_uid)
+            kicked_rooms.append(get_channel_label(config.SECONDARY_CHANNEL_ID))
+        except Exception as e:
+            logger.warning(f"Could not kick User {target_uid} from V.2 during unmove: {e}")
+
+    if config.TERTIARY_CHANNEL_ID:
+        try:
+            await kick_user_from_channel(bot, config.TERTIARY_CHANNEL_ID, target_uid)
+            kicked_rooms.append(get_channel_label(config.TERTIARY_CHANNEL_ID))
+        except Exception as e:
+            logger.warning(f"Could not kick User {target_uid} from V.3 during unmove: {e}")
+
+    # ปลดแบนใน Channel V.1
+    await unban_user_in_channel(bot, config.CHANNEL_ID, target_uid)
+
     primary_title = get_channel_label(config.CHANNEL_ID)
     user_header = format_user_title(user.full_name, user.username, user.telegram_id)
+    kick_info = f"\n🚪 <b>เตะออกจาก:</b> {', '.join(kicked_rooms)} (Soft-kick เรียบร้อย)" if kicked_rooms else ""
     await message.answer(
         f"🔄 <b>ย้ายผู้ใช้กลับสู่ {primary_title} เรียบร้อย!</b>\n\n"
         f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-        f"📢 <b>Channel ประจำตัว:</b> <b>{primary_title}</b> (<code>{config.CHANNEL_ID}</code>)",
+        f"📢 <b>Channel ประจำตัว:</b> <b>{primary_title}</b> (<code>{config.CHANNEL_ID}</code>)"
+        f"{kick_info}",
         parse_mode="HTML"
     )
 
@@ -3720,6 +3765,15 @@ async def handle_admin_quick_move_v3_callback(callback: CallbackQuery, bot: Bot)
         session.add(user)
         await session.commit()
 
+    # เตะออกจาก Channel V.2 (หากมีอยู่ใน V.2)
+    kicked_rooms = []
+    if config.SECONDARY_CHANNEL_ID:
+        try:
+            await kick_user_from_channel(bot, config.SECONDARY_CHANNEL_ID, target_uid)
+            kicked_rooms.append(get_channel_label(config.SECONDARY_CHANNEL_ID))
+        except Exception as e:
+            logger.warning(f"Could not kick User {target_uid} from V.2 during quick move V3: {e}")
+
     # ปลดแบนใน Channel V.3 ก่อนสร้างลิงก์
     await unban_user_in_channel(bot, config.TERTIARY_CHANNEL_ID, target_uid)
 
@@ -3783,6 +3837,7 @@ async def handle_admin_quick_move_v3_callback(callback: CallbackQuery, bot: Bot)
     except Exception:
         pass
 
+    kick_note = f"\n🚪 <b>เตะออกจาก:</b> {', '.join(kicked_rooms)} (Soft-kick เรียบร้อย)" if kicked_rooms else ""
     admin_reply = (
         f"🌟 <b>ย้ายสมาชิกไปยัง {target_channel_title} สำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -3791,7 +3846,8 @@ async def handle_admin_quick_move_v3_callback(callback: CallbackQuery, bot: Bot)
         f"📢 <b>Channel เป้าหมาย:</b> <b>{target_channel_title}</b> (<code>{config.TERTIARY_CHANNEL_ID}</code>)\n"
         f"⏳ <b>อายุลิงก์เชิญ:</b> 7 วัน (หมดอายุ: <code>{expire_thai} น.</code>)\n"
         f"🔗 <b>Invite Link:</b>\n<code>{invite_url}</code>\n"
-        f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}\n"
+        f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}"
+        f"{kick_note}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"ℹ️ <i>บันทึกสถานะผู้ใช้เป็น {target_channel_title} เรียบร้อย การซื้อ/ต่ออายุในอนาคตจะส่งลิงก์ห้องนี้ให้อัตโนมัติ</i>"
     )
@@ -3839,6 +3895,15 @@ async def handle_admin_quick_move_callback(callback: CallbackQuery, bot: Bot):
         user.assigned_channel = "SECONDARY"
         session.add(user)
         await session.commit()
+
+    # เตะออกจาก Channel V.3 (หากมีอยู่ใน V.3)
+    kicked_rooms = []
+    if config.TERTIARY_CHANNEL_ID:
+        try:
+            await kick_user_from_channel(bot, config.TERTIARY_CHANNEL_ID, target_uid)
+            kicked_rooms.append(get_channel_label(config.TERTIARY_CHANNEL_ID))
+        except Exception as e:
+            logger.warning(f"Could not kick User {target_uid} from V.3 during quick move V2: {e}")
 
     # ปลดแบนใน Channel ใหม่ก่อนสร้างลิงก์
     await unban_user_in_channel(bot, config.SECONDARY_CHANNEL_ID, target_uid)
@@ -3903,6 +3968,7 @@ async def handle_admin_quick_move_callback(callback: CallbackQuery, bot: Bot):
     except Exception:
         pass
 
+    kick_note = f"\n🚪 <b>เตะออกจาก:</b> {', '.join(kicked_rooms)} (Soft-kick เรียบร้อย)" if kicked_rooms else ""
     admin_reply = (
         f"🌟 <b>ย้ายสมาชิกไปยัง {target_channel_title} สำเร็จ!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -3911,7 +3977,8 @@ async def handle_admin_quick_move_callback(callback: CallbackQuery, bot: Bot):
         f"📢 <b>Channel เป้าหมาย:</b> <b>{target_channel_title}</b> (<code>{config.SECONDARY_CHANNEL_ID}</code>)\n"
         f"⏳ <b>อายุลิงก์เชิญ:</b> 7 วัน (หมดอายุ: <code>{expire_thai} น.</code>)\n"
         f"🔗 <b>Invite Link:</b>\n<code>{invite_url}</code>\n"
-        f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}\n"
+        f"📨 <b>ส่งข้อความ DM หาผู้ใช้:</b> {'สำเร็จ ✅' if user_dm_sent else 'ไม่สำเร็จ (ผู้ใช้บล็อกบอท) ⚠️'}"
+        f"{kick_note}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"ℹ️ <i>บันทึกสถานะผู้ใช้เป็น {target_channel_title} เรียบร้อย การซื้อ/ต่ออายุในอนาคตจะส่งลิงก์ห้องนี้ให้อัตโนมัติ</i>"
     )
@@ -3955,8 +4022,28 @@ async def handle_admin_quick_unmove_callback(callback: CallbackQuery, bot: Bot):
         session.add(user)
         await session.commit()
 
+    # เตะผู้ใช้ออกจาก Channel V.2 และ V.3
+    kicked_rooms = []
+    if config.SECONDARY_CHANNEL_ID:
+        try:
+            await kick_user_from_channel(bot, config.SECONDARY_CHANNEL_ID, target_uid)
+            kicked_rooms.append(get_channel_label(config.SECONDARY_CHANNEL_ID))
+        except Exception as e:
+            logger.warning(f"Could not kick User {target_uid} from V.2 during quick unmove: {e}")
+
+    if config.TERTIARY_CHANNEL_ID:
+        try:
+            await kick_user_from_channel(bot, config.TERTIARY_CHANNEL_ID, target_uid)
+            kicked_rooms.append(get_channel_label(config.TERTIARY_CHANNEL_ID))
+        except Exception as e:
+            logger.warning(f"Could not kick User {target_uid} from V.3 during quick unmove: {e}")
+
+    # ปลดแบนใน Channel V.1
+    await unban_user_in_channel(bot, config.CHANNEL_ID, target_uid)
+
     primary_title = get_channel_label(config.CHANNEL_ID)
     user_header = format_user_title(user.full_name, user.username, user.telegram_id)
+    kick_info = f"\n🚪 <b>เตะออกจาก:</b> {', '.join(kicked_rooms)} (Soft-kick เรียบร้อย)" if kicked_rooms else ""
     
     action_kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -3970,7 +4057,8 @@ async def handle_admin_quick_unmove_callback(callback: CallbackQuery, bot: Bot):
     await callback.message.answer(
         f"🔄 <b>ย้ายผู้ใช้กลับสู่ {primary_title} เรียบร้อย!</b>\n\n"
         f"👤 <b>ผู้ใช้งาน:</b> {user_header}\n"
-        f"📢 <b>Channel ประจำตัว:</b> <b>{primary_title}</b> (<code>{config.CHANNEL_ID}</code>)",
+        f"📢 <b>Channel ประจำตัว:</b> <b>{primary_title}</b> (<code>{config.CHANNEL_ID}</code>)"
+        f"{kick_info}",
         reply_markup=action_kb,
         parse_mode="HTML"
     )
