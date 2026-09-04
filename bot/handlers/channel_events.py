@@ -2,7 +2,7 @@ import logging
 import html
 from datetime import datetime, timezone
 from aiogram import Router, Bot, F
-from aiogram.types import ChatMemberUpdated, ChatJoinRequest, Message
+from aiogram.types import ChatMemberUpdated, ChatJoinRequest, Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ChatMemberStatus
 from sqlalchemy import select
 
@@ -239,9 +239,16 @@ async def _process_joined_member(event, bot: Bot, user, new_status):
                 f"📅 <b>หมดอายุวันที่:</b> <code>{expires_at_thai} น.</code>\n\n"
                 f"ขอให้เพลิดเพลินกับเนื้อหาพิเศษของเราครับ!"
             )
+            welcome_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)", url=config.FREE_CHAT_GROUP_URL)],
+                    [InlineKeyboardButton(text="📱 ดูเมนูหลัก / ตรวจสอบสถานะ", callback_data="menu:main")],
+                ]
+            )
             await bot.send_message(
                 chat_id=user_id,
                 text=welcome_dm,
+                reply_markup=welcome_kb,
                 parse_mode="HTML",
             )
         except Exception as e:

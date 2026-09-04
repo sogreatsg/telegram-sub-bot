@@ -423,7 +423,8 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
             )
             join_keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_label} ตอนนี้", url=invite_url)]
+                    [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_label} ตอนนี้", url=invite_url)],
+                    [InlineKeyboardButton(text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)", url=config.FREE_CHAT_GROUP_URL)],
                 ]
             )
             try:
@@ -1928,9 +1929,19 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
                 f"⏳ <b>หมดอายุวันที่:</b> <code>{exp_thai} น.</code>\n\n"
                 f"🔗 <b>ลิงก์เข้าร่วม {target_channel_label}:</b>\n{invite_url}"
             )
+
+        dm_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_label} ตอนนี้", url=invite_url)] if invite_url and invite_url != "-" else [],
+                [InlineKeyboardButton(text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)", url=config.FREE_CHAT_GROUP_URL)],
+            ]
+        )
+        dm_kb.inline_keyboard = [row for row in dm_kb.inline_keyboard if row]
+
         await bot.send_message(
             chat_id=target_uid,
             text=dm_text,
+            reply_markup=dm_kb,
             parse_mode="HTML",
         )
     except Exception:
@@ -2343,7 +2354,8 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
 
     join_kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_title} ตอนนี้", url=invite_url)]
+            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_title} ตอนนี้", url=invite_url)],
+            [InlineKeyboardButton(text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)", url=config.FREE_CHAT_GROUP_URL)],
         ]
     )
 
@@ -2484,7 +2496,8 @@ async def handle_admin_move_user_v3_command(message: Message, bot: Bot):
 
     join_kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_title} ตอนนี้", url=invite_url)]
+            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_title} ตอนนี้", url=invite_url)],
+            [InlineKeyboardButton(text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)", url=config.FREE_CHAT_GROUP_URL)],
         ]
     )
 
@@ -2633,6 +2646,12 @@ async def handle_admin_reset_trial_command(message: Message, bot: Bot):
                     text="⏱️ ทดลองใช้ฟรี 15 นาที (ทดลองใหม่)",
                     callback_data="menu:trial"
                 )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)",
+                    url=config.FREE_CHAT_GROUP_URL,
+                ),
             ],
             [
                 InlineKeyboardButton(
@@ -3750,7 +3769,8 @@ async def handle_admin_quick_move_v3_callback(callback: CallbackQuery, bot: Bot)
 
     join_kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_title} ตอนนี้", url=invite_url)]
+            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_title} ตอนนี้", url=invite_url)],
+            [InlineKeyboardButton(text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)", url=config.FREE_CHAT_GROUP_URL)],
         ]
     )
 
@@ -3870,7 +3890,8 @@ async def handle_admin_quick_move_callback(callback: CallbackQuery, bot: Bot):
 
     join_kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_title} ตอนนี้", url=invite_url)]
+            [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_title} ตอนนี้", url=invite_url)],
+            [InlineKeyboardButton(text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)", url=config.FREE_CHAT_GROUP_URL)],
         ]
     )
 
@@ -4026,6 +4047,12 @@ async def handle_admin_reset_trial_callback(callback: CallbackQuery, bot: Bot):
                     text="⏱️ ทดลองใช้ฟรี 15 นาที (ทดลองใหม่)",
                     callback_data="menu:trial"
                 )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)",
+                    url=config.FREE_CHAT_GROUP_URL,
+                ),
             ],
             [
                 InlineKeyboardButton(

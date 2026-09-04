@@ -109,10 +109,18 @@ def get_main_menu_keyboard(
 
 
 def get_back_to_menu_keyboard() -> InlineKeyboardMarkup:
-    """สร้างปุ่มย้อนกลับไปเมนูหลัก"""
+    """สร้างปุ่มย้อนกลับไปเมนูหลัก และปุ่มเข้ากลุ่มแชท"""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔙 กลับสู่เมนูหลัก", callback_data="menu:main")]
+            [
+                InlineKeyboardButton(
+                    text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)",
+                    url=config.FREE_CHAT_GROUP_URL,
+                ),
+            ],
+            [
+                InlineKeyboardButton(text="🔙 กลับสู่เมนูหลัก", callback_data="menu:main"),
+            ],
         ]
     )
 
@@ -373,6 +381,7 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
     join_keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_label} ทันที", url=invite_url)],
+            [InlineKeyboardButton(text="💬 เข้ากลุ่มแชทพูดคุย (ฟรี)", url=config.FREE_CHAT_GROUP_URL)],
             [InlineKeyboardButton(text="🔙 กลับสู่เมนูหลัก", callback_data="menu:main")],
         ]
     )

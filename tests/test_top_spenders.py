@@ -1,7 +1,12 @@
+import sys
+import os
 import asyncio
 import unittest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
+
+# Add root directory to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from sqlalchemy import select, delete
 from bot.models.schema import User, Subscription, SubscriptionGrant, PaymentSlip, SlipStatus, SubStatus, PlanType, GrantType
@@ -164,4 +169,4 @@ class TestTopSpenders(unittest.IsolatedAsyncioTestCase):
 
 
 if __name__ == "__main__":
-    asyncio.run(unittest.main())
+    unittest.main()
