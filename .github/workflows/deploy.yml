@@ -31,13 +31,20 @@ jobs:
             # (bot/version.json is gitignored and rebuilt fresh on every deploy).
             python3 scripts/generate_version.py
 
-            # Ensure SECONDARY_CHANNEL_ID is present in .env on server
+            # Ensure SECONDARY_CHANNEL_ID and TERTIARY_CHANNEL_ID are present in .env on server
             if [ -f .env ]; then
               if grep -q "^SECONDARY_CHANNEL_ID=" .env; then
                 sed -i 's/^SECONDARY_CHANNEL_ID=.*/SECONDARY_CHANNEL_ID=-1003940881279/' .env
               else
                 echo "" >> .env
                 echo "SECONDARY_CHANNEL_ID=-1003940881279" >> .env
+              fi
+
+              if grep -q "^TERTIARY_CHANNEL_ID=" .env; then
+                sed -i 's/^TERTIARY_CHANNEL_ID=.*/TERTIARY_CHANNEL_ID=-1003900142712/' .env
+              else
+                echo "" >> .env
+                echo "TERTIARY_CHANNEL_ID=-1003900142712" >> .env
               fi
             fi
 
