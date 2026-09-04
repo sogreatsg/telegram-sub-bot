@@ -620,9 +620,9 @@ async def process_truemoney_submission(
                         "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว (อนุมัติอัตโนมัติ ⚡)!</b>\n"
                         "━━━━━━━━━━━━━━━━━━━━\n"
                         f"📦 <b>แพ็กเกจ:</b> <b>{plan_info['badge']} ({plan_desc})</b> พร้อมใช้งานแล้วครับ\n\n"
-                        f"🔗 <b>ลิงก์เชิญเข้า {target_channel_label} (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
+                        f"📢 <b>ห้องสำหรับสมาชิก:</b> <b>{target_channel_label}</b>\n\n"
                         "📌 <b>ข้อควรทราบ:</b>\n"
-                        "• ลิงก์นี้สามารถใช้งานได้เพียง 1 ครั้งเท่านั้น\n"
+                        "• สามารถกดปุ่มเข้าร่วมได้เพียง 1 ครั้งเท่านั้น\n"
                         f"• <b>ระยะเวลาสมาชิก {plan_desc} จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</b>\n"
                         "━━━━━━━━━━━━━━━━━━━━\n"
                         "กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ! 🚀"
@@ -633,12 +633,20 @@ async def process_truemoney_submission(
                         ]
                     )
                     try:
-                        await message.answer(
+                        sent_msg = await message.answer(
                             user_message,
                             reply_markup=join_keyboard,
                             parse_mode="HTML",
                             disable_web_page_preview=True,
                         )
+                        mid = getattr(sent_msg, "message_id", None)
+                        if isinstance(mid, int):
+                            async with get_session() as session:
+                                u_save = await session.get(User, telegram_user.id)
+                                if u_save:
+                                    u_save.last_invite_msg_id = mid
+                                    session.add(u_save)
+                                    await session.commit()
                     except Exception as e:
                         logger.warning(f"Could not send auto-approve invite DM to User {telegram_user.id}: {e}")
                 else:

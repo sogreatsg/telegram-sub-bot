@@ -424,10 +424,10 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
 
     trial_min = config.TRIAL_DURATION_MINUTES
     trial_message = (
-        f"🎉 <b>ลิงก์ทดลองใช้งานฟรี {trial_min} นาทีของคุณพร้อมแล้ว!</b>\n\n"
-        f"🔗 <b>ลิงก์เชิญส่วนตัวสำหรับ {target_channel_label} (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
+        f"🎉 <b>สิทธิ์ทดลองใช้งานฟรี {trial_min} นาทีของคุณพร้อมแล้ว!</b>\n\n"
+        f"ห้องสำหรับทดลองใช้งาน: <b>{target_channel_label}</b>\n\n"
         "⚠️ <b>ข้อควรทราบสำคัญ:</b>\n"
-        "• ลิงก์นี้สามารถใช้งานได้เพียง 1 ครั้งเท่านั้น\n"
+        "• สามารถกดปุ่มเข้าร่วมได้เพียง 1 ครั้งเท่านั้น\n"
         f"• <b>ระบบจะเริ่มนับถอยหลัง {trial_min} นาทีทันทีที่คุณกดเข้าร่วม Channel</b>\n"
         f"• เมื่อครบกำหนด {trial_min} นาที ระบบจะนำคุณออกจาก Channel อัตโนมัติ\n\n"
         "กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ!"
@@ -447,6 +447,14 @@ async def handle_trial_request(callback: CallbackQuery, bot: Bot, state: FSMCont
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
+        mid = getattr(callback.message, "message_id", None)
+        if isinstance(mid, int):
+            async with get_session() as session:
+                u_save = await session.get(User, user_id)
+                if u_save:
+                    u_save.last_invite_msg_id = mid
+                    session.add(u_save)
+                    await session.commit()
     await callback.answer()
 
 

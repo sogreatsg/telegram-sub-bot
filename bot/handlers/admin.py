@@ -415,9 +415,9 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 "🎉 <b>การชำระเงินได้รับการอนุมัติเรียบร้อยแล้ว!</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 f"📦 <b>แพ็กเกจ:</b> <b>{plan_badge} ({plan_desc})</b> พร้อมใช้งานแล้วครับ\n\n"
-                f"🔗 <b>ลิงก์เชิญเข้า {target_channel_label} (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
+                f"📢 <b>ห้องสำหรับสมาชิก:</b> <b>{target_channel_label}</b>\n\n"
                 "📌 <b>ข้อควรทราบ:</b>\n"
-                "• ลิงก์นี้สามารถใช้งานได้เพียง 1 ครั้งเท่านั้น\n"
+                "• สามารถกดปุ่มเข้าร่วมได้เพียง 1 ครั้งเท่านั้น\n"
                 f"• <b>ระยะเวลาสมาชิก {plan_desc} จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 "กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ! 🚀"
@@ -428,14 +428,21 @@ async def handle_admin_approve(callback: CallbackQuery, bot: Bot):
                 ]
             )
             try:
-                await bot.send_message(
+                sent_msg = await bot.send_message(
                     chat_id=target_user_id,
                     text=user_message,
                     reply_markup=join_keyboard,
                     parse_mode="HTML",
                     disable_web_page_preview=True,
                 )
-                user_dm_sent = True
+                mid = getattr(sent_msg, "message_id", None)
+                if isinstance(mid, int):
+                    async with get_session() as session:
+                        u_save = await session.get(User, target_user_id)
+                        if u_save:
+                            u_save.last_invite_msg_id = mid
+                            session.add(u_save)
+                            await session.commit()
             except Exception as e:
                 logger.warning(f"Could not send approval DM to User ID={target_user_id}: {e}")
 
@@ -1926,8 +1933,9 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
         else:
             dm_text = (
                 f"🎉 <b>คุณได้รับสิทธิ์สมาชิก VIP ({duration_label}) จากแอดมินเรียบร้อยแล้ว!</b>\n\n"
+                f"📢 <b>ห้องสำหรับสมาชิก:</b> <b>{target_channel_label}</b>\n"
                 f"⏳ <b>หมดอายุวันที่:</b> <code>{exp_thai} น.</code>\n\n"
-                f"🔗 <b>ลิงก์เข้าร่วม {target_channel_label}:</b>\n{invite_url}"
+                "📌 <i>กดปุ่มด้านล่างเพื่อเข้าร่วมห้องได้เลยครับ (ใช้ได้ครั้งเดียว) 🚀</i>"
             )
 
         dm_kb = InlineKeyboardMarkup(
@@ -1936,12 +1944,20 @@ async def handle_admin_add_vip_command(message: Message, bot: Bot):
             ]
         ) if (invite_url and invite_url != "-") else None
 
-        await bot.send_message(
+        sent_msg = await bot.send_message(
             chat_id=target_uid,
             text=dm_text,
             reply_markup=dm_kb,
             parse_mode="HTML",
         )
+        mid = getattr(sent_msg, "message_id", None)
+        if dm_kb and isinstance(mid, int):
+            async with get_session() as session:
+                u_save = await session.get(User, target_uid)
+                if u_save:
+                    u_save.last_invite_msg_id = mid
+                    session.add(u_save)
+                    await session.commit()
     except Exception:
         pass
 
@@ -2352,9 +2368,8 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
     user_move_text = (
         f"🎉 <b>คุณได้รับคำเชิญให้ย้ายเข้าสู่ {target_channel_title}!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"แอดมินได้ส่งลิงก์เชิญพิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่ (<b>{target_channel_title}</b>) เรียบร้อยแล้วครับ 🚀\n\n"
-        f"🔗 <b>ลิงก์เชิญส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
-        f"⏳ <b>ลิงก์หมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
+        f"แอดมินได้ส่งสิทธิ์พิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่ (<b>{target_channel_title}</b>) เรียบร้อยแล้วครับ 🚀\n\n"
+        f"⏳ <b>ปุ่มหมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📌 <i>ข้อควรทราบ: สิทธิ์และเวลาสมาชิกของคุณจะทำงานอย่างต่อเนื่องเหมือนเดิม กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ!</i>"
     )
@@ -2366,7 +2381,7 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
     )
 
     try:
-        await bot.send_message(
+        sent_msg = await bot.send_message(
             chat_id=target_uid,
             text=user_move_text,
             reply_markup=join_kb,
@@ -2374,6 +2389,14 @@ async def handle_admin_move_user_command(message: Message, bot: Bot):
             disable_web_page_preview=True,
         )
         user_dm_sent = True
+        mid = getattr(sent_msg, "message_id", None)
+        if isinstance(mid, int):
+            async with get_session() as session:
+                u_save = await session.get(User, target_uid)
+                if u_save:
+                    u_save.last_invite_msg_id = mid
+                    session.add(u_save)
+                    await session.commit()
     except Exception as e:
         logger.warning(f"Could not send move DM to User {target_uid}: {e}")
 
@@ -2504,9 +2527,8 @@ async def handle_admin_move_user_v3_command(message: Message, bot: Bot):
     user_move_text = (
         f"🎉 <b>คุณได้รับคำเชิญให้ย้ายเข้าสู่ {target_channel_title}!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"แอดมินได้ส่งลิงก์เชิญพิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่ (<b>{target_channel_title}</b>) เรียบร้อยแล้วครับ 🚀\n\n"
-        f"🔗 <b>ลิงก์เชิญส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
-        f"⏳ <b>ลิงก์หมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
+        f"แอดมินได้ส่งสิทธิ์พิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่ (<b>{target_channel_title}</b>) เรียบร้อยแล้วครับ 🚀\n\n"
+        f"⏳ <b>ปุ่มหมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📌 <i>ข้อควรทราบ: สิทธิ์และเวลาสมาชิกของคุณจะทำงานอย่างต่อเนื่องเหมือนเดิม กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ!</i>"
     )
@@ -2518,7 +2540,7 @@ async def handle_admin_move_user_v3_command(message: Message, bot: Bot):
     )
 
     try:
-        await bot.send_message(
+        sent_msg = await bot.send_message(
             chat_id=target_uid,
             text=user_move_text,
             reply_markup=join_kb,
@@ -2526,6 +2548,14 @@ async def handle_admin_move_user_v3_command(message: Message, bot: Bot):
             disable_web_page_preview=True,
         )
         user_dm_sent = True
+        mid = getattr(sent_msg, "message_id", None)
+        if isinstance(mid, int):
+            async with get_session() as session:
+                u_save = await session.get(User, target_uid)
+                if u_save:
+                    u_save.last_invite_msg_id = mid
+                    session.add(u_save)
+                    await session.commit()
     except Exception as e:
         logger.warning(f"Could not send move DM to User {target_uid}: {e}")
 
@@ -3803,9 +3833,8 @@ async def handle_admin_quick_move_v3_callback(callback: CallbackQuery, bot: Bot)
     user_move_text = (
         f"🎉 <b>คุณได้รับคำเชิญให้ย้ายเข้าสู่ {target_channel_title}!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"แอดมินได้ส่งลิงก์เชิญพิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่ (<b>{target_channel_title}</b>) เรียบร้อยแล้วครับ 🚀\n\n"
-        f"🔗 <b>ลิงก์เชิญส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
-        f"⏳ <b>ลิงก์หมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
+        f"แอดมินได้ส่งสิทธิ์พิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่ (<b>{target_channel_title}</b>) เรียบร้อยแล้วครับ 🚀\n\n"
+        f"⏳ <b>ปุ่มหมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📌 <i>ข้อควรทราบ: สิทธิ์และเวลาสมาชิกของคุณจะทำงานอย่างต่อเนื่องเหมือนเดิม กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ!</i>"
     )
@@ -3817,7 +3846,7 @@ async def handle_admin_quick_move_v3_callback(callback: CallbackQuery, bot: Bot)
     )
 
     try:
-        await bot.send_message(
+        sent_msg = await bot.send_message(
             chat_id=target_uid,
             text=user_move_text,
             reply_markup=join_kb,
@@ -3825,6 +3854,14 @@ async def handle_admin_quick_move_v3_callback(callback: CallbackQuery, bot: Bot)
             disable_web_page_preview=True,
         )
         user_dm_sent = True
+        mid = getattr(sent_msg, "message_id", None)
+        if isinstance(mid, int):
+            async with get_session() as session:
+                u_save = await session.get(User, target_uid)
+                if u_save:
+                    u_save.last_invite_msg_id = mid
+                    session.add(u_save)
+                    await session.commit()
     except Exception as e:
         logger.warning(f"Could not send move DM to User {target_uid}: {e}")
 
@@ -3934,9 +3971,8 @@ async def handle_admin_quick_move_callback(callback: CallbackQuery, bot: Bot):
     user_move_text = (
         f"🎉 <b>คุณได้รับคำเชิญให้ย้ายเข้าสู่ {target_channel_title}!</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"แอดมินได้ส่งลิงก์เชิญพิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่ (<b>{target_channel_title}</b>) เรียบร้อยแล้วครับ 🚀\n\n"
-        f"🔗 <b>ลิงก์เชิญส่วนตัว (ใช้ได้ครั้งเดียว):</b>\n<code>{invite_url}</code>\n\n"
-        f"⏳ <b>ลิงก์หมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
+        f"แอดมินได้ส่งสิทธิ์พิเศษสำหรับคุณ เพื่อเข้าร่วม Channel VIP ห้องใหม่ (<b>{target_channel_title}</b>) เรียบร้อยแล้วครับ 🚀\n\n"
+        f"⏳ <b>ปุ่มหมดอายุวันที่:</b> <code>{expire_thai} น.</code> (มีอายุ 7 วัน)\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📌 <i>ข้อควรทราบ: สิทธิ์และเวลาสมาชิกของคุณจะทำงานอย่างต่อเนื่องเหมือนเดิม กดปุ่มด้านล่างเพื่อเข้าร่วมได้เลยครับ!</i>"
     )
@@ -3948,7 +3984,7 @@ async def handle_admin_quick_move_callback(callback: CallbackQuery, bot: Bot):
     )
 
     try:
-        await bot.send_message(
+        sent_msg = await bot.send_message(
             chat_id=target_uid,
             text=user_move_text,
             reply_markup=join_kb,
@@ -3956,6 +3992,14 @@ async def handle_admin_quick_move_callback(callback: CallbackQuery, bot: Bot):
             disable_web_page_preview=True,
         )
         user_dm_sent = True
+        mid = getattr(sent_msg, "message_id", None)
+        if isinstance(mid, int):
+            async with get_session() as session:
+                u_save = await session.get(User, target_uid)
+                if u_save:
+                    u_save.last_invite_msg_id = mid
+                    session.add(u_save)
+                    await session.commit()
     except Exception as e:
         logger.warning(f"Could not send move DM to User {target_uid}: {e}")
 

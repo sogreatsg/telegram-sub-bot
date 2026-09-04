@@ -183,6 +183,7 @@ class User(Base):
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     blocked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     blocked_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    last_invite_msg_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False, index=True
     )

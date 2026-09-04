@@ -11,9 +11,12 @@ logger = logging.getLogger(__name__)
 config = get_settings()
 
 
-def _normalize_chat_id(chat_id: int | str) -> str:
+def normalize_chat_id(chat_id: int | str) -> str:
     """แปลง chat_id เป็น string ที่ตัด prefix -100 หรือ - ออก เพื่อให้เปรียบเทียบข้ามรูปแบบได้เสมอ"""
     return str(chat_id).replace("-100", "").replace("-", "").strip()
+
+
+_normalize_chat_id = normalize_chat_id
 
 
 def is_target_channel(chat_id: int | str) -> bool:

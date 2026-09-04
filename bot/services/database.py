@@ -322,6 +322,10 @@ async def init_db() -> None:
             except Exception:
                 pass
             try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN last_invite_msg_id BIGINT;"))
+            except Exception:
+                pass
+            try:
                 await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_created_at ON users (created_at DESC);"))
             except Exception:
                 pass

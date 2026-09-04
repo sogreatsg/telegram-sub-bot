@@ -6,6 +6,7 @@ import urllib.parse
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 from aiogram import Bot
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select
 
 from bot.config import get_settings
@@ -180,20 +181,38 @@ async def award_referral_bonus(bot: Bot, referrer_id: int, friend_user: User) ->
             )
         else:
             bonus_total_days = grant.subscription.pending_days or referrer.referral_bonus_days or 1
-            link_info = f"\n🔗 <b>ลิงก์เข้า {target_channel_label} ของคุณ:</b>\n{invite_url}\n\n⏱️ <i>เวลานับถอยหลัง {bonus_total_days} วัน จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</i>" if invite_url else ""
             dm_text = (
                 "🎉 <b>ยินดีด้วย! เพื่อนที่คุณแนะนำได้เข้าร่วมทดลองใช้งานแล้ว</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
                 f"👤 <b>เพื่อน:</b> {friend_name} ({friend_handle})\n"
-                f"🎁 คุณได้รับสิทธิ์ <b>VIP โบนัสสะสมรวม {bonus_total_days} วัน</b> เรียบร้อยแล้ว!\n"
-                f"{link_info}\n"
+                f"🎁 คุณได้รับสิทธิ์ <b>VIP โบนัสสะสมรวม {bonus_total_days} วัน</b> เรียบร้อยแล้ว!\n\n"
+                f"📢 <b>ห้องสำหรับสมาชิก:</b> <b>{target_channel_label}</b>\n"
+                f"⏱️ <i>เวลานับถอยหลัง {bonus_total_days} วัน จะเริ่มนับทันทีที่คุณกดเข้าร่วม Channel</i>\n\n"
                 f"👥 <b>ชวนเพื่อนสำเร็จสะสม:</b> <b>{referrer.referral_count} คน</b>\n"
                 f"🏆 <b>โบนัสสะสมทั้งหมด:</b> <b>{bonus_total_days} วัน</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━\n"
-                "💡 <i>ชวนเพื่อนเพิ่มเพื่อสะสมวันใช้งานฟรีได้เรื่อยๆ ครับ!</i>"
+                "💡 <i>กดปุ่มด้านล่างเพื่อเข้าร่วม Channel และเริ่มใช้งานได้เลยครับ (ใช้ได้ครั้งเดียว) 🚀</i>"
             )
+            dm_kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text=f"🚀 เข้าร่วม {target_channel_label} ตอนนี้", url=invite_url)]
+                ]
+            ) if invite_url else None
 
-        await bot.send_message(chat_id=referrer_id, text=dm_text, parse_mode="HTML")
+        sent_msg = await bot.send_message(
+            chat_id=referrer_id,
+            text=dm_text,
+            reply_markup=dm_kb,
+            parse_mode="HTML",
+        )
+        mid = getattr(sent_msg, "message_id", None)
+        if dm_kb and isinstance(mid, int):
+            async with get_session() as session:
+                u_save = await session.get(User, referrer_id)
+                if u_save:
+                    u_save.last_invite_msg_id = mid
+                    session.add(u_save)
+                    await session.commit()
         await log_chat_message(user_id=referrer_id, sender_role="BOT", message_text=f"[ระบบมอบโบนัสชวนเพื่อน +1 วัน จาก {friend_name}]")
     except Exception as e:
         logger.warning(f"Could not send referral bonus DM to referrer {referrer_id}: {e}")
