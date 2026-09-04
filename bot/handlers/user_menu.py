@@ -215,7 +215,6 @@ async def handle_start(message: Message, state: FSMContext, bot: Optional[Bot] =
         admin_start_alert = (
             "🚀 <b>มีผู้ใช้กดคำสั่ง /start!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"📣 <b>แท็กแอดมิน:</b> {config.ADMIN_MENTION}\n"
             f"👤 <b>ผู้ใช้:</b> {user_name} ({user_handle})\n"
             f"🔢 <b>User ID:</b> <code>{telegram_user.id}</code>\n"
             f"📌 <b>ห้องสมาชิก:</b> <code>{room_label}</code>\n"
